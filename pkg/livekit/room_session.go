@@ -110,13 +110,18 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 		rs.handleTrackSubscribed(track, rp)
 	}
 
-	token := rs.token
-	if token == "" {
+	var token string
+	if rs.apiKey != "" && rs.apiSecret != "" {
 		generated, err := rs.generateRoomToken()
 		if err != nil {
 			return err
 		}
 		token = generated
+	} else {
+		token = rs.token
+		if token == "" {
+			return errors.New("room token is empty and no api key/secret available")
+		}
 	}
 
 	room, err := lksdk.ConnectToRoomWithToken(rs.serverURL, token, cb)
