@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -75,6 +76,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		if err != nil {
+			logger.WarnCF("livekit", "Worker disconnected; retrying", map[string]any{
+				"error":   err.Error(),
+				"backoff": backoff.String(),
+			})
 			time.Sleep(backoff)
 			if backoff < 30*time.Second {
 				backoff *= 2
@@ -104,6 +109,9 @@ func (w *Worker) runOnce(ctx context.Context) error {
 		return err
 	}
 	w.conn = conn
+	logger.InfoCF("livekit", "Connected to LiveKit agent endpoint", map[string]any{
+		"ws_url": wsURL,
+	})
 
 	if err := w.sendRegister(); err != nil {
 		_ = conn.Close()
@@ -134,6 +142,10 @@ func (w *Worker) handleServerMessage(ctx context.Context, msg *livekit.ServerMes
 	case *livekit.ServerMessage_Register:
 		if m.Register != nil {
 			w.workerID = m.Register.WorkerId
+			logger.InfoCF("livekit", "Worker registered", map[string]any{
+				"worker_id": w.workerID,
+				"agent":     w.agentName,
+			})
 		}
 	case *livekit.ServerMessage_Availability:
 		w.handleAvailability(m.Availability)
@@ -152,6 +164,10 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 	if req == nil || req.Job == nil {
 		return
 	}
+	logger.DebugCF("livekit", "Availability request", map[string]any{
+		"job_id": req.Job.Id,
+		"room":   jobRoomName(req.Job),
+	})
 	resp := &livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_Availability{
 			Availability: &livekit.AvailabilityResponse{
@@ -168,6 +184,10 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 		return
 	}
 	job := assignment.Job
+	logger.InfoCF("livekit", "Job assignment received", map[string]any{
+		"job_id": job.Id,
+		"room":   jobRoomName(job),
+	})
 
 	if w.skipRoomJoin {
 		w.mu.Lock()
@@ -197,9 +217,18 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 
 	go func() {
 		if err := session.Join(ctx); err != nil {
+			logger.ErrorCF("livekit", "Room join failed", map[string]any{
+				"job_id": job.Id,
+				"room":   jobRoomName(job),
+				"error":  err.Error(),
+			})
 			w.updateJobStatus(job.Id, livekit.JobStatus_JS_FAILED)
 			return
 		}
+		logger.InfoCF("livekit", "Room session running", map[string]any{
+			"job_id": job.Id,
+			"room":   jobRoomName(job),
+		})
 		w.updateJobStatus(job.Id, livekit.JobStatus_JS_RUNNING)
 	}()
 }
@@ -208,6 +237,9 @@ func (w *Worker) handleTermination(term *livekit.JobTermination) {
 	if term == nil {
 		return
 	}
+	logger.InfoCF("livekit", "Job termination", map[string]any{
+		"job_id": term.JobId,
+	})
 	w.mu.Lock()
 	session, ok := w.jobs[term.JobId]
 	delete(w.jobs, term.JobId)
@@ -234,6 +266,9 @@ func (w *Worker) sendRegister() error {
 	if w.agentName == "" {
 		return errors.New("agent name is required")
 	}
+	logger.InfoCF("livekit", "Registering worker", map[string]any{
+		"agent": w.agentName,
+	})
 	msg := &livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_Register{
 			Register: &livekit.RegisterWorkerRequest{
@@ -345,4 +380,11 @@ func agentWebsocketURL(serverURL string) (string, error) {
 	u.Path = path
 
 	return u.String(), nil
+}
+
+func jobRoomName(job *livekit.Job) string {
+	if job == nil || job.Room == nil {
+		return ""
+	}
+	return job.Room.Name
 }

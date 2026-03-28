@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/livekit"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
@@ -23,6 +24,7 @@ import (
 func main() {
 	agentName := flag.String("agent-name", "", "LiveKit named agent identifier (required)")
 	configPath := flag.String("config", "", "Path to config.json (default: ~/.picoclaw/config.json)")
+	logLevel := flag.String("log-level", "info", "Log level (debug, info, warn, error)")
 	flag.Parse()
 
 	if strings.TrimSpace(*agentName) == "" {
@@ -41,6 +43,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	logger.SetLevelFromString(*logLevel)
 
 	provider, modelID, err := providers.CreateProvider(cfg)
 	if err != nil {
@@ -125,6 +128,12 @@ func main() {
 		},
 	}
 	worker = livekit.NewWorker(workerCfg)
+
+	logger.InfoCF("livekit", "Starting LiveKit worker", map[string]any{
+		"agent_name": *agentName,
+		"server_url": lkCfg.ServerURL,
+		"log_level":  *logLevel,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

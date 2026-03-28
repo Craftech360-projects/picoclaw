@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/livekit/media-sdk"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
 )
@@ -100,6 +101,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 				if ap.session != nil && ap.session.participant != nil {
 					ap.session.participant.speaking.Store(true)
 				}
+				logger.DebugCF("livekit", "Speech start", map[string]any{
+					"session": ap.sessionKey(),
+				})
 				ap.cancelTTS()
 			}
 
@@ -119,6 +123,10 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 				if text == "" {
 					continue
 				}
+				logger.DebugCF("livekit", "Speech end", map[string]any{
+					"session": ap.sessionKey(),
+					"text":    text,
+				})
 
 				sessionKey := ap.sessionKey()
 				if sessionKey == "" {
@@ -141,8 +149,16 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	if ap.tts == nil || ap.session == nil || ap.session.localTrack == nil {
 		return
 	}
+	logger.DebugCF("livekit", "TTS start", map[string]any{
+		"session": ap.sessionKey(),
+		"text":    text,
+	})
 	stream, err := ap.tts.Synthesize(ctx, text)
 	if err != nil {
+		logger.ErrorCF("livekit", "TTS synthesize failed", map[string]any{
+			"session": ap.sessionKey(),
+			"error":   err.Error(),
+		})
 		return
 	}
 	defer stream.Close()

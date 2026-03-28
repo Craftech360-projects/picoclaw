@@ -124,6 +124,11 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 		return err
 	}
 	rs.room = room
+	logger.InfoCF("livekit", "Joined room", map[string]any{
+		"room":      rs.roomInfo.Name,
+		"job_id":    rs.jobID,
+		"serverURL": rs.serverURL,
+	})
 
 	if rs.sampleRate == 0 {
 		rs.sampleRate = 24000
@@ -140,6 +145,10 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	logger.InfoCF("livekit", "Published local TTS track", map[string]any{
+		"room":   rs.roomInfo.Name,
+		"job_id": rs.jobID,
+	})
 
 	return nil
 }
@@ -180,6 +189,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	if track.Kind() != webrtc.RTPCodecTypeAudio {
 		return
 	}
+	logger.InfoCF("livekit", "Audio track subscribed", map[string]any{
+		"room":        rs.roomInfo.Name,
+		"participant": rp.Identity(),
+	})
 
 	rs.mu.Lock()
 	if rs.participant != nil {
@@ -204,6 +217,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		logger.ErrorCF("livekit", "Deepgram stream error", map[string]any{"error": err.Error()})
 		return
 	}
+	logger.InfoCF("livekit", "Deepgram stream opened", map[string]any{
+		"room":        rs.roomInfo.Name,
+		"participant": rp.Identity(),
+	})
 
 	writer := &deepgramWriter{stream: stream}
 	pcmTrack, err := lkmedia.NewPCMRemoteTrack(track, writer, lkmedia.WithTargetSampleRate(16000), lkmedia.WithTargetChannels(1))
@@ -243,6 +260,10 @@ func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant
 		participant.ttsCancel()
 	}
 	participant.mu.Unlock()
+	logger.InfoCF("livekit", "Participant disconnected", map[string]any{
+		"room":        rs.roomInfo.Name,
+		"participant": rp.Identity(),
+	})
 }
 
 func (rs *RoomSession) generateRoomToken() (string, error) {

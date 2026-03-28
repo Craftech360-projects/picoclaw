@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -89,6 +90,10 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 	}
 
 	for iteration := 0; iteration < ab.maxIterations; iteration++ {
+		logger.DebugCF("livekit", "AgentBridge iteration", map[string]any{
+			"iteration": iteration + 1,
+			"session":   sessionKey,
+		})
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -131,6 +136,10 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 		if len(normalized) == 0 {
 			break
 		}
+		logger.InfoCF("livekit", "Tool calls requested", map[string]any{
+			"count":   len(normalized),
+			"session": sessionKey,
+		})
 
 		for _, tc := range normalized {
 			result := ab.executeTool(ctx, sessionKey, tc)
