@@ -146,6 +146,14 @@ build-launcher-tui:
 	@ln -sf picoclaw-launcher-tui-$(PLATFORM)-$(ARCH) $(BUILD_DIR)/picoclaw-launcher-tui
 	@echo "Build complete: $(BUILD_DIR)/picoclaw-launcher-tui"
 
+## build-livekit: Build the picoclaw-livekit (LiveKit voice agent worker) binary
+build-livekit:
+	@echo "Building picoclaw-livekit for $(PLATFORM)/$(ARCH)..."
+	@mkdir -p $(BUILD_DIR)
+	@$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/picoclaw-livekit-$(PLATFORM)-$(ARCH) ./cmd/picoclaw-livekit
+	@ln -sf picoclaw-livekit-$(PLATFORM)-$(ARCH) $(BUILD_DIR)/picoclaw-livekit
+	@echo "Build complete: $(BUILD_DIR)/picoclaw-livekit"
+
 ## build-whatsapp-native: Build with WhatsApp native (whatsmeow) support; larger binary
 build-whatsapp-native: generate
 ## @echo "Building $(BINARY_NAME) with WhatsApp native for $(PLATFORM)/$(ARCH)..."

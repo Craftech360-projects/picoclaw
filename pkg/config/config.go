@@ -96,6 +96,7 @@ type Config struct {
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
 	Voice     VoiceConfig     `json:"voice"`
+	LiveKitService LiveKitServiceConfig `json:"livekit_service" envPrefix:"PICOCLAW_LIVEKIT_"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty"`
 
@@ -838,6 +839,31 @@ type VoiceConfig struct {
 	ElevenLabsAPIKey  string `json:"elevenlabs_api_key,omitempty" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
 }
 
+// LiveKitServiceTTSConfig configures TTS for the LiveKit voice agent.
+type LiveKitServiceTTSConfig struct {
+	VoiceID      string `json:"voice_id"      env:"PICOCLAW_LIVEKIT_TTS_VOICE_ID"`
+	ModelID      string `json:"model_id"      env:"PICOCLAW_LIVEKIT_TTS_MODEL_ID"`
+	OutputFormat string `json:"output_format" env:"PICOCLAW_LIVEKIT_TTS_OUTPUT_FORMAT"`
+}
+
+// LiveKitServiceConfig configures the standalone LiveKit voice agent service.
+type LiveKitServiceConfig struct {
+	ServerURL string                  `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
+	TTS       LiveKitServiceTTSConfig `json:"tts"`
+
+	apiKey         string
+	apiSecret      string
+	deepgramAPIKey string
+	secDirty       bool
+}
+
+func (c *LiveKitServiceConfig) APIKey() string             { return c.apiKey }
+func (c *LiveKitServiceConfig) APISecret() string          { return c.apiSecret }
+func (c *LiveKitServiceConfig) DeepgramAPIKey() string     { return c.deepgramAPIKey }
+func (c *LiveKitServiceConfig) SetAPIKey(k string)         { c.apiKey = k; c.secDirty = true }
+func (c *LiveKitServiceConfig) SetAPISecret(s string)      { c.apiSecret = s; c.secDirty = true }
+func (c *LiveKitServiceConfig) SetDeepgramAPIKey(k string) { c.deepgramAPIKey = k; c.secDirty = true }
+
 // ModelConfig represents a model-centric provider configuration.
 // It allows adding new providers (especially OpenAI-compatible ones) via configuration only.
 // The model field uses protocol prefix format: [protocol/]model-identifier
@@ -1578,6 +1604,18 @@ func applySecurityConfig(cfg *Config, sec *SecurityConfig) error {
 		}
 	}
 
+	if sec.LiveKitService != nil {
+		if sec.LiveKitService.APIKey != "" {
+			cfg.LiveKitService.SetAPIKey(sec.LiveKitService.APIKey)
+		}
+		if sec.LiveKitService.APISecret != "" {
+			cfg.LiveKitService.SetAPISecret(sec.LiveKitService.APISecret)
+		}
+		if sec.LiveKitService.DeepgramAPIKey != "" {
+			cfg.LiveKitService.SetDeepgramAPIKey(sec.LiveKitService.DeepgramAPIKey)
+		}
+	}
+
 	cfg.security = sec
 
 	return nil
@@ -1799,6 +1837,14 @@ func SaveConfig(path string, cfg *Config) error {
 			Secret: cfg.Channels.WeCom.Secret(),
 		}
 		cfg.Channels.WeCom.secDirty = false
+	}
+	if cfg.LiveKitService.secDirty {
+		cfg.security.LiveKitService = &LiveKitServiceSecurity{
+			APIKey:         cfg.LiveKitService.APIKey(),
+			APISecret:      cfg.LiveKitService.APISecret(),
+			DeepgramAPIKey: cfg.LiveKitService.DeepgramAPIKey(),
+		}
+		cfg.LiveKitService.secDirty = false
 	}
 	if cfg.Tools.Web.Brave.secDirty {
 		cfg.security.Web.Brave = &BraveSecurity{

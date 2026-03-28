@@ -55,6 +55,9 @@ type SecurityConfig struct {
 	// Channel tokens/secrets
 	Channels *ChannelsSecurity `yaml:"channels,omitempty"`
 
+	// LiveKit standalone worker credentials
+	LiveKitService *LiveKitServiceSecurity `yaml:"livekit_service,omitempty"`
+
 	Web    *WebToolsSecurity `yaml:"web,omitempty"`
 	Skills *SkillsSecurity   `yaml:"skills,omitempty"`
 
@@ -140,6 +143,12 @@ type IRCSecurity struct {
 	Password         string `yaml:"password,omitempty"          env:"PICOCLAW_CHANNELS_IRC_PASSWORD"`
 	NickServPassword string `yaml:"nickserv_password,omitempty" env:"PICOCLAW_CHANNELS_IRC_NICKSERV_PASSWORD"`
 	SASLPassword     string `yaml:"sasl_password,omitempty"     env:"PICOCLAW_CHANNELS_IRC_SASL_PASSWORD"`
+}
+
+type LiveKitServiceSecurity struct {
+	APIKey         string `yaml:"api_key,omitempty"          env:"PICOCLAW_LIVEKIT_API_KEY"`
+	APISecret      string `yaml:"api_secret,omitempty"       env:"PICOCLAW_LIVEKIT_API_SECRET"`
+	DeepgramAPIKey string `yaml:"deepgram_api_key,omitempty" env:"PICOCLAW_LIVEKIT_DEEPGRAM_API_KEY"`
 }
 
 type WebToolsSecurity struct {
@@ -260,6 +269,18 @@ func mergeSecurityConfig(existing, newer *SecurityConfig) *SecurityConfig {
 			result.Channels = &ChannelsSecurity{}
 		}
 		mergeChannelsSecurity(result.Channels, newer.Channels)
+	}
+
+	// Merge LiveKitService
+	if existing.LiveKitService != nil {
+		result.LiveKitService = existing.LiveKitService
+	}
+	if newer.LiveKitService != nil {
+		if newer.LiveKitService.APIKey != "" ||
+			newer.LiveKitService.APISecret != "" ||
+			newer.LiveKitService.DeepgramAPIKey != "" {
+			result.LiveKitService = newer.LiveKitService
+		}
 	}
 
 	// Merge Web

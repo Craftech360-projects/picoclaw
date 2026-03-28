@@ -513,6 +513,14 @@ func DefaultConfig() *Config {
 			ModelName:         "",
 			EchoTranscription: false,
 		},
+		LiveKitService: LiveKitServiceConfig{
+			ServerURL: "",
+			TTS: LiveKitServiceTTSConfig{
+				VoiceID:      "",
+				ModelID:      "",
+				OutputFormat: "pcm_24000",
+			},
+		},
 		BuildInfo: BuildInfo{
 			Version:   Version,
 			GitCommit: GitCommit,
