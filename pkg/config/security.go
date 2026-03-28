@@ -149,6 +149,8 @@ type LiveKitServiceSecurity struct {
 	APIKey         string `yaml:"api_key,omitempty"          env:"PICOCLAW_LIVEKIT_API_KEY"`
 	APISecret      string `yaml:"api_secret,omitempty"       env:"PICOCLAW_LIVEKIT_API_SECRET"`
 	DeepgramAPIKey string `yaml:"deepgram_api_key,omitempty" env:"PICOCLAW_LIVEKIT_DEEPGRAM_API_KEY"`
+	InworldAPIKey  string `yaml:"inworld_api_key,omitempty"  env:"PICOCLAW_LIVEKIT_INWORLD_API_KEY"`
+	CartesiaAPIKey string `yaml:"cartesia_api_key,omitempty" env:"PICOCLAW_LIVEKIT_CARTESIA_API_KEY"`
 }
 
 type WebToolsSecurity struct {
@@ -278,7 +280,9 @@ func mergeSecurityConfig(existing, newer *SecurityConfig) *SecurityConfig {
 	if newer.LiveKitService != nil {
 		if newer.LiveKitService.APIKey != "" ||
 			newer.LiveKitService.APISecret != "" ||
-			newer.LiveKitService.DeepgramAPIKey != "" {
+			newer.LiveKitService.DeepgramAPIKey != "" ||
+			newer.LiveKitService.InworldAPIKey != "" ||
+			newer.LiveKitService.CartesiaAPIKey != "" {
 			result.LiveKitService = newer.LiveKitService
 		}
 	}

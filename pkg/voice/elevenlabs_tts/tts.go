@@ -119,5 +119,3 @@ func buildStreamURL(cfg TTSConfig) (string, error) {
 	}
 	return parsed.String(), nil
 }
-
-var _ TTSProvider = (*ElevenLabsTTS)(nil)

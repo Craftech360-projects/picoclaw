@@ -516,6 +516,7 @@ func DefaultConfig() *Config {
 		LiveKitService: LiveKitServiceConfig{
 			ServerURL: "",
 			TTS: LiveKitServiceTTSConfig{
+				Provider:     "elevenlabs",
 				VoiceID:      "",
 				ModelID:      "",
 				OutputFormat: "pcm_24000",

@@ -18,26 +18,27 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
-	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
 // RoomSession manages one agent in one LiveKit room (one job).
 type RoomSession struct {
-	worker      *Worker
-	jobID       string
-	roomInfo    *livekit.Room
-	bridge      *AgentBridge
-	room        *lksdk.Room
-	localTrack  *lkmedia.PCMLocalTrack
-	participant *ParticipantState
-	mu          sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
+	worker        *Worker
+	jobID         string
+	roomInfo      *livekit.Room
+	bridge        *AgentBridge
+	room          *lksdk.Room
+	localTrack    *lkmedia.PCMLocalTrack
+	localTrackSID string
+	participant   *ParticipantState
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
 
 	serverURL  string
 	token      string
 	deepgram   *deepgram.DeepgramTranscriber
-	tts        *elevenlabs_tts.ElevenLabsTTS
+	tts        tts.Provider
 	apiKey     string
 	apiSecret  string
 	agentName  string
@@ -64,7 +65,7 @@ type RoomSessionConfig struct {
 	ServerURL  string
 	Token      string
 	Deepgram   *deepgram.DeepgramTranscriber
-	TTS        *elevenlabs_tts.ElevenLabsTTS
+	TTS        tts.Provider
 	APIKey     string
 	APISecret  string
 	AgentName  string
@@ -144,15 +145,19 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	}
 	rs.localTrack = localTrack
 
-	_, err = room.LocalParticipant.PublishTrack(localTrack, &lksdk.TrackPublicationOptions{
+	pub, err := room.LocalParticipant.PublishTrack(localTrack, &lksdk.TrackPublicationOptions{
 		Name: "picoclaw-tts",
 	})
 	if err != nil {
 		return err
 	}
+	if pub != nil {
+		rs.localTrackSID = pub.SID()
+	}
 	logger.InfoCF("livekit", "Published local TTS track", map[string]any{
-		"room":   rs.roomInfo.Name,
-		"job_id": rs.jobID,
+		"room":      rs.roomInfo.Name,
+		"job_id":    rs.jobID,
+		"track_sid": rs.localTrackSID,
 	})
 
 	return nil
@@ -277,13 +282,17 @@ func (rs *RoomSession) generateRoomToken() (string, error) {
 	}
 	identity := "picoclaw"
 	if rs.agentName != "" {
-		identity = "picoclaw-" + sanitizeIdentity(rs.agentName)
+		identity = sanitizeIdentity(rs.agentName)
 	}
 
 	at := auth.NewAccessToken(rs.apiKey, rs.apiSecret)
 	grant := &auth.VideoGrant{RoomJoin: true, Room: rs.roomInfo.Name}
 	at.SetVideoGrant(grant)
 	at.SetIdentity(identity)
+	at.SetKind(livekit.ParticipantInfo_AGENT)
+	at.SetAttributes(map[string]string{
+		"lk.agent.state": "listening",
+	})
 	return at.ToJWT()
 }
 

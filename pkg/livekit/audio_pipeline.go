@@ -5,12 +5,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/livekit/media-sdk"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
-	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
 // sentenceSplitter accumulates text and emits complete sentences.
@@ -42,10 +44,10 @@ func (s *sentenceSplitter) Flush() string {
 type AudioPipeline struct {
 	session *RoomSession
 	bridge  *AgentBridge
-	tts     *elevenlabs_tts.ElevenLabsTTS
+	tts     tts.Provider
 }
 
-func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts *elevenlabs_tts.ElevenLabsTTS) *AudioPipeline {
+func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider) *AudioPipeline {
 	return &AudioPipeline{
 		session: session,
 		bridge:  bridge,
@@ -104,7 +106,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 				logger.DebugCF("livekit", "Speech start", map[string]any{
 					"session": ap.sessionKey(),
 				})
-				ap.cancelTTS()
+				ap.cancelTTS("speech_start")
 			}
 
 			if evt.IsFinal && evt.Text != "" {
@@ -163,18 +165,46 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	}
 	defer stream.Close()
 
+	logger.DebugCF("livekit", "TTS forward start", map[string]any{
+		"session":   ap.sessionKey(),
+		"track_sid": ap.localTrackSID(),
+	})
+
+	started := time.Now()
+	wroteAudio := false
+	chunksWritten := 0
+	samplesWritten := 0
 	for {
 		select {
 		case <-ctx.Done():
+			logger.WarnCF("livekit", "TTS forward canceled", map[string]any{
+				"session":         ap.sessionKey(),
+				"track_sid":       ap.localTrackSID(),
+				"chunks_written":  chunksWritten,
+				"samples_written": samplesWritten,
+				"duration_ms":     time.Since(started).Milliseconds(),
+			})
 			return
 		default:
 		}
 
 		chunk, err := stream.Read()
 		if err == io.EOF {
+			logger.DebugCF("livekit", "TTS forward complete", map[string]any{
+				"session":         ap.sessionKey(),
+				"track_sid":       ap.localTrackSID(),
+				"chunks_written":  chunksWritten,
+				"samples_written": samplesWritten,
+				"duration_ms":     time.Since(started).Milliseconds(),
+			})
 			return
 		}
 		if err != nil {
+			logger.ErrorCF("livekit", "TTS stream read failed", map[string]any{
+				"session":   ap.sessionKey(),
+				"track_sid": ap.localTrackSID(),
+				"error":     err.Error(),
+			})
 			return
 		}
 		if len(chunk) == 0 {
@@ -185,17 +215,37 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 		if len(samples) == 0 {
 			continue
 		}
-		_ = ap.session.localTrack.WriteSample(samples)
+		if err := ap.session.localTrack.WriteSample(samples); err != nil {
+			logger.ErrorCF("livekit", "TTS write failed", map[string]any{
+				"session": ap.sessionKey(),
+				"error":   err.Error(),
+			})
+			return
+		}
+		chunksWritten++
+		samplesWritten += len(samples)
+		if !wroteAudio {
+			wroteAudio = true
+			minSample, maxSample, avgAbs := sampleStats(samples)
+			logger.DebugCF("livekit", "TTS audio written", map[string]any{
+				"session":      ap.sessionKey(),
+				"sample_count": len(samples),
+				"min_sample":   minSample,
+				"max_sample":   maxSample,
+				"avg_abs":      avgAbs,
+			})
+		}
 	}
 }
 
-func (ap *AudioPipeline) cancelTTS() {
+func (ap *AudioPipeline) cancelTTS(reason string) {
 	if ap.session == nil || ap.session.participant == nil {
 		return
 	}
 	ps := ap.session.participant
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	hadActiveTTS := ps.ttsCancel != nil
 	if ps.ttsCancel != nil {
 		ps.ttsCancel()
 		ps.ttsCancel = nil
@@ -203,6 +253,12 @@ func (ap *AudioPipeline) cancelTTS() {
 	if ap.session.localTrack != nil {
 		ap.session.localTrack.ClearQueue()
 	}
+	logger.DebugCF("livekit", "TTS cancel/clear queue", map[string]any{
+		"session":        ap.sessionKey(),
+		"reason":         reason,
+		"had_active_tts": hadActiveTTS,
+		"track_sid":      ap.localTrackSID(),
+	})
 }
 
 func (ap *AudioPipeline) setTTSCancel(cancel context.CancelFunc) {
@@ -222,6 +278,13 @@ func (ap *AudioPipeline) sessionKey() string {
 	return fmt.Sprintf("livekit:%s:%s", ap.session.roomInfo.Name, ap.session.participant.identity)
 }
 
+func (ap *AudioPipeline) localTrackSID() string {
+	if ap.session == nil {
+		return ""
+	}
+	return ap.session.localTrackSID
+}
+
 func bytesToPCM16(b []byte) media.PCM16Sample {
 	if len(b) < 2 {
 		return nil
@@ -233,4 +296,25 @@ func bytesToPCM16(b []byte) media.PCM16Sample {
 		out[i] = int16(binary.LittleEndian.Uint16(b[off : off+2]))
 	}
 	return out
+}
+
+func sampleStats(samples media.PCM16Sample) (int16, int16, int) {
+	if len(samples) == 0 {
+		return 0, 0, 0
+	}
+
+	minSample := samples[0]
+	maxSample := samples[0]
+	var totalAbs int64
+	for _, sample := range samples {
+		if sample < minSample {
+			minSample = sample
+		}
+		if sample > maxSample {
+			maxSample = sample
+		}
+		totalAbs += int64(math.Abs(float64(sample)))
+	}
+
+	return minSample, maxSample, int(totalAbs / int64(len(samples)))
 }

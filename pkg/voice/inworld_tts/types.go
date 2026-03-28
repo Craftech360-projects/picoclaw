@@ -1,13 +1,14 @@
-package elevenlabs_tts
+package inworld_tts
 
 import "github.com/sipeed/picoclaw/pkg/voice/tts"
 
-// TTSConfig configures ElevenLabs streaming TTS.
+// TTSConfig configures Inworld streaming TTS.
 type TTSConfig struct {
 	APIKey       string
 	VoiceID      string
 	ModelID      string
-	OutputFormat string
+	SampleRateHz int
+	Temperature  float64
 	BaseURL      string
 }
 
@@ -17,4 +18,4 @@ type AudioStream = tts.AudioStream
 // TTSProvider defines a streaming TTS provider.
 type TTSProvider = tts.Provider
 
-var _ tts.Provider = (*ElevenLabsTTS)(nil)
+var _ tts.Provider = (*InworldTTS)(nil)

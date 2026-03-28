@@ -84,18 +84,18 @@ const CurrentVersion = 1
 
 // Config is the current config structure with version support
 type Config struct {
-	Version   int             `json:"version"` // Config schema version for migration
-	Agents    AgentsConfig    `json:"agents"`
-	Bindings  []AgentBinding  `json:"bindings,omitempty"`
-	Session   SessionConfig   `json:"session,omitempty"`
-	Channels  ChannelsConfig  `json:"channels"`
-	ModelList []*ModelConfig  `json:"model_list"` // New model-centric provider configuration
-	Gateway   GatewayConfig   `json:"gateway"`
-	Hooks     HooksConfig     `json:"hooks,omitempty"`
-	Tools     ToolsConfig     `json:"tools"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"`
-	Devices   DevicesConfig   `json:"devices"`
-	Voice     VoiceConfig     `json:"voice"`
+	Version        int                  `json:"version"` // Config schema version for migration
+	Agents         AgentsConfig         `json:"agents"`
+	Bindings       []AgentBinding       `json:"bindings,omitempty"`
+	Session        SessionConfig        `json:"session,omitempty"`
+	Channels       ChannelsConfig       `json:"channels"`
+	ModelList      []*ModelConfig       `json:"model_list"` // New model-centric provider configuration
+	Gateway        GatewayConfig        `json:"gateway"`
+	Hooks          HooksConfig          `json:"hooks,omitempty"`
+	Tools          ToolsConfig          `json:"tools"`
+	Heartbeat      HeartbeatConfig      `json:"heartbeat"`
+	Devices        DevicesConfig        `json:"devices"`
+	Voice          VoiceConfig          `json:"voice"`
 	LiveKitService LiveKitServiceConfig `json:"livekit_service" envPrefix:"PICOCLAW_LIVEKIT_"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty"`
@@ -841,9 +841,12 @@ type VoiceConfig struct {
 
 // LiveKitServiceTTSConfig configures TTS for the LiveKit voice agent.
 type LiveKitServiceTTSConfig struct {
-	VoiceID      string `json:"voice_id"      env:"PICOCLAW_LIVEKIT_TTS_VOICE_ID"`
-	ModelID      string `json:"model_id"      env:"PICOCLAW_LIVEKIT_TTS_MODEL_ID"`
-	OutputFormat string `json:"output_format" env:"PICOCLAW_LIVEKIT_TTS_OUTPUT_FORMAT"`
+	Provider     string  `json:"provider,omitempty"        env:"PICOCLAW_LIVEKIT_TTS_PROVIDER"`
+	VoiceID      string  `json:"voice_id"                   env:"PICOCLAW_LIVEKIT_TTS_VOICE_ID"`
+	ModelID      string  `json:"model_id"                   env:"PICOCLAW_LIVEKIT_TTS_MODEL_ID"`
+	OutputFormat string  `json:"output_format"              env:"PICOCLAW_LIVEKIT_TTS_OUTPUT_FORMAT"`
+	SampleRateHz int     `json:"sample_rate_hz,omitempty"   env:"PICOCLAW_LIVEKIT_TTS_SAMPLE_RATE_HZ"`
+	Temperature  float64 `json:"temperature,omitempty"      env:"PICOCLAW_LIVEKIT_TTS_TEMPERATURE"`
 }
 
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.
@@ -854,6 +857,8 @@ type LiveKitServiceConfig struct {
 	apiKey         string
 	apiSecret      string
 	deepgramAPIKey string
+	inworldAPIKey  string
+	cartesiaAPIKey string
 	secDirty       bool
 }
 
@@ -863,6 +868,10 @@ func (c *LiveKitServiceConfig) DeepgramAPIKey() string     { return c.deepgramAP
 func (c *LiveKitServiceConfig) SetAPIKey(k string)         { c.apiKey = k; c.secDirty = true }
 func (c *LiveKitServiceConfig) SetAPISecret(s string)      { c.apiSecret = s; c.secDirty = true }
 func (c *LiveKitServiceConfig) SetDeepgramAPIKey(k string) { c.deepgramAPIKey = k; c.secDirty = true }
+func (c *LiveKitServiceConfig) InworldAPIKey() string      { return c.inworldAPIKey }
+func (c *LiveKitServiceConfig) SetInworldAPIKey(k string)  { c.inworldAPIKey = k; c.secDirty = true }
+func (c *LiveKitServiceConfig) CartesiaAPIKey() string     { return c.cartesiaAPIKey }
+func (c *LiveKitServiceConfig) SetCartesiaAPIKey(k string) { c.cartesiaAPIKey = k; c.secDirty = true }
 
 // ModelConfig represents a model-centric provider configuration.
 // It allows adding new providers (especially OpenAI-compatible ones) via configuration only.
@@ -1614,6 +1623,12 @@ func applySecurityConfig(cfg *Config, sec *SecurityConfig) error {
 		if sec.LiveKitService.DeepgramAPIKey != "" {
 			cfg.LiveKitService.SetDeepgramAPIKey(sec.LiveKitService.DeepgramAPIKey)
 		}
+		if sec.LiveKitService.InworldAPIKey != "" {
+			cfg.LiveKitService.SetInworldAPIKey(sec.LiveKitService.InworldAPIKey)
+		}
+		if sec.LiveKitService.CartesiaAPIKey != "" {
+			cfg.LiveKitService.SetCartesiaAPIKey(sec.LiveKitService.CartesiaAPIKey)
+		}
 	}
 
 	cfg.security = sec
@@ -1843,6 +1858,8 @@ func SaveConfig(path string, cfg *Config) error {
 			APIKey:         cfg.LiveKitService.APIKey(),
 			APISecret:      cfg.LiveKitService.APISecret(),
 			DeepgramAPIKey: cfg.LiveKitService.DeepgramAPIKey(),
+			InworldAPIKey:  cfg.LiveKitService.InworldAPIKey(),
+			CartesiaAPIKey: cfg.LiveKitService.CartesiaAPIKey(),
 		}
 		cfg.LiveKitService.secDirty = false
 	}

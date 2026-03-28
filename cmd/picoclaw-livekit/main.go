@@ -17,8 +17,11 @@ import (
 	"github.com/sipeed/picoclaw/pkg/livekit"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/voice/cartesia_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/inworld_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
 func main() {
@@ -65,18 +68,18 @@ func main() {
 		dg = deepgram.NewDeepgramTranscriber(lkCfg.DeepgramAPIKey())
 	}
 
-	ttsCfg := elevenlabs_tts.TTSConfig{
-		APIKey:       cfg.Voice.ElevenLabsAPIKey,
-		VoiceID:      lkCfg.TTS.VoiceID,
-		ModelID:      lkCfg.TTS.ModelID,
-		OutputFormat: lkCfg.TTS.OutputFormat,
-	}
-	var tts *elevenlabs_tts.ElevenLabsTTS
-	if strings.TrimSpace(ttsCfg.APIKey) != "" && strings.TrimSpace(ttsCfg.VoiceID) != "" {
-		tts = elevenlabs_tts.NewElevenLabsTTS(ttsCfg)
-	}
-
-	sampleRate := parsePCMOutputSampleRate(ttsCfg.OutputFormat)
+	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
+	ttsProviderName := resolvedTTSProviderName(lkCfg)
+	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
+		"provider":           ttsProviderName,
+		"voice_id":           lkCfg.TTS.VoiceID,
+		"model_id":           lkCfg.TTS.ModelID,
+		"sample_rate_hz":     ttsSampleRate,
+		"has_inworld_key":    strings.TrimSpace(lkCfg.InworldAPIKey()) != "",
+		"has_cartesia_key":   strings.TrimSpace(lkCfg.CartesiaAPIKey()) != "",
+		"has_elevenlabs_key": strings.TrimSpace(cfg.Voice.ElevenLabsAPIKey) != "",
+		"tts_enabled":        ttsProvider != nil,
+	})
 
 	bridgeFactory := func() *livekit.AgentBridge {
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
@@ -119,11 +122,11 @@ func main() {
 				ServerURL:  serverURL,
 				Token:      token,
 				Deepgram:   dg,
-				TTS:        tts,
+				TTS:        ttsProvider,
 				APIKey:     lkCfg.APIKey(),
 				APISecret:  lkCfg.APISecret(),
 				AgentName:  *agentName,
-				SampleRate: sampleRate,
+				SampleRate: ttsSampleRate,
 			})
 		},
 	}
@@ -186,4 +189,71 @@ func parsePCMOutputSampleRate(format string) int {
 		}
 	}
 	return 24000
+}
+
+func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tts.Provider, int) {
+	provider := resolvedTTSProviderName(lkCfg)
+	switch provider {
+	case "", "elevenlabs":
+		ttsCfg := elevenlabs_tts.TTSConfig{
+			APIKey:       cfg.Voice.ElevenLabsAPIKey,
+			VoiceID:      lkCfg.TTS.VoiceID,
+			ModelID:      lkCfg.TTS.ModelID,
+			OutputFormat: lkCfg.TTS.OutputFormat,
+		}
+		var client tts.Provider
+		if strings.TrimSpace(ttsCfg.APIKey) != "" && strings.TrimSpace(ttsCfg.VoiceID) != "" {
+			client = elevenlabs_tts.NewElevenLabsTTS(ttsCfg)
+		}
+		sampleRate := lkCfg.TTS.SampleRateHz
+		if sampleRate == 0 {
+			sampleRate = parsePCMOutputSampleRate(ttsCfg.OutputFormat)
+		}
+		return client, sampleRate
+	case "inworld":
+		ttsCfg := inworld_tts.TTSConfig{
+			APIKey:       lkCfg.InworldAPIKey(),
+			VoiceID:      lkCfg.TTS.VoiceID,
+			ModelID:      lkCfg.TTS.ModelID,
+			SampleRateHz: lkCfg.TTS.SampleRateHz,
+			Temperature:  lkCfg.TTS.Temperature,
+		}
+		var client tts.Provider
+		if strings.TrimSpace(ttsCfg.APIKey) != "" &&
+			strings.TrimSpace(ttsCfg.VoiceID) != "" &&
+			strings.TrimSpace(ttsCfg.ModelID) != "" {
+			client = inworld_tts.NewInworldTTS(ttsCfg)
+		}
+		sampleRate := ttsCfg.SampleRateHz
+		if sampleRate == 0 {
+			sampleRate = 22050
+		}
+		return client, sampleRate
+	case "cartesia":
+		ttsCfg := cartesia_tts.TTSConfig{
+			APIKey:       lkCfg.CartesiaAPIKey(),
+			VoiceID:      lkCfg.TTS.VoiceID,
+			ModelID:      lkCfg.TTS.ModelID,
+			SampleRateHz: lkCfg.TTS.SampleRateHz,
+		}
+		var client tts.Provider
+		if strings.TrimSpace(ttsCfg.APIKey) != "" && strings.TrimSpace(ttsCfg.VoiceID) != "" {
+			client = cartesia_tts.NewCartesiaTTS(ttsCfg)
+		}
+		sampleRate := ttsCfg.SampleRateHz
+		if sampleRate == 0 {
+			sampleRate = 24000
+		}
+		return client, sampleRate
+	default:
+		return nil, parsePCMOutputSampleRate(lkCfg.TTS.OutputFormat)
+	}
+}
+
+func resolvedTTSProviderName(lkCfg config.LiveKitServiceConfig) string {
+	provider := strings.ToLower(strings.TrimSpace(lkCfg.TTS.Provider))
+	if provider == "" {
+		return "elevenlabs"
+	}
+	return provider
 }

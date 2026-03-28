@@ -11,4 +11,9 @@ if (-not $NoEnv) {
 
 Write-Host "Building picoclaw-livekit..."
 
-go build ./cmd/picoclaw-livekit
+$output = Join-Path $PSScriptRoot "..\\picoclaw-livekit.exe"
+go build -o $output ./cmd/picoclaw-livekit
+if ($LASTEXITCODE -ne 0) {
+    throw "go build failed with exit code $LASTEXITCODE"
+}
+Write-Host "Built $output"
