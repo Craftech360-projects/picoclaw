@@ -69,9 +69,8 @@ func main() {
 	}
 
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
-	ttsProviderName := resolvedTTSProviderName(lkCfg)
 	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
-		"provider":           ttsProviderName,
+		"provider":           lkCfg.TTS.Provider,
 		"voice_id":           lkCfg.TTS.VoiceID,
 		"model_id":           lkCfg.TTS.ModelID,
 		"sample_rate_hz":     ttsSampleRate,
@@ -115,18 +114,19 @@ func main() {
 				token = assignment.Token
 			}
 			return livekit.NewRoomSession(livekit.RoomSessionConfig{
-				Worker:     worker,
-				JobID:      job.Id,
-				RoomInfo:   job.Room,
-				Bridge:     bridge,
-				ServerURL:  serverURL,
-				Token:      token,
-				Deepgram:   dg,
-				TTS:        ttsProvider,
-				APIKey:     lkCfg.APIKey(),
-				APISecret:  lkCfg.APISecret(),
-				AgentName:  *agentName,
-				SampleRate: ttsSampleRate,
+				Worker:      worker,
+				JobID:       job.Id,
+				RoomInfo:    job.Room,
+				Bridge:      bridge,
+				ServerURL:   serverURL,
+				Token:       token,
+				Deepgram:    dg,
+				TTS:         ttsProvider,
+				APIKey:      lkCfg.APIKey(),
+				APISecret:   lkCfg.APISecret(),
+				AgentName:   *agentName,
+				SampleRate:  ttsSampleRate,
+				FillerWords: lkCfg.TTS.FillerWords,
 			})
 		},
 	}
@@ -192,68 +192,10 @@ func parsePCMOutputSampleRate(format string) int {
 }
 
 func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tts.Provider, int) {
-	provider := resolvedTTSProviderName(lkCfg)
-	switch provider {
-	case "", "elevenlabs":
-		ttsCfg := elevenlabs_tts.TTSConfig{
-			APIKey:       cfg.Voice.ElevenLabsAPIKey,
-			VoiceID:      lkCfg.TTS.VoiceID,
-			ModelID:      lkCfg.TTS.ModelID,
-			OutputFormat: lkCfg.TTS.OutputFormat,
-		}
-		var client tts.Provider
-		if strings.TrimSpace(ttsCfg.APIKey) != "" && strings.TrimSpace(ttsCfg.VoiceID) != "" {
-			client = elevenlabs_tts.NewElevenLabsTTS(ttsCfg)
-		}
-		sampleRate := lkCfg.TTS.SampleRateHz
-		if sampleRate == 0 {
-			sampleRate = parsePCMOutputSampleRate(ttsCfg.OutputFormat)
-		}
-		return client, sampleRate
-	case "inworld":
-		ttsCfg := inworld_tts.TTSConfig{
-			APIKey:       lkCfg.InworldAPIKey(),
-			VoiceID:      lkCfg.TTS.VoiceID,
-			ModelID:      lkCfg.TTS.ModelID,
-			SampleRateHz: lkCfg.TTS.SampleRateHz,
-			Temperature:  lkCfg.TTS.Temperature,
-		}
-		var client tts.Provider
-		if strings.TrimSpace(ttsCfg.APIKey) != "" &&
-			strings.TrimSpace(ttsCfg.VoiceID) != "" &&
-			strings.TrimSpace(ttsCfg.ModelID) != "" {
-			client = inworld_tts.NewInworldTTS(ttsCfg)
-		}
-		sampleRate := ttsCfg.SampleRateHz
-		if sampleRate == 0 {
-			sampleRate = 22050
-		}
-		return client, sampleRate
-	case "cartesia":
-		ttsCfg := cartesia_tts.TTSConfig{
-			APIKey:       lkCfg.CartesiaAPIKey(),
-			VoiceID:      lkCfg.TTS.VoiceID,
-			ModelID:      lkCfg.TTS.ModelID,
-			SampleRateHz: lkCfg.TTS.SampleRateHz,
-		}
-		var client tts.Provider
-		if strings.TrimSpace(ttsCfg.APIKey) != "" && strings.TrimSpace(ttsCfg.VoiceID) != "" {
-			client = cartesia_tts.NewCartesiaTTS(ttsCfg)
-		}
-		sampleRate := ttsCfg.SampleRateHz
-		if sampleRate == 0 {
-			sampleRate = 24000
-		}
-		return client, sampleRate
-	default:
-		return nil, parsePCMOutputSampleRate(lkCfg.TTS.OutputFormat)
-	}
-}
+	factory := tts.NewFactory()
+	factory.Register("elevenlabs", elevenlabs_tts.NewBuilder())
+	factory.Register("inworld", inworld_tts.NewBuilder())
+	factory.Register("cartesia", cartesia_tts.NewBuilder())
 
-func resolvedTTSProviderName(lkCfg config.LiveKitServiceConfig) string {
-	provider := strings.ToLower(strings.TrimSpace(lkCfg.TTS.Provider))
-	if provider == "" {
-		return "elevenlabs"
-	}
-	return provider
+	return factory.Create(cfg, lkCfg)
 }

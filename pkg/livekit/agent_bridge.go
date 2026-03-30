@@ -142,6 +142,9 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 		})
 
 		for _, tc := range normalized {
+			if feedback, ok := ab.cfg.LiveKitService.ToolFeedback[tc.Name]; ok {
+				cb(feedback)
+			}
 			result := ab.executeTool(ctx, sessionKey, tc)
 			toolMsg := providers.Message{
 				Role:       "tool",

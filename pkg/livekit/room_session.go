@@ -35,14 +35,15 @@ type RoomSession struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 
-	serverURL  string
-	token      string
-	deepgram   *deepgram.DeepgramTranscriber
-	tts        tts.Provider
-	apiKey     string
-	apiSecret  string
-	agentName  string
-	sampleRate int
+	serverURL   string
+	token       string
+	deepgram    *deepgram.DeepgramTranscriber
+	tts         tts.Provider
+	apiKey      string
+	apiSecret   string
+	agentName   string
+	sampleRate  int
+	fillerWords []string
 }
 
 // ParticipantState tracks per-participant voice session state.
@@ -58,18 +59,19 @@ type ParticipantState struct {
 
 // RoomSessionConfig configures a RoomSession.
 type RoomSessionConfig struct {
-	Worker     *Worker
-	JobID      string
-	RoomInfo   *livekit.Room
-	Bridge     *AgentBridge
-	ServerURL  string
-	Token      string
-	Deepgram   *deepgram.DeepgramTranscriber
-	TTS        tts.Provider
-	APIKey     string
-	APISecret  string
-	AgentName  string
-	SampleRate int
+	Worker      *Worker
+	JobID       string
+	RoomInfo    *livekit.Room
+	Bridge      *AgentBridge
+	ServerURL   string
+	Token       string
+	Deepgram    *deepgram.DeepgramTranscriber
+	TTS         tts.Provider
+	APIKey      string
+	APISecret   string
+	AgentName   string
+	SampleRate  int
+	FillerWords []string
 }
 
 // NewRoomSession creates a new room session for a job.
@@ -81,18 +83,19 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		return nil, errors.New("server url is empty")
 	}
 	return &RoomSession{
-		worker:     cfg.Worker,
-		jobID:      cfg.JobID,
-		roomInfo:   cfg.RoomInfo,
-		bridge:     cfg.Bridge,
-		serverURL:  cfg.ServerURL,
-		token:      cfg.Token,
-		deepgram:   cfg.Deepgram,
-		tts:        cfg.TTS,
-		apiKey:     cfg.APIKey,
-		apiSecret:  cfg.APISecret,
-		agentName:  cfg.AgentName,
-		sampleRate: cfg.SampleRate,
+		worker:      cfg.Worker,
+		jobID:       cfg.JobID,
+		roomInfo:    cfg.RoomInfo,
+		bridge:      cfg.Bridge,
+		serverURL:   cfg.ServerURL,
+		token:       cfg.Token,
+		deepgram:    cfg.Deepgram,
+		tts:         cfg.TTS,
+		apiKey:      cfg.APIKey,
+		apiSecret:   cfg.APISecret,
+		agentName:   cfg.AgentName,
+		sampleRate:  cfg.SampleRate,
+		fillerWords: cfg.FillerWords,
 	}, nil
 }
 

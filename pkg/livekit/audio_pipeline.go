@@ -6,26 +6,66 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"strings"
 	"time"
 
 	"github.com/livekit/media-sdk"
+	"github.com/neurosnap/sentences"
+	"github.com/neurosnap/sentences/english"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
-// sentenceSplitter accumulates text and emits complete sentences.
+// sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
 type sentenceSplitter struct {
-	buf strings.Builder
+	buf       strings.Builder
+	tokenizer *sentences.DefaultSentenceTokenizer
 }
 
 func newSentenceSplitter() *sentenceSplitter {
-	return &sentenceSplitter{}
+	tokenizer, err := english.NewSentenceTokenizer(nil)
+	if err != nil {
+		// Fallback to a simple splitter if the tokenizer fails to initialize
+		return &sentenceSplitter{}
+	}
+	return &sentenceSplitter{
+		tokenizer: tokenizer,
+	}
 }
 
 func (s *sentenceSplitter) Feed(r rune) string {
 	s.buf.WriteRune(r)
+	text := s.buf.String()
+
+	// Only attempt to split if we have a potential sentence boundary
+	if r == '.' || r == '!' || r == '?' || r == '\n' {
+		if s.tokenizer != nil {
+			sentences := s.tokenizer.Tokenize(text)
+			if len(sentences) > 1 {
+				// We have at least one complete sentence and some remainder
+				completeSentence := sentences[0].Text
+
+				// Keep the rest in the buffer
+				s.buf.Reset()
+				for i := 1; i < len(sentences); i++ {
+					s.buf.WriteString(sentences[i].Text)
+					if i < len(sentences)-1 {
+						s.buf.WriteString(" ")
+					}
+				}
+				return completeSentence
+			}
+		} else {
+			// Fallback to simple splitting
+			return s.simpleSplit(r)
+		}
+	}
+	return ""
+}
+
+func (s *sentenceSplitter) simpleSplit(r rune) string {
 	if r == '.' || r == '!' || r == '?' {
 		sentence := s.buf.String()
 		s.buf.Reset()
@@ -62,6 +102,12 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	}
 	if ap.bridge == nil {
 		return fmt.Errorf("agent bridge is nil")
+	}
+
+	// Play filler word
+	if ap.session != nil && len(ap.session.fillerWords) > 0 {
+		filler := ap.session.fillerWords[rand.Intn(len(ap.session.fillerWords))]
+		ap.synthesizeAndPlay(ctx, filler)
 	}
 
 	splitter := newSentenceSplitter()

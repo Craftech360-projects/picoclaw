@@ -841,18 +841,20 @@ type VoiceConfig struct {
 
 // LiveKitServiceTTSConfig configures TTS for the LiveKit voice agent.
 type LiveKitServiceTTSConfig struct {
-	Provider     string  `json:"provider,omitempty"        env:"PICOCLAW_LIVEKIT_TTS_PROVIDER"`
-	VoiceID      string  `json:"voice_id"                   env:"PICOCLAW_LIVEKIT_TTS_VOICE_ID"`
-	ModelID      string  `json:"model_id"                   env:"PICOCLAW_LIVEKIT_TTS_MODEL_ID"`
-	OutputFormat string  `json:"output_format"              env:"PICOCLAW_LIVEKIT_TTS_OUTPUT_FORMAT"`
-	SampleRateHz int     `json:"sample_rate_hz,omitempty"   env:"PICOCLAW_LIVEKIT_TTS_SAMPLE_RATE_HZ"`
-	Temperature  float64 `json:"temperature,omitempty"      env:"PICOCLAW_LIVEKIT_TTS_TEMPERATURE"`
+	Provider     string   `json:"provider,omitempty"        env:"PICOCLAW_LIVEKIT_TTS_PROVIDER"`
+	VoiceID      string   `json:"voice_id"                   env:"PICOCLAW_LIVEKIT_TTS_VOICE_ID"`
+	ModelID      string   `json:"model_id"                   env:"PICOCLAW_LIVEKIT_TTS_MODEL_ID"`
+	OutputFormat string   `json:"output_format"              env:"PICOCLAW_LIVEKIT_TTS_OUTPUT_FORMAT"`
+	SampleRateHz int      `json:"sample_rate_hz,omitempty"   env:"PICOCLAW_LIVEKIT_TTS_SAMPLE_RATE_HZ"`
+	Temperature  float64  `json:"temperature,omitempty"      env:"PICOCLAW_LIVEKIT_TTS_TEMPERATURE"`
+	FillerWords  []string `json:"filler_words,omitempty"     env:"PICOCLAW_LIVEKIT_TTS_FILLER_WORDS"`
 }
 
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.
 type LiveKitServiceConfig struct {
-	ServerURL string                  `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
-	TTS       LiveKitServiceTTSConfig `json:"tts"`
+	ServerURL    string                  `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
+	TTS          LiveKitServiceTTSConfig `json:"tts"`
+	ToolFeedback map[string]string       `json:"tool_feedback,omitempty"`
 
 	apiKey         string
 	apiSecret      string
