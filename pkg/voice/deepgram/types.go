@@ -25,6 +25,7 @@ type TranscriptEvent struct {
 type TranscriptionStream interface {
 	Results() <-chan TranscriptEvent
 	SendAudio(pcm []byte) error
+	Finalize() error
 	Close() error
 }
 

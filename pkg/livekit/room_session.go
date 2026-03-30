@@ -19,6 +19,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
+	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
 
 // RoomSession manages one agent in one LiveKit room (one job).
@@ -235,7 +236,18 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		"participant": rp.Identity(),
 	})
 
-	writer := &deepgramWriter{stream: stream}
+	var vadPipe *vad.VADPipeline
+	var vadEventChan chan vad.VADEvent
+	engine, err := vad.NewTenVAD(256, 0.7) // Increased threshold to 0.7 for better noise rejection
+	if err == nil {
+		vadPipe = vad.NewVADPipeline(engine, 0.7, 1000) // 1000ms endpoint for more stable detection
+		vadEventChan = make(chan vad.VADEvent, 10)
+		logger.InfoCF("livekit", "TEN VAD initialized", map[string]any{"room": rs.roomInfo.Name})
+	} else {
+		logger.ErrorCF("livekit", "Failed to init TEN VAD", map[string]any{"error": err.Error()})
+	}
+
+	writer := &deepgramWriter{stream: stream, vad: vadPipe, vadEvent: vadEventChan}
 	pcmTrack, err := lkmedia.NewPCMRemoteTrack(track, writer, lkmedia.WithTargetSampleRate(16000), lkmedia.WithTargetChannels(1))
 	if err != nil {
 		logger.ErrorCF("livekit", "PCM remote track error", map[string]any{"error": err.Error()})
@@ -248,7 +260,19 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	ps.pcmTrack = pcmTrack
 	ps.mu.Unlock()
 
-	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts)
+	var vadEventInterface <-chan interface{}
+	if vadEventChan != nil {
+		ch := make(chan interface{}, 10)
+		go func() {
+			for evt := range vadEventChan {
+				ch <- evt
+			}
+			close(ch)
+		}()
+		vadEventInterface = ch
+	}
+
+	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, vadEventInterface)
 	go pipeline.RunInbound(rs.ctx, stream)
 }
 
@@ -307,7 +331,9 @@ func sanitizeIdentity(value string) string {
 }
 
 type deepgramWriter struct {
-	stream deepgram.TranscriptionStream
+	stream   deepgram.TranscriptionStream
+	vad      *vad.VADPipeline
+	vadEvent chan vad.VADEvent
 }
 
 func (w *deepgramWriter) WriteSample(sample media.PCM16Sample) error {
@@ -317,6 +343,30 @@ func (w *deepgramWriter) WriteSample(sample media.PCM16Sample) error {
 	if len(sample) == 0 {
 		return nil
 	}
+
+	if w.vad != nil {
+		// Feed audio to VAD pipeline
+		// Convert sample to []int16
+		int16Samples := make([]int16, len(sample))
+		copy(int16Samples, sample)
+
+		events := w.vad.Push(int16Samples)
+		for _, evt := range events {
+			if evt.SpeechStart {
+				logger.DebugCF("livekit", "TEN VAD Speech Start", map[string]any{"probability": evt.Probability})
+			}
+			if evt.SpeechEnd {
+				logger.DebugCF("livekit", "TEN VAD Speech End", map[string]any{"probability": evt.Probability})
+			}
+			if w.vadEvent != nil {
+				select {
+				case w.vadEvent <- evt:
+				default:
+				}
+			}
+		}
+	}
+
 	buf := make([]byte, len(sample)*2)
 	for i, v := range sample {
 		binary.LittleEndian.PutUint16(buf[i*2:i*2+2], uint16(v))
@@ -325,6 +375,9 @@ func (w *deepgramWriter) WriteSample(sample media.PCM16Sample) error {
 }
 
 func (w *deepgramWriter) Close() error {
+	if w.vad != nil {
+		w.vad.Close()
+	}
 	if w.stream == nil {
 		return nil
 	}

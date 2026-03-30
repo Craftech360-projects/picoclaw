@@ -16,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
+	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
 
 // sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
@@ -91,16 +92,18 @@ func (s *sentenceSplitter) Flush() string {
 
 // AudioPipeline coordinates STT -> Agent -> TTS for one participant in a room.
 type AudioPipeline struct {
-	session *RoomSession
-	bridge  *AgentBridge
-	tts     tts.Provider
+	session  *RoomSession
+	bridge   *AgentBridge
+	tts      tts.Provider
+	vadEvent <-chan interface{}
 }
 
-func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider) *AudioPipeline {
+func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
 	return &AudioPipeline{
-		session: session,
-		bridge:  bridge,
-		tts:     tts,
+		session:  session,
+		bridge:   bridge,
+		tts:      tts,
+		vadEvent: vadEvent,
 	}
 }
 
@@ -175,24 +178,49 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 		return
 	}
 	var utterance strings.Builder
+	var vadSpeechEnded bool
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
+		case vadEvt, ok := <-ap.vadEvent:
+			if !ok {
+				ap.vadEvent = nil
+				continue
+			}
+			if evt, ok := vadEvt.(vad.VADEvent); ok {
+				if evt.SpeechStart {
+					if ap.session != nil && ap.session.participant != nil {
+						ap.session.participant.speaking.Store(true)
+					}
+					logger.DebugCF("livekit", "VAD Speech start", map[string]any{
+						"session":     ap.sessionKey(),
+						"probability": evt.Probability,
+					})
+					ap.cancelTTS("vad_speech_start")
+					vadSpeechEnded = false
+				}
+
+				if evt.SpeechEnd {
+					vadSpeechEnded = true
+					logger.DebugCF("livekit", "VAD Speech end, sending finalize to Deepgram", map[string]any{
+						"session":     ap.sessionKey(),
+						"probability": evt.Probability,
+					})
+					if err := dgStream.Finalize(); err != nil {
+						logger.ErrorCF("livekit", "Failed to finalize Deepgram stream", map[string]any{
+							"session": ap.sessionKey(),
+							"error":   err.Error(),
+						})
+					}
+				}
+			}
+
 		case evt, ok := <-dgStream.Results():
 			if !ok {
 				return
-			}
-
-			if evt.SpeechStart {
-				if ap.session != nil && ap.session.participant != nil {
-					ap.session.participant.speaking.Store(true)
-				}
-				logger.DebugCF("livekit", "Speech start", map[string]any{
-					"session": ap.sessionKey(),
-				})
-				ap.cancelTTS("speech_start")
 			}
 
 			if evt.IsFinal && evt.Text != "" {
@@ -200,9 +228,10 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 				utterance.WriteString(" ")
 			}
 
-			if evt.SpeechEnd {
+			if evt.SpeechEnd || (vadSpeechEnded && utterance.Len() > 0) {
 				text := strings.TrimSpace(utterance.String())
 				utterance.Reset()
+				vadSpeechEnded = false
 
 				if ap.session != nil && ap.session.participant != nil {
 					ap.session.participant.speaking.Store(false)
@@ -211,7 +240,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 				if text == "" {
 					continue
 				}
-				logger.DebugCF("livekit", "Speech end", map[string]any{
+				logger.DebugCF("livekit", "Speech end with text", map[string]any{
 					"session": ap.sessionKey(),
 					"text":    text,
 				})
@@ -221,16 +250,10 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 					continue
 				}
 
-				// We create a new context for the TTS synthesis and playback, but we also want it to be cancelable
-				// if new speech starts. However, we don't want it to be tied to the loop's context for closure,
-				// because it might need to outlive this iteration (e.g. during async tool calls).
-				// We use a context that is cancelable but rooted in context.Background() or a session-level context.
 				ttsCtx, ttsCancel := context.WithCancel(context.Background())
 				ap.setTTSCancel(ttsCancel)
 
 				go func() {
-					// HandleUtterance will call ttsCancel (via onDone) when it's completely finished,
-					// including any asynchronous tool iterations.
 					_, _ = ap.HandleUtterance(ttsCtx, sessionKey, text, ttsCancel)
 				}()
 			}

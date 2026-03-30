@@ -17,3 +17,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "go build failed with exit code $LASTEXITCODE"
 }
 Write-Host "Built $output"
+
+# Copy TEN VAD DLL on Windows
+if ($IsWindows -or $env:OS -match "Windows") {
+    $dllSource = Join-Path $PSScriptRoot "..\third_party\ten-vad\lib\Windows\x64\ten_vad.dll"
+    $dllDest = Join-Path $PSScriptRoot "..\ten_vad.dll"
+    if (Test-Path $dllSource) {
+        Copy-Item $dllSource $dllDest -Force
+        Write-Host "Copied ten_vad.dll to output directory"
+    }
+}

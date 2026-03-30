@@ -109,6 +109,24 @@ func (s *deepgramStream) SendAudio(pcm []byte) error {
 	return s.conn.WriteMessage(websocket.BinaryMessage, pcm)
 }
 
+func (s *deepgramStream) Finalize() error {
+	select {
+	case <-s.closed:
+		return errors.New("deepgram stream closed")
+	default:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	finalizeMsg := map[string]string{"type": "Finalize"}
+	data, err := json.Marshal(finalizeMsg)
+	if err != nil {
+		return err
+	}
+	return s.conn.WriteMessage(websocket.TextMessage, data)
+}
+
 func (s *deepgramStream) Close() error {
 	var err error
 	s.once.Do(func() {
