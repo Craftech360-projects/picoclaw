@@ -33,6 +33,7 @@ type Worker struct {
 	roomFactory   func(job *livekit.Job, assignment *livekit.JobAssignment, bridge *AgentBridge) (*RoomSession, error)
 
 	skipRoomJoin bool
+	maxSessions  int // Maximum number of concurrent sessions this worker will handle
 }
 
 // WorkerConfig holds configuration for creating a Worker.
@@ -43,10 +44,15 @@ type WorkerConfig struct {
 	APISecret     string
 	BridgeFactory func() *AgentBridge
 	RoomFactory   func(job *livekit.Job, assignment *livekit.JobAssignment, bridge *AgentBridge) (*RoomSession, error)
+	MaxSessions   int
 }
 
 // NewWorker creates a new LiveKit agent worker.
 func NewWorker(cfg WorkerConfig) *Worker {
+	maxSessions := cfg.MaxSessions
+	if maxSessions <= 0 {
+		maxSessions = 100 // Default sensible limit to prevent OOM
+	}
 	return &Worker{
 		agentName:     cfg.AgentName,
 		serverURL:     cfg.ServerURL,
@@ -55,6 +61,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		jobs:          make(map[string]*RoomSession),
 		bridgeFactory: cfg.BridgeFactory,
 		roomFactory:   cfg.RoomFactory,
+		maxSessions:   maxSessions,
 	}
 }
 
@@ -164,15 +171,26 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 	if req == nil || req.Job == nil {
 		return
 	}
+
+	w.mu.RLock()
+	currentJobs := len(w.jobs)
+	w.mu.RUnlock()
+
+	available := currentJobs < w.maxSessions
+
 	logger.DebugCF("livekit", "Availability request", map[string]any{
-		"job_id": req.Job.Id,
-		"room":   jobRoomName(req.Job),
+		"job_id":       req.Job.Id,
+		"room":         jobRoomName(req.Job),
+		"current_jobs": currentJobs,
+		"max_sessions": w.maxSessions,
+		"available":    available,
 	})
+
 	resp := &livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_Availability{
 			Availability: &livekit.AvailabilityResponse{
 				JobId:     req.Job.Id,
-				Available: true,
+				Available: available,
 			},
 		},
 	}

@@ -157,10 +157,22 @@ func (s *deepgramStream) readLoop() {
 			s.speaking = true
 		}
 
-		if resp.SpeechFinal || (resp.IsFinal && text != "") {
+		if resp.SpeechFinal || (resp.IsFinal && text != "" && resp.Type == "Results") {
 			// If we get SpeechFinal, OR if we get an IsFinal message with text (which Deepgram sometimes
 			// sends instead of or before SpeechFinal depending on endpointing/VAD), we should treat
 			// it as the end of a speech segment.
+			// Note: We check resp.Type == "Results" to ensure we don't accidentally trigger
+			// on interim Metadata or other non-result IsFinal frames if they somehow contain text.
+			// However, relying heavily on IsFinal for SpeechEnd can cause premature cuts if
+			// interim_results is true. Deepgram's official recommendation for "user stopped speaking"
+			// is to strictly use `SpeechFinal: true`.
+			// We will require SpeechFinal, OR IsFinal if the endpointing forces it.
+			// Actually, to prevent premature interruption, let's strictly require SpeechFinal
+			// unless the stream is closing.
+		}
+
+		// Reverting to strict SpeechFinal for SpeechEnd to prevent premature interruption
+		if resp.SpeechFinal {
 			evt.SpeechEnd = true
 			s.speaking = false
 		}
@@ -197,7 +209,8 @@ func normalizeStreamOpts(opts StreamOpts) StreamOpts {
 		// Deepgram's endpointing parameter determines how much silence to wait for
 		// before sending a SpeechFinal event. A default of 300ms is usually too fast
 		// and can lead to cut-off sentences. 500ms or more is generally better for natural pauses.
-		opts.EndpointingMS = 500
+		// Bumping to 800ms to prevent premature SpeechEnd while the user is still thinking mid-sentence.
+		opts.EndpointingMS = 800
 	}
 	return opts
 }
