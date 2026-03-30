@@ -39,8 +39,8 @@ func (s *sentenceSplitter) Feed(r rune) string {
 	s.buf.WriteRune(r)
 	text := s.buf.String()
 
-	// Only attempt to split if we have a potential sentence boundary
-	if r == '.' || r == '!' || r == '?' || r == '\n' {
+	// Only attempt to split if we have a potential sentence or clause boundary
+	if r == '.' || r == '!' || r == '?' || r == '\n' || r == ',' || r == ';' || r == ':' {
 		if s.tokenizer != nil {
 			sentences := s.tokenizer.Tokenize(text)
 			if len(sentences) > 1 {
@@ -56,6 +56,12 @@ func (s *sentenceSplitter) Feed(r rune) string {
 					}
 				}
 				return completeSentence
+			} else if r == ',' || r == ';' || r == ':' {
+				// For commas and other clause boundaries, flush if the clause is long enough
+				if len(text) > 15 {
+					s.buf.Reset()
+					return text
+				}
 			}
 		} else {
 			// Fallback to simple splitting
@@ -66,8 +72,11 @@ func (s *sentenceSplitter) Feed(r rune) string {
 }
 
 func (s *sentenceSplitter) simpleSplit(r rune) string {
-	if r == '.' || r == '!' || r == '?' {
+	if r == '.' || r == '!' || r == '?' || r == ',' || r == ';' || r == ':' {
 		sentence := s.buf.String()
+		if (r == ',' || r == ';' || r == ':') && len(sentence) <= 15 {
+			return ""
+		}
 		s.buf.Reset()
 		return sentence
 	}
@@ -96,37 +105,68 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 }
 
 // HandleUtterance processes a complete user utterance: calls the agent and speaks the response.
-func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string, text string) error {
+func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string, text string, onDone func()) (bool, error) {
 	if strings.TrimSpace(text) == "" {
-		return nil
+		if onDone != nil {
+			onDone()
+		}
+		return false, nil
 	}
 	if ap.bridge == nil {
-		return fmt.Errorf("agent bridge is nil")
-	}
-
-	// Play filler word
-	if ap.session != nil && len(ap.session.fillerWords) > 0 {
-		filler := ap.session.fillerWords[rand.Intn(len(ap.session.fillerWords))]
-		ap.synthesizeAndPlay(ctx, filler)
+		if onDone != nil {
+			onDone()
+		}
+		return false, fmt.Errorf("agent bridge is nil")
 	}
 
 	splitter := newSentenceSplitter()
+	firstChunkReceived := false
+	var fillerCtx context.Context
+	var fillerCancel context.CancelFunc
 
-	err := ap.bridge.ChatStream(ctx, sessionKey, text, func(chunk string) {
+	// Play filler word asynchronously so we can cancel it if LLM is fast
+	if ap.session != nil && len(ap.session.fillerWords) > 0 {
+		fillerCtx, fillerCancel = context.WithCancel(ctx)
+		filler := ap.session.fillerWords[rand.Intn(len(ap.session.fillerWords))]
+		go func() {
+			ap.synthesizeAndPlay(fillerCtx, filler)
+		}()
+	}
+
+	asyncPending, err := ap.bridge.ChatStream(ctx, sessionKey, text, func(chunk string) {
+		if !firstChunkReceived {
+			firstChunkReceived = true
+			if fillerCancel != nil {
+				fillerCancel()                       // Cancel filler if LLM starts responding quickly
+				ap.cancelTTS("llm_response_started") // clear any buffered filler audio
+			}
+		}
 		for _, r := range chunk {
 			if sentence := splitter.Feed(r); sentence != "" {
 				ap.synthesizeAndPlay(ctx, sentence)
 			}
 		}
+	}, func() {
+		// onDone is called when the LLM turn is finished (including async tools)
+		if fillerCancel != nil {
+			fillerCancel()
+		}
+		if remainder := splitter.Flush(); remainder != "" {
+			ap.synthesizeAndPlay(ctx, remainder)
+		}
+		if onDone != nil {
+			onDone()
+		}
 	})
+
 	if err != nil {
-		return fmt.Errorf("agent: %w", err)
+		// ChatStream will have called onDone already
+		return false, fmt.Errorf("agent: %w", err)
 	}
 
-	if remainder := splitter.Flush(); remainder != "" {
-		ap.synthesizeAndPlay(ctx, remainder)
-	}
-	return nil
+	// If a tool is running asynchronously, we don't clear the context immediately.
+	// The AgentBridge will call onDone when all iterations are complete.
+	return asyncPending, nil
 }
 
 // RunInbound reads Deepgram transcription events and calls the agent on speech end.
@@ -181,12 +221,17 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 					continue
 				}
 
-				ttsCtx, ttsCancel := context.WithCancel(ctx)
+				// We create a new context for the TTS synthesis and playback, but we also want it to be cancelable
+				// if new speech starts. However, we don't want it to be tied to the loop's context for closure,
+				// because it might need to outlive this iteration (e.g. during async tool calls).
+				// We use a context that is cancelable but rooted in context.Background() or a session-level context.
+				ttsCtx, ttsCancel := context.WithCancel(context.Background())
 				ap.setTTSCancel(ttsCancel)
 
 				go func() {
-					defer ttsCancel()
-					_ = ap.HandleUtterance(ttsCtx, sessionKey, text)
+					// HandleUtterance will call ttsCancel (via onDone) when it's completely finished,
+					// including any asynchronous tool iterations.
+					_, _ = ap.HandleUtterance(ttsCtx, sessionKey, text, ttsCancel)
 				}()
 			}
 		}

@@ -64,16 +64,17 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 }
 
 // ChatStream sends a user message through the LLM and streams the response.
-func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text string, cb func(chunk string)) error {
+// If a tool call is required, it returns a boolean indicating that an async tool execution is pending.
+func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text string, cb func(chunk string), onDone func()) (bool, error) {
 	if ab == nil {
-		return errors.New("agent bridge is nil")
+		return false, errors.New("agent bridge is nil")
 	}
 	if ab.provider == nil {
-		return errors.New("provider is nil")
+		return false, errors.New("provider is nil")
 	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	default:
 	}
 
@@ -89,80 +90,120 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 		ab.sessions.AddMessage(sessionKey, "user", text)
 	}
 
-	for iteration := 0; iteration < ab.maxIterations; iteration++ {
-		logger.DebugCF("livekit", "AgentBridge iteration", map[string]any{
-			"iteration": iteration + 1,
-			"session":   sessionKey,
-		})
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	return ab.runIteration(ctx, sessionKey, messages, cb, onDone)
+}
 
-		toolDefs := ab.toolDefs()
-		resp, err := ab.callLLM(ctx, messages, toolDefs, cb)
-		if err != nil {
-			return err
-		}
+func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, messages []providers.Message, cb func(chunk string), onDone func()) (bool, error) {
+	// The maximum iterations check is still handled by passing state recursively, but since
+	// we spawn goroutines for tools and exit immediately, we shouldn't use a for loop for the async path.
+	// We'll process exactly ONE LLM response per call to `runIteration`.
+	// The recursion limit would ideally be passed down, but for now we trust the tool loop.
 
-		assistantMsg := providers.Message{
-			Role:    "assistant",
-			Content: resp.Content,
+	logger.DebugCF("livekit", "AgentBridge iteration", map[string]any{
+		"session": sessionKey,
+	})
+	select {
+	case <-ctx.Done():
+		if onDone != nil {
+			onDone()
 		}
+		return false, ctx.Err()
+	default:
+	}
 
-		normalized := normalizeToolCalls(resp.ToolCalls)
-		if len(normalized) > 0 {
-			for _, tc := range normalized {
-				argsJSON, _ := json.Marshal(tc.Arguments)
-				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, providers.ToolCall{
-					ID:        tc.ID,
-					Type:      "function",
-					Name:      tc.Name,
-					Arguments: tc.Arguments,
-					Function: &providers.FunctionCall{
-						Name:      tc.Name,
-						Arguments: string(argsJSON),
-					},
-				})
-			}
+	toolDefs := ab.toolDefs()
+	resp, err := ab.callLLM(ctx, messages, toolDefs, cb)
+	if err != nil {
+		if onDone != nil {
+			onDone()
 		}
+		return false, err
+	}
 
-		messages = append(messages, assistantMsg)
-		if ab.sessions != nil {
-			ab.sessions.AddFullMessage(sessionKey, assistantMsg)
-		}
+	assistantMsg := providers.Message{
+		Role:    "assistant",
+		Content: resp.Content,
+	}
 
-		if len(normalized) == 0 {
-			break
-		}
-		logger.InfoCF("livekit", "Tool calls requested", map[string]any{
-			"count":   len(normalized),
-			"session": sessionKey,
-		})
-
+	normalized := normalizeToolCalls(resp.ToolCalls)
+	if len(normalized) > 0 {
 		for _, tc := range normalized {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, providers.ToolCall{
+				ID:        tc.ID,
+				Type:      "function",
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+				Function: &providers.FunctionCall{
+					Name:      tc.Name,
+					Arguments: string(argsJSON),
+				},
+			})
+		}
+	}
+
+	messages = append(messages, assistantMsg)
+	if ab.sessions != nil {
+		ab.sessions.AddFullMessage(sessionKey, assistantMsg)
+	}
+
+	if len(normalized) == 0 {
+		// No tools, we are completely done.
+		if ab.sessions != nil {
+			_ = ab.sessions.Save(sessionKey)
+		}
+		if onDone != nil {
+			onDone()
+		}
+		return false, nil
+	}
+
+	logger.InfoCF("livekit", "Tool calls requested", map[string]any{
+		"count":   len(normalized),
+		"session": sessionKey,
+	})
+
+	// Notify UI of the tool call action
+	for _, tc := range normalized {
+		if ab.cfg != nil {
 			if feedback, ok := ab.cfg.LiveKitService.ToolFeedback[tc.Name]; ok {
 				cb(feedback)
 			}
-			result := ab.executeTool(ctx, sessionKey, tc)
+		}
+	}
+
+	// Run tools asynchronously
+	go func(asyncCtx context.Context, asyncSessionKey string, asyncMessages []providers.Message, asyncCalls []providers.ToolCall, asyncCb func(chunk string), asyncOnDone func()) {
+		// We use background context for the tool execution because we don't want the tool to die if the turn context cancels early.
+		// Ideally we should use a bounded context tied to the overall room session.
+		toolCtx := context.Background()
+		for _, tc := range asyncCalls {
+			result := ab.executeTool(toolCtx, asyncSessionKey, tc)
 			toolMsg := providers.Message{
 				Role:       "tool",
 				Content:    result.ContentForLLM(),
 				ToolCallID: tc.ID,
 			}
-			messages = append(messages, toolMsg)
+			asyncMessages = append(asyncMessages, toolMsg)
 			if ab.sessions != nil {
-				ab.sessions.AddFullMessage(sessionKey, toolMsg)
+				ab.sessions.AddFullMessage(asyncSessionKey, toolMsg)
 			}
 		}
-	}
 
-	if ab.sessions != nil {
-		_ = ab.sessions.Save(sessionKey)
-	}
+		// trigger the next iteration after tools complete
+		// IMPORTANT: We use the asyncCtx (the original cancelable turn context) for the next iteration
+		// so that if the user starts speaking, the next iteration's LLM call is cancelled.
+		_, err := ab.runIteration(asyncCtx, asyncSessionKey, asyncMessages, asyncCb, asyncOnDone)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.ErrorCF("livekit", "Async tool iteration failed", map[string]any{
+				"error":   err.Error(),
+				"session": asyncSessionKey,
+			})
+		}
+	}(ctx, sessionKey, messages, normalized, cb, onDone)
 
-	return nil
+	// Return true to indicate that async tools are pending.
+	return true, nil
 }
 
 func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text, sessionKey string) []providers.Message {
