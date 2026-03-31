@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -35,19 +37,30 @@ type AgentBridge struct {
 	maxIterations  int
 	llmOptions     map[string]any
 	asyncEventChan chan AsyncEvent // receives background task completions
+
+	// summarization config
+	summarizeMessageThreshold int
+	contextWindow             int
+	summarizing               sync.Map
 }
 
 // AgentBridgeConfig defines shared resources for creating bridges.
 type AgentBridgeConfig struct {
-	Config         *config.Config
-	Provider       providers.LLMProvider
-	ModelID        string
-	Sessions       session.SessionStore
-	Tools          *tools.ToolRegistry
-	ContextBuilder *agent.ContextBuilder
-	MaxIterations  int
-	LLMOptions     map[string]any
-	AsyncEventChan chan AsyncEvent // optional channel for background task results
+	Config                    *config.Config
+	Provider                  providers.LLMProvider
+	ModelID                   string
+	Sessions                  session.SessionStore
+	Tools                     *tools.ToolRegistry
+	ContextBuilder            *agent.ContextBuilder
+	MaxIterations             int
+	LLMOptions                map[string]any
+	AsyncEventChan            chan AsyncEvent // optional channel for background task results
+	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
+	// Defaults to 20 if zero.
+	SummarizeMessageThreshold int
+	// ContextWindow is the model's context size in tokens (approximate), used to detect
+	// when the token budget is being approached. Defaults to 128000 if zero.
+	ContextWindow             int
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -59,16 +72,26 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 	if asyncChan == nil {
 		asyncChan = make(chan AsyncEvent, 16)
 	}
+	summarizeThreshold := cfg.SummarizeMessageThreshold
+	if summarizeThreshold <= 0 {
+		summarizeThreshold = 20
+	}
+	ctxWindow := cfg.ContextWindow
+	if ctxWindow <= 0 {
+		ctxWindow = 128000
+	}
 	ab := &AgentBridge{
-		cfg:            cfg.Config,
-		provider:       cfg.Provider,
-		modelID:        cfg.ModelID,
-		sessions:       cfg.Sessions,
-		tools:          cfg.Tools,
-		contextBuilder: cfg.ContextBuilder,
-		maxIterations:  cfg.MaxIterations,
-		llmOptions:     cfg.LLMOptions,
-		asyncEventChan: asyncChan,
+		cfg:                       cfg.Config,
+		provider:                  cfg.Provider,
+		modelID:                   cfg.ModelID,
+		sessions:                  cfg.Sessions,
+		tools:                     cfg.Tools,
+		contextBuilder:            cfg.ContextBuilder,
+		maxIterations:             cfg.MaxIterations,
+		llmOptions:                cfg.LLMOptions,
+		asyncEventChan:            asyncChan,
+		summarizeMessageThreshold: summarizeThreshold,
+		contextWindow:             ctxWindow,
 	}
 	if sp, ok := cfg.Provider.(providers.StreamingProvider); ok {
 		ab.streamProvider = sp
@@ -175,6 +198,7 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 		// No tools, we are completely done.
 		if ab.sessions != nil {
 			_ = ab.sessions.Save(sessionKey)
+			go ab.maybeSummarize(sessionKey)
 		}
 		if onDone != nil {
 			onDone()
@@ -407,4 +431,105 @@ func normalizeToolCalls(calls []providers.ToolCall) []providers.ToolCall {
 		out = append(out, providers.NormalizeToolCall(tc))
 	}
 	return out
+}
+
+// maybeSummarize triggers background context summarization when history grows past
+// the configured message threshold (default 20). This mirrors AgentLoop.maybeSummarize
+// but is self-contained so AgentBridge doesn't need a reference to AgentLoop.
+func (ab *AgentBridge) maybeSummarize(sessionKey string) {
+	if ab.sessions == nil {
+		return
+	}
+	history := ab.sessions.GetHistory(sessionKey)
+	if len(history) <= ab.summarizeMessageThreshold {
+		return
+	}
+
+	// Deduplicate: only run one summarization per session at a time
+	if _, alreadyRunning := ab.summarizing.LoadOrStore(sessionKey, true); alreadyRunning {
+		return
+	}
+	defer ab.summarizing.Delete(sessionKey)
+
+	logger.InfoCF("livekit", "Voice context threshold reached, summarizing history", map[string]any{
+		"session":  sessionKey,
+		"messages": len(history),
+		"limit":    ab.summarizeMessageThreshold,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Keep the 4 most recent messages for continuity; summarize the rest.
+	if len(history) <= 4 {
+		return
+	}
+	cutAt := len(history) - 4
+	// Align to a user-message boundary so we never split a tool sequence.
+	for cutAt > 0 && history[cutAt-1].Role != "user" {
+		cutAt--
+	}
+	if cutAt <= 0 {
+		cutAt = len(history) - 4
+	}
+
+	toSummarize := history[:cutAt]
+	keepCount := len(history) - cutAt
+
+	// Only include user/assistant messages in the summarization prompt.
+	var batch []providers.Message
+	for _, m := range toSummarize {
+		if m.Role == "user" || m.Role == "assistant" {
+			batch = append(batch, m)
+		}
+	}
+	if len(batch) == 0 {
+		return
+	}
+
+	existingSummary := ab.sessions.GetSummary(sessionKey)
+	newSummary, err := ab.bridgeSummarizeBatch(ctx, batch, existingSummary)
+	if err != nil || newSummary == "" {
+		logger.WarnCF("livekit", "Voice context summarization failed", map[string]any{
+			"session": sessionKey,
+			"error":   fmt.Sprintf("%v", err),
+		})
+		return
+	}
+
+	ab.sessions.SetSummary(sessionKey, newSummary)
+	ab.sessions.TruncateHistory(sessionKey, keepCount)
+	_ = ab.sessions.Save(sessionKey)
+
+	logger.InfoCF("livekit", "Voice context summarized", map[string]any{
+		"session":           sessionKey,
+		"summarized_msgs":   len(batch),
+		"kept_msgs":         keepCount,
+		"new_summary_bytes": len(newSummary),
+	})
+}
+
+// bridgeSummarizeBatch calls the LLM to produce a concise summary of a batch of messages.
+func (ab *AgentBridge) bridgeSummarizeBatch(ctx context.Context, batch []providers.Message, existingSummary string) (string, error) {
+	var sb strings.Builder
+	sb.WriteString("Provide a concise summary of this conversation segment, preserving core context and key points.\n")
+	if existingSummary != "" {
+		sb.WriteString("Existing context: ")
+		sb.WriteString(existingSummary)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\nCONVERSATION:\n")
+	for _, m := range batch {
+		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
+	}
+
+	prompt := sb.String()
+	msg := []providers.Message{{Role: "user", Content: prompt}}
+	opts := map[string]any{"temperature": 0.3}
+
+	resp, err := ab.provider.Chat(ctx, msg, nil, ab.modelID, opts)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
 }
