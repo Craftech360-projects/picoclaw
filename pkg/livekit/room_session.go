@@ -3,6 +3,7 @@ package livekit
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -165,6 +166,49 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	})
 
 	return nil
+}
+
+// PublishAgentState publishes a JSON agent state change to the LiveKit data channel
+func (rs *RoomSession) PublishAgentState(oldState, newState string) error {
+	if rs.room == nil || rs.room.LocalParticipant == nil {
+		return errors.New("room local participant not ready")
+	}
+
+	payload := map[string]any{
+		"type": "agent_state_changed",
+		"data": map[string]string{
+			"old_state": oldState,
+			"new_state": newState,
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	return rs.room.LocalParticipant.PublishData(data, lksdk.DataPacketKind_RELIABLE, nil)
+}
+
+// PublishSpeechCreated publishes the generated speech text back to the LiveKit data channel
+func (rs *RoomSession) PublishSpeechCreated(text string) error {
+	if rs.room == nil || rs.room.LocalParticipant == nil {
+		return errors.New("room local participant not ready")
+	}
+
+	payload := map[string]any{
+		"type": "speech_created",
+		"data": map[string]string{
+			"text": text,
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	return rs.room.LocalParticipant.PublishData(data, lksdk.DataPacketKind_RELIABLE, nil)
 }
 
 // Leave disconnects from the room.

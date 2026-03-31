@@ -37,11 +37,21 @@ func newSentenceSplitter() *sentenceSplitter {
 }
 
 func (s *sentenceSplitter) Feed(r rune) string {
+	// Skip newlines entirely — they don't represent sentence boundaries for TTS
+	// and would cause tiny fragments like "(Verse 1)" to be sent as separate TTS calls.
+	if r == '\n' || r == '\r' {
+		// Replace with a space to avoid words merging across lines
+		if s.buf.Len() > 0 {
+			s.buf.WriteRune(' ')
+		}
+		return ""
+	}
+
 	s.buf.WriteRune(r)
 	text := s.buf.String()
 
 	// Only attempt to split if we have a potential sentence or clause boundary
-	if r == '.' || r == '!' || r == '?' || r == '\n' || r == ',' || r == ';' || r == ':' {
+	if r == '.' || r == '!' || r == '?' || r == ',' || r == ';' || r == ':' {
 		if s.tokenizer != nil {
 			sentences := s.tokenizer.Tokenize(text)
 			if len(sentences) > 1 {
@@ -59,7 +69,8 @@ func (s *sentenceSplitter) Feed(r rune) string {
 				return completeSentence
 			} else if r == ',' || r == ';' || r == ':' {
 				// For commas and other clause boundaries, flush if the clause is long enough
-				if len(text) > 15 {
+				// Use a higher threshold (40 chars) to avoid tiny TTS fragments
+				if len(text) > 40 {
 					s.buf.Reset()
 					return text
 				}
@@ -173,12 +184,19 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 }
 
 // RunInbound reads Deepgram transcription events and calls the agent on speech end.
+// It also listens for background task completions via the bridge's async event channel.
 func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.TranscriptionStream) {
 	if dgStream == nil {
 		return
 	}
 	var utterance strings.Builder
 	var vadSpeechEnded bool
+
+	// Get the async event channel from the bridge (may be nil)
+	var asyncEvents <-chan AsyncEvent
+	if ap.bridge != nil {
+		asyncEvents = ap.bridge.AsyncEvents()
+	}
 
 	for {
 		select {
@@ -257,8 +275,79 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 					_, _ = ap.HandleUtterance(ttsCtx, sessionKey, text, ttsCancel)
 				}()
 			}
+
+		case asyncEvt, ok := <-asyncEvents:
+			if !ok {
+				asyncEvents = nil
+				continue
+			}
+			ap.handleAsyncEvent(asyncEvt, vadSpeechEnded)
 		}
 	}
+}
+
+// handleAsyncEvent processes a background task completion event.
+// If the user is currently speaking, the result is silently appended to history.
+// If the user is NOT speaking, a spontaneous LLM + TTS response is triggered.
+func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
+	sessionKey := ap.sessionKey()
+	if sessionKey == "" {
+		return
+	}
+
+	// Check if user is actively speaking
+	isSpeaking := userSpeaking
+	if ap.session != nil && ap.session.participant != nil {
+		isSpeaking = ap.session.participant.speaking.Load()
+	}
+
+	if isSpeaking {
+		// User is speaking — silently add to conversation history.
+		// The LLM will naturally see it on the next user-initiated turn.
+		logger.InfoCF("livekit", "Background task result queued silently (user speaking)", map[string]any{
+			"tool":    evt.ToolName,
+			"session": sessionKey,
+		})
+		if ap.bridge != nil && ap.bridge.sessions != nil && evt.Result != nil {
+			ap.bridge.sessions.AddMessage(sessionKey, "system",
+				"[Background Task Completed] "+evt.ToolName+": "+evt.Result.ContentForLLM())
+		}
+		return
+	}
+
+	// User is NOT speaking — trigger spontaneous announcement
+	logger.InfoCF("livekit", "Triggering spontaneous announcement for background task", map[string]any{
+		"tool":    evt.ToolName,
+		"session": sessionKey,
+	})
+
+	ttsCtx, ttsCancel := context.WithCancel(context.Background())
+	ap.setTTSCancel(ttsCancel)
+
+	splitter := newSentenceSplitter()
+
+	go func() {
+		err := ap.bridge.GenerateSpontaneousResponse(ttsCtx, sessionKey, evt, func(chunk string) {
+			for _, r := range chunk {
+				if sentence := splitter.Feed(r); sentence != "" {
+					ap.synthesizeAndPlay(ttsCtx, sentence)
+				}
+			}
+		}, func() {
+			if remainder := splitter.Flush(); remainder != "" {
+				ap.synthesizeAndPlay(ttsCtx, remainder)
+			}
+			ttsCancel()
+		})
+		if err != nil {
+			logger.ErrorCF("livekit", "Spontaneous response generation failed", map[string]any{
+				"error":   err.Error(),
+				"tool":    evt.ToolName,
+				"session": sessionKey,
+			})
+			ttsCancel()
+		}
+	}()
 }
 
 func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {

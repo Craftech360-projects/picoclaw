@@ -27,7 +27,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
-	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -142,246 +141,68 @@ func NewAgentLoop(
 	configureHookManagerFromConfig(al.hooks, cfg)
 
 	// Register shared tools to all agents (now that al is created)
-	registerSharedTools(al, cfg, msgBus, registry, provider)
+	RegisterSharedTools(SharedToolDependencies{
+		Config:     cfg,
+		MessageBus: msgBus,
+		Registry:   registry,
+		Provider:   provider,
+		SubTurnSpawner: NewSubTurnSpawner(al),
+		SubagentSpawner: func(
+			ctx context.Context,
+			task, label, targetAgentID string,
+			tls *tools.ToolRegistry,
+			maxTokens int,
+			temperature float64,
+			hasMaxTokens, hasTemperature bool,
+			agent *AgentInstance,
+		) (*tools.ToolResult, error) {
+			parentTS := turnStateFromContext(ctx)
+			if parentTS == nil {
+				parentTS = &turnState{
+					ctx:            ctx,
+					turnID:         "adhoc-root",
+					depth:          0,
+					session:        nil,
+					pendingResults: make(chan *tools.ToolResult, 16),
+					concurrencySem: make(chan struct{}, 5),
+				}
+			}
+
+			var tlSlice []tools.Tool
+			for _, name := range tls.List() {
+				if t, ok := tls.Get(name); ok {
+					tlSlice = append(tlSlice, t)
+				}
+			}
+
+			systemPrompt := "You are a subagent. Complete the given task independently and report the result.\n" +
+				"You have access to tools - use them as needed to complete your task.\n" +
+				"After completing the task, provide a clear summary of what was done.\n\n" +
+				"Task: " + task
+
+			modelToUse := agent.Model
+			if targetAgentID != "" {
+				if targetAgent, ok := registry.GetAgent(targetAgentID); ok {
+					modelToUse = targetAgent.Model
+				}
+			}
+
+			subTurnCfg := SubTurnConfig{
+				Model:        modelToUse,
+				Tools:        tlSlice,
+				SystemPrompt: systemPrompt,
+			}
+			if hasMaxTokens {
+				subTurnCfg.MaxTokens = maxTokens
+			}
+
+		return spawnSubTurn(ctx, al, parentTS, subTurnCfg)
+		},
+	})
 
 	return al
 }
 
-// registerSharedTools registers tools that are shared across all agents (web, message, spawn).
-func registerSharedTools(
-	al *AgentLoop,
-	cfg *config.Config,
-	msgBus *bus.MessageBus,
-	registry *AgentRegistry,
-	provider providers.LLMProvider,
-) {
-	allowReadPaths := buildAllowReadPatterns(cfg)
-
-	for _, agentID := range registry.ListAgentIDs() {
-		agent, ok := registry.GetAgent(agentID)
-		if !ok {
-			continue
-		}
-
-		if cfg.Tools.IsToolEnabled("web") {
-			searchTool, err := tools.NewWebSearchTool(tools.WebSearchToolOptions{
-				BraveAPIKeys:    config.MergeAPIKeys(cfg.Tools.Web.Brave.APIKey(), cfg.Tools.Web.Brave.APIKeys()),
-				BraveMaxResults: cfg.Tools.Web.Brave.MaxResults,
-				BraveEnabled:    cfg.Tools.Web.Brave.Enabled,
-				TavilyAPIKeys: config.MergeAPIKeys(
-					cfg.Tools.Web.Tavily.APIKey(),
-					cfg.Tools.Web.Tavily.APIKeys(),
-				),
-				TavilyBaseURL:        cfg.Tools.Web.Tavily.BaseURL,
-				TavilyMaxResults:     cfg.Tools.Web.Tavily.MaxResults,
-				TavilyEnabled:        cfg.Tools.Web.Tavily.Enabled,
-				DuckDuckGoMaxResults: cfg.Tools.Web.DuckDuckGo.MaxResults,
-				DuckDuckGoEnabled:    cfg.Tools.Web.DuckDuckGo.Enabled,
-				PerplexityAPIKeys: config.MergeAPIKeys(
-					cfg.Tools.Web.Perplexity.APIKey(),
-					cfg.Tools.Web.Perplexity.APIKeys(),
-				),
-				PerplexityMaxResults:  cfg.Tools.Web.Perplexity.MaxResults,
-				PerplexityEnabled:     cfg.Tools.Web.Perplexity.Enabled,
-				SearXNGBaseURL:        cfg.Tools.Web.SearXNG.BaseURL,
-				SearXNGMaxResults:     cfg.Tools.Web.SearXNG.MaxResults,
-				SearXNGEnabled:        cfg.Tools.Web.SearXNG.Enabled,
-				GLMSearchAPIKey:       cfg.Tools.Web.GLMSearch.APIKey(),
-				GLMSearchBaseURL:      cfg.Tools.Web.GLMSearch.BaseURL,
-				GLMSearchEngine:       cfg.Tools.Web.GLMSearch.SearchEngine,
-				GLMSearchMaxResults:   cfg.Tools.Web.GLMSearch.MaxResults,
-				GLMSearchEnabled:      cfg.Tools.Web.GLMSearch.Enabled,
-				BaiduSearchAPIKey:     cfg.Tools.Web.BaiduSearch.APIKey(),
-				BaiduSearchBaseURL:    cfg.Tools.Web.BaiduSearch.BaseURL,
-				BaiduSearchMaxResults: cfg.Tools.Web.BaiduSearch.MaxResults,
-				BaiduSearchEnabled:    cfg.Tools.Web.BaiduSearch.Enabled,
-				Proxy:                 cfg.Tools.Web.Proxy,
-			})
-			if err != nil {
-				logger.ErrorCF("agent", "Failed to create web search tool", map[string]any{"error": err.Error()})
-			} else if searchTool != nil {
-				agent.Tools.Register(searchTool)
-			}
-		}
-		if cfg.Tools.IsToolEnabled("web_fetch") {
-			fetchTool, err := tools.NewWebFetchToolWithProxy(
-				50000,
-				cfg.Tools.Web.Proxy,
-				cfg.Tools.Web.Format,
-				cfg.Tools.Web.FetchLimitBytes,
-				cfg.Tools.Web.PrivateHostWhitelist)
-			if err != nil {
-				logger.ErrorCF("agent", "Failed to create web fetch tool", map[string]any{"error": err.Error()})
-			} else {
-				agent.Tools.Register(fetchTool)
-			}
-		}
-
-		// Hardware tools (I2C, SPI) - Linux only, returns error on other platforms
-		if cfg.Tools.IsToolEnabled("i2c") {
-			agent.Tools.Register(tools.NewI2CTool())
-		}
-		if cfg.Tools.IsToolEnabled("spi") {
-			agent.Tools.Register(tools.NewSPITool())
-		}
-
-		// Message tool
-		if cfg.Tools.IsToolEnabled("message") {
-			messageTool := tools.NewMessageTool()
-			messageTool.SetSendCallback(func(channel, chatID, content string) error {
-				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer pubCancel()
-				return msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-					Channel: channel,
-					ChatID:  chatID,
-					Content: content,
-				})
-			})
-			agent.Tools.Register(messageTool)
-		}
-
-		// Send file tool (outbound media via MediaStore — store injected later by SetMediaStore)
-		if cfg.Tools.IsToolEnabled("send_file") {
-			sendFileTool := tools.NewSendFileTool(
-				agent.Workspace,
-				cfg.Agents.Defaults.RestrictToWorkspace,
-				cfg.Agents.Defaults.GetMaxMediaSize(),
-				nil,
-				allowReadPaths,
-			)
-			agent.Tools.Register(sendFileTool)
-		}
-
-		// Skill discovery and installation tools
-		skills_enabled := cfg.Tools.IsToolEnabled("skills")
-		find_skills_enable := cfg.Tools.IsToolEnabled("find_skills")
-		install_skills_enable := cfg.Tools.IsToolEnabled("install_skill")
-		if skills_enabled && (find_skills_enable || install_skills_enable) {
-			clawHubConfig := cfg.Tools.Skills.Registries.ClawHub
-			registryMgr := skills.NewRegistryManagerFromConfig(skills.RegistryConfig{
-				MaxConcurrentSearches: cfg.Tools.Skills.MaxConcurrentSearches,
-				ClawHub: skills.ClawHubConfig{
-					Enabled:         clawHubConfig.Enabled,
-					BaseURL:         clawHubConfig.BaseURL,
-					AuthToken:       clawHubConfig.AuthToken(),
-					SearchPath:      clawHubConfig.SearchPath,
-					SkillsPath:      clawHubConfig.SkillsPath,
-					DownloadPath:    clawHubConfig.DownloadPath,
-					Timeout:         clawHubConfig.Timeout,
-					MaxZipSize:      clawHubConfig.MaxZipSize,
-					MaxResponseSize: clawHubConfig.MaxResponseSize,
-				},
-			})
-
-			if find_skills_enable {
-				searchCache := skills.NewSearchCache(
-					cfg.Tools.Skills.SearchCache.MaxSize,
-					time.Duration(cfg.Tools.Skills.SearchCache.TTLSeconds)*time.Second,
-				)
-				agent.Tools.Register(tools.NewFindSkillsTool(registryMgr, searchCache))
-			}
-
-			if install_skills_enable {
-				agent.Tools.Register(tools.NewInstallSkillTool(registryMgr, agent.Workspace))
-			}
-		}
-
-		// Spawn and spawn_status tools share a SubagentManager.
-		// Construct it when either tool is enabled (both require subagent).
-		spawnEnabled := cfg.Tools.IsToolEnabled("spawn")
-		spawnStatusEnabled := cfg.Tools.IsToolEnabled("spawn_status")
-		if (spawnEnabled || spawnStatusEnabled) && cfg.Tools.IsToolEnabled("subagent") {
-			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
-			subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
-
-			// Set the spawner that links into AgentLoop's turnState
-			subagentManager.SetSpawner(func(
-				ctx context.Context,
-				task, label, targetAgentID string,
-				tls *tools.ToolRegistry,
-				maxTokens int,
-				temperature float64,
-				hasMaxTokens, hasTemperature bool,
-			) (*tools.ToolResult, error) {
-				// 1. Recover parent Turn State from Context
-				parentTS := turnStateFromContext(ctx)
-				if parentTS == nil {
-					// Fallback: If no turnState exists in context, create an isolated ad-hoc root turn state
-					// so that the tool can still function outside of an agent loop (e.g. tests, raw invocations).
-					parentTS = &turnState{
-						ctx:            ctx,
-						turnID:         "adhoc-root",
-						depth:          0,
-						session:        nil, // Ephemeral session not needed for adhoc spawn
-						pendingResults: make(chan *tools.ToolResult, 16),
-						concurrencySem: make(chan struct{}, 5),
-					}
-				}
-
-				// 2. Build Tools slice from registry
-				var tlSlice []tools.Tool
-				for _, name := range tls.List() {
-					if t, ok := tls.Get(name); ok {
-						tlSlice = append(tlSlice, t)
-					}
-				}
-
-				// 3. System Prompt
-				systemPrompt := "You are a subagent. Complete the given task independently and report the result.\n" +
-					"You have access to tools - use them as needed to complete your task.\n" +
-					"After completing the task, provide a clear summary of what was done.\n\n" +
-					"Task: " + task
-
-				// 4. Resolve Model
-				modelToUse := agent.Model
-				if targetAgentID != "" {
-					if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
-						modelToUse = targetAgent.Model
-					}
-				}
-
-				// 5. Build SubTurnConfig
-				cfg := SubTurnConfig{
-					Model:        modelToUse,
-					Tools:        tlSlice,
-					SystemPrompt: systemPrompt,
-				}
-				if hasMaxTokens {
-					cfg.MaxTokens = maxTokens
-				}
-
-				// 6. Spawn SubTurn
-				return spawnSubTurn(ctx, al, parentTS, cfg)
-			})
-
-			// Clone the parent's tool registry so subagents can use all
-			// tools registered so far (file, web, etc.) but NOT spawn/
-			// spawn_status which are added below — preventing recursive
-			// subagent spawning.
-			subagentManager.SetTools(agent.Tools.Clone())
-			if spawnEnabled {
-				spawnTool := tools.NewSpawnTool(subagentManager)
-				spawnTool.SetSpawner(NewSubTurnSpawner(al))
-				currentAgentID := agentID
-				spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
-					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
-				})
-
-				agent.Tools.Register(spawnTool)
-
-				// Also register the synchronous subagent tool
-				subagentTool := tools.NewSubagentTool(subagentManager)
-				subagentTool.SetSpawner(NewSubTurnSpawner(al))
-				agent.Tools.Register(subagentTool)
-			}
-			if spawnStatusEnabled {
-				agent.Tools.Register(tools.NewSpawnStatusTool(subagentManager))
-			}
-		} else if (spawnEnabled || spawnStatusEnabled) && !cfg.Tools.IsToolEnabled("subagent") {
-			logger.WarnCF("agent", "spawn/spawn_status tools require subagent to be enabled", nil)
-		}
-	}
-}
 
 func (al *AgentLoop) Run(ctx context.Context) error {
 	al.running.Store(true)
@@ -969,7 +790,64 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	}
 
 	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(al, cfg, al.bus, registry, provider)
+	RegisterSharedTools(SharedToolDependencies{
+		Config:     cfg,
+		MessageBus: al.bus,
+		Registry:   registry,
+		Provider:   provider,
+		SubTurnSpawner: NewSubTurnSpawner(al),
+		SubagentSpawner: func(
+			ctx context.Context,
+			task, label, targetAgentID string,
+			tls *tools.ToolRegistry,
+			maxTokens int,
+			temperature float64,
+			hasMaxTokens, hasTemperature bool,
+			agent *AgentInstance,
+		) (*tools.ToolResult, error) {
+			parentTS := turnStateFromContext(ctx)
+			if parentTS == nil {
+				parentTS = &turnState{
+					ctx:            ctx,
+					turnID:         "adhoc-root",
+					depth:          0,
+					session:        nil,
+					pendingResults: make(chan *tools.ToolResult, 16),
+					concurrencySem: make(chan struct{}, 5),
+				}
+			}
+
+			var tlSlice []tools.Tool
+			for _, name := range tls.List() {
+				if t, ok := tls.Get(name); ok {
+					tlSlice = append(tlSlice, t)
+				}
+			}
+
+			systemPrompt := "You are a subagent. Complete the given task independently and report the result.\n" +
+				"You have access to tools - use them as needed to complete your task.\n" +
+				"After completing the task, provide a clear summary of what was done.\n\n" +
+				"Task: " + task
+
+			modelToUse := agent.Model
+			if targetAgentID != "" {
+				if targetAgent, ok := registry.GetAgent(targetAgentID); ok {
+					modelToUse = targetAgent.Model
+				}
+			}
+
+			subTurnCfg := SubTurnConfig{
+				Model:        modelToUse,
+				Tools:        tlSlice,
+				SystemPrompt: systemPrompt,
+			}
+			if hasMaxTokens {
+				subTurnCfg.MaxTokens = maxTokens
+			}
+
+			return spawnSubTurn(ctx, al, parentTS, subTurnCfg)
+		},
+	})
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair

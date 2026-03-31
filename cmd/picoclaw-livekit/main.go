@@ -57,6 +57,29 @@ func main() {
 	agentInstance := agent.NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
 	defer agentInstance.Close()
 
+	// Register shared tools (web_search, spawn, subagent, etc.) on the agent instance
+	// so they are available to the voice agent bridge.
+	singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
+	agent.RegisterSharedTools(agent.SharedToolDependencies{
+		Config:   cfg,
+		Registry: singleAgentRegistry,
+		Provider: provider,
+		// No MessageBus in LiveKit mode — message tool will gracefully no-op
+		// No SubTurnSpawner or SubagentSpawner — spawn tools will use their
+		// fallback legacy tool loop path via SubagentManager
+	})
+	// Copy the tools from the registry's default agent into our instance
+	if defaultAgent := singleAgentRegistry.GetDefaultAgent(); defaultAgent != nil {
+		for _, toolName := range defaultAgent.Tools.List() {
+			if t, ok := defaultAgent.Tools.Get(toolName); ok {
+				agentInstance.Tools.Register(t)
+			}
+		}
+	}
+	logger.InfoCF("livekit", "Registered shared tools on agent instance", map[string]any{
+		"tool_count": agentInstance.Tools.Count(),
+	})
+
 	lkCfg := cfg.LiveKitService
 	if lkCfg.ServerURL == "" {
 		fmt.Fprintln(os.Stderr, "Error: livekit_service.server_url is required")
