@@ -567,4 +567,14 @@ func (ap *AudioPipeline) flushSilence(durationMs int) {
 	sampleCount := (sr * durationMs) / 1000
 	samples := make(media.PCM16Sample, sampleCount)
 	_ = ap.session.localTrack.WriteSample(samples)
+
+	// Block until the entire RTP queue (including this silence) has been
+	// transmitted, so the tts_stop message fires only after the device
+	// has finished playing the last word.
+	ap.session.localTrack.WaitForPlayout()
+
+	logger.DebugCF("livekit", "Silence flushed – playout complete", map[string]any{
+		"session":     ap.sessionKey(),
+		"duration_ms": durationMs,
+	})
 }
