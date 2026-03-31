@@ -138,6 +138,10 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	var fillerCtx context.Context
 	var fillerCancel context.CancelFunc
 
+	if ap.session != nil {
+		ap.session.PublishAgentState("listening", "thinking")
+	}
+
 	// Play filler word asynchronously so we can cancel it if LLM is fast
 	if ap.session != nil && len(ap.session.fillerWords) > 0 {
 		fillerCtx, fillerCancel = context.WithCancel(ctx)
@@ -150,6 +154,10 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	asyncPending, err := ap.bridge.ChatStream(ctx, sessionKey, text, func(chunk string) {
 		if !firstChunkReceived {
 			firstChunkReceived = true
+			if ap.session != nil {
+				ap.session.PublishAgentState("thinking", "speaking")
+				ap.session.PublishSpeechCreated("")
+			}
 			if fillerCancel != nil {
 				fillerCancel()                       // Cancel filler if LLM starts responding quickly
 				ap.cancelTTS("llm_response_started") // clear any buffered filler audio
@@ -167,6 +175,10 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		}
 		if remainder := splitter.Flush(); remainder != "" {
 			ap.synthesizeAndPlay(ctx, remainder)
+		}
+		ap.flushSilence(500) // add 500ms silence so device buffer doesn't clip the final word
+		if ap.session != nil {
+			ap.session.PublishAgentState("speaking", "listening")
 		}
 		if onDone != nil {
 			onDone()
@@ -327,7 +339,19 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 	splitter := newSentenceSplitter()
 
 	go func() {
+		if ap.session != nil {
+			ap.session.PublishAgentState("listening", "thinking")
+		}
+		firstChunkReceived := false
+
 		err := ap.bridge.GenerateSpontaneousResponse(ttsCtx, sessionKey, evt, func(chunk string) {
+			if !firstChunkReceived {
+				firstChunkReceived = true
+				if ap.session != nil {
+					ap.session.PublishAgentState("thinking", "speaking")
+					ap.session.PublishSpeechCreated("")
+				}
+			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
 					ap.synthesizeAndPlay(ttsCtx, sentence)
@@ -336,6 +360,10 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		}, func() {
 			if remainder := splitter.Flush(); remainder != "" {
 				ap.synthesizeAndPlay(ttsCtx, remainder)
+			}
+			ap.flushSilence(500) // trailing silence for spontaneous replies
+			if ap.session != nil {
+				ap.session.PublishAgentState("speaking", "listening")
 			}
 			ttsCancel()
 		})
@@ -354,7 +382,7 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	if ap.tts == nil || ap.session == nil || ap.session.localTrack == nil {
 		return
 	}
-	logger.DebugCF("livekit", "TTS start", map[string]any{
+	logger.DebugCF("livekit", "Synthesizing audio chunk", map[string]any{
 		"session": ap.sessionKey(),
 		"text":    text,
 	})
@@ -368,7 +396,7 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	}
 	defer stream.Close()
 
-	logger.DebugCF("livekit", "TTS forward start", map[string]any{
+	logger.DebugCF("livekit", "Audio stream started", map[string]any{
 		"session":   ap.sessionKey(),
 		"track_sid": ap.localTrackSID(),
 	})
@@ -380,7 +408,7 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	for {
 		select {
 		case <-ctx.Done():
-			logger.WarnCF("livekit", "TTS forward canceled", map[string]any{
+			logger.WarnCF("livekit", "Audio stream canceled", map[string]any{
 				"session":         ap.sessionKey(),
 				"track_sid":       ap.localTrackSID(),
 				"chunks_written":  chunksWritten,
@@ -393,7 +421,7 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 
 		chunk, err := stream.Read()
 		if err == io.EOF {
-			logger.DebugCF("livekit", "TTS forward complete", map[string]any{
+			logger.DebugCF("livekit", "Audio stream complete", map[string]any{
 				"session":         ap.sessionKey(),
 				"track_sid":       ap.localTrackSID(),
 				"chunks_written":  chunksWritten,
@@ -456,6 +484,11 @@ func (ap *AudioPipeline) cancelTTS(reason string) {
 	if ap.session.localTrack != nil {
 		ap.session.localTrack.ClearQueue()
 	}
+
+	if hadActiveTTS {
+		ap.session.PublishAgentState("speaking", "listening")
+	}
+
 	logger.DebugCF("livekit", "TTS cancel/clear queue", map[string]any{
 		"session":        ap.sessionKey(),
 		"reason":         reason,
@@ -520,4 +553,18 @@ func sampleStats(samples media.PCM16Sample) (int16, int16, int) {
 	}
 
 	return minSample, maxSample, int(totalAbs / int64(len(samples)))
+}
+
+// flushSilence pushes empty audio samples to ensure the end of speech is not cut off by network or device buffers.
+func (ap *AudioPipeline) flushSilence(durationMs int) {
+	if ap.session == nil || ap.session.localTrack == nil {
+		return
+	}
+	sr := ap.session.sampleRate
+	if sr == 0 {
+		sr = 48000 // default fallback if 0
+	}
+	sampleCount := (sr * durationMs) / 1000
+	samples := make(media.PCM16Sample, sampleCount)
+	_ = ap.session.localTrack.WriteSample(samples)
 }

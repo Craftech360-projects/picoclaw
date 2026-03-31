@@ -187,7 +187,7 @@ func (rs *RoomSession) PublishAgentState(oldState, newState string) error {
 		return err
 	}
 
-	return rs.room.LocalParticipant.PublishData(data, lksdk.DataPacketKind_RELIABLE, nil)
+	return rs.room.LocalParticipant.PublishData(data, lksdk.WithDataPublishReliable(true))
 }
 
 // PublishSpeechCreated publishes the generated speech text back to the LiveKit data channel
@@ -208,7 +208,7 @@ func (rs *RoomSession) PublishSpeechCreated(text string) error {
 		return err
 	}
 
-	return rs.room.LocalParticipant.PublishData(data, lksdk.DataPacketKind_RELIABLE, nil)
+	return rs.room.LocalParticipant.PublishData(data, lksdk.WithDataPublishReliable(true))
 }
 
 // Leave disconnects from the room.
