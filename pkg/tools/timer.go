@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -44,12 +45,25 @@ func (t *TimerTool) Execute(ctx context.Context, args map[string]any) *ToolResul
 // ExecuteAsync implements AsyncExecutor, allowing the timer to sleep in the
 // background and trigger a callback (e.g., spontaneous voice speech) upon completion.
 func (t *TimerTool) ExecuteAsync(ctx context.Context, args map[string]any, cb AsyncCallback) *ToolResult {
-	durationFloat, ok := args["duration_seconds"].(float64)
-	if !ok {
-		return ErrorResult("duration_seconds must be a number")
+	var durationSecs int
+	switch v := args["duration_seconds"].(type) {
+	case float64:
+		durationSecs = int(v)
+	case int:
+		durationSecs = v
+	case int64:
+		durationSecs = int(v)
+	case json.Number:
+		if fFloat, err := v.Float64(); err == nil {
+			durationSecs = int(fFloat)
+		} else {
+			return ErrorResult("duration_seconds must be a valid number string")
+		}
+	default:
+		// Attempt to parse string representation if provider used json.Number
+		return ErrorResult(fmt.Sprintf("duration_seconds must be a number, got %T", args["duration_seconds"]))
 	}
 
-	durationSecs := int(durationFloat)
 	if durationSecs <= 0 {
 		return ErrorResult("duration_seconds must be greater than 0")
 	}

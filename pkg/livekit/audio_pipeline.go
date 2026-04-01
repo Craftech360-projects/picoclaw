@@ -321,7 +321,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			"session": sessionKey,
 		})
 		if ap.bridge != nil && ap.bridge.sessions != nil && evt.Result != nil {
-			ap.bridge.sessions.AddMessage(sessionKey, "system",
+			ap.bridge.sessions.AddMessage(sessionKey, "user",
 				"[Background Task Completed] "+evt.ToolName+": "+evt.Result.ContentForLLM())
 		}
 		return
