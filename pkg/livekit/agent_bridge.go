@@ -451,6 +451,24 @@ func (ab *AgentBridge) maybeSummarize(sessionKey string) {
 	}
 	defer ab.summarizing.Delete(sessionKey)
 
+	// Wait for 5 seconds to ensure the user has actually stopped speaking.
+	// This prevents the background summarization LLM call from hogging
+	// API connection pools/rate limits while the main voice loop is active.
+	time.Sleep(5 * time.Second)
+
+	// If the user spoke or was responded to during our 5s sleep, abort!
+	// We only summarize when the conversation is completely idle.
+	currentHistory := ab.sessions.GetHistory(sessionKey)
+	if len(currentHistory) > len(history) {
+		logger.DebugCF("livekit", "Aborting summarization, conversation active", map[string]any{
+			"session": sessionKey,
+		})
+		return
+	}
+
+	// Revert to working on the latest history
+	history = currentHistory
+
 	logger.InfoCF("livekit", "Voice context threshold reached, summarizing history", map[string]any{
 		"session":  sessionKey,
 		"messages": len(history),
