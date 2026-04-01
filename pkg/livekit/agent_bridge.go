@@ -396,10 +396,10 @@ func (ab *AgentBridge) GenerateSpontaneousResponse(ctx context.Context, sessionK
 		return errors.New("agent bridge or provider is nil")
 	}
 
-	// Build a system message with the background task result
+	// Build a user message with the background task result so the LLM knows it finished
 	resultContent := evt.Result.ContentForLLM()
 	taskResultMsg := providers.Message{
-		Role:    "system",
+		Role:    "user",
 		Content: fmt.Sprintf("[Background Task Completed] Tool '%s' finished with result: %s\n\nPlease briefly announce this result to the user in a natural, conversational way.", evt.ToolName, resultContent),
 	}
 

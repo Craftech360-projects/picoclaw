@@ -17,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/livekit"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice/cartesia_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
@@ -76,6 +77,9 @@ func main() {
 			}
 		}
 	}
+
+	// Always register the async timer tool so the voice agent can set reminders natively
+	agentInstance.Tools.Register(tools.NewTimerTool())
 	logger.InfoCF("livekit", "Registered shared tools on agent instance", map[string]any{
 		"tool_count": agentInstance.Tools.Count(),
 	})
