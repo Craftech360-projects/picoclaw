@@ -29,7 +29,7 @@ type Worker struct {
 	mu       sync.RWMutex
 	sendMu   sync.Mutex
 
-	bridgeFactory func() *AgentBridge
+	bridgeFactory func(job *livekit.Job) *AgentBridge
 	roomFactory   func(job *livekit.Job, assignment *livekit.JobAssignment, bridge *AgentBridge) (*RoomSession, error)
 
 	skipRoomJoin bool
@@ -42,7 +42,7 @@ type WorkerConfig struct {
 	ServerURL     string
 	APIKey        string
 	APISecret     string
-	BridgeFactory func() *AgentBridge
+	BridgeFactory func(job *livekit.Job) *AgentBridge
 	RoomFactory   func(job *livekit.Job, assignment *livekit.JobAssignment, bridge *AgentBridge) (*RoomSession, error)
 	MaxSessions   int
 }
@@ -216,7 +216,7 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 
 	var bridge *AgentBridge
 	if w.bridgeFactory != nil {
-		bridge = w.bridgeFactory()
+		bridge = w.bridgeFactory(job)
 	}
 	if w.roomFactory == nil {
 		w.updateJobStatus(job.Id, livekit.JobStatus_JS_FAILED)

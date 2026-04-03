@@ -55,33 +55,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	agentInstance := agent.NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
-	defer agentInstance.Close()
-
-	// Register shared tools (web_search, spawn, subagent, etc.) on the agent instance
-	// so they are available to the voice agent bridge.
-	singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
-	agent.RegisterSharedTools(agent.SharedToolDependencies{
-		Config:   cfg,
-		Registry: singleAgentRegistry,
-		Provider: provider,
-		// No MessageBus in LiveKit mode — message tool will gracefully no-op
-		// No SubTurnSpawner or SubagentSpawner — spawn tools will use their
-		// fallback legacy tool loop path via SubagentManager
-	})
-	// Copy the tools from the registry's default agent into our instance
-	if defaultAgent := singleAgentRegistry.GetDefaultAgent(); defaultAgent != nil {
-		for _, toolName := range defaultAgent.Tools.List() {
-			if t, ok := defaultAgent.Tools.Get(toolName); ok {
-				agentInstance.Tools.Register(t)
-			}
-		}
-	}
-
-	// Always register the async timer tool so the voice agent can set reminders natively
-	agentInstance.Tools.Register(tools.NewTimerTool())
-	logger.InfoCF("livekit", "Registered shared tools on agent instance", map[string]any{
-		"tool_count": agentInstance.Tools.Count(),
+	logger.InfoCF("livekit", "Finished provider initialization", map[string]any{
+		"model": modelID,
 	})
 
 	lkCfg := cfg.LiveKitService
@@ -107,14 +82,36 @@ func main() {
 		"tts_enabled":        ttsProvider != nil,
 	})
 
-	bridgeFactory := func() *livekit.AgentBridge {
+	bridgeFactory := func(job *livekitproto.Job) *livekit.AgentBridge {
+		agentCfg := &config.AgentConfig{
+			ID:   job.Room.Name,
+			Name: "LiveKit-" + job.Room.Name,
+		}
+		
+		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
+		
+		// Register shared tools on the ephemeral agent instance
+		singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
+		agent.RegisterSharedTools(agent.SharedToolDependencies{
+			Config:   cfg,
+			Registry: singleAgentRegistry,
+			Provider: provider,
+		})
+		
+		if defaultAgent := singleAgentRegistry.GetDefaultAgent(); defaultAgent != nil {
+			for _, toolName := range defaultAgent.Tools.List() {
+				if t, ok := defaultAgent.Tools.Get(toolName); ok {
+					agentInstance.Tools.Register(t)
+				}
+			}
+		}
+		agentInstance.Tools.Register(tools.NewTimerTool())
+
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
 			Config:         cfg,
 			Provider:       provider,
 			ModelID:        modelID,
-			Sessions:       agentInstance.Sessions,
-			Tools:          agentInstance.Tools,
-			ContextBuilder: agentInstance.ContextBuilder,
+			AgentInstance:  agentInstance,
 			MaxIterations:  cfg.Agents.Defaults.MaxToolIterations,
 		})
 		if err != nil {

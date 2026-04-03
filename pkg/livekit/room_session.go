@@ -115,6 +115,12 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	cb.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 		rs.handleTrackSubscribed(track, rp)
 	}
+	cb.OnDisconnected = func() {
+		logger.InfoCF("livekit", "Room disconnected callback triggered", map[string]any{
+			"room": rs.roomInfo.Name,
+		})
+		rs.Leave()
+	}
 
 	var token string
 	if rs.apiKey != "" && rs.apiSecret != "" {
@@ -241,6 +247,9 @@ func (rs *RoomSession) Leave() {
 	if rs.room != nil {
 		rs.room.Disconnect()
 	}
+	if rs.bridge != nil {
+		rs.bridge.Close()
+	}
 }
 
 func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksdk.RemoteParticipant) {
@@ -345,6 +354,9 @@ func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant
 		"room":        rs.roomInfo.Name,
 		"participant": rp.Identity(),
 	})
+
+	// When the user hangs up or leaves, the agent should leave the room to trigger ephemeral cleanup.
+	go rs.Leave()
 }
 
 func (rs *RoomSession) generateRoomToken() (string, error) {

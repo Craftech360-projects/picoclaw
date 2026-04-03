@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type AsyncEvent struct {
 
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
+	agentInstance  *agent.AgentInstance
 	cfg            *config.Config
 	provider       providers.LLMProvider
 	streamProvider providers.StreamingProvider
@@ -49,9 +51,7 @@ type AgentBridgeConfig struct {
 	Config                    *config.Config
 	Provider                  providers.LLMProvider
 	ModelID                   string
-	Sessions                  session.SessionStore
-	Tools                     *tools.ToolRegistry
-	ContextBuilder            *agent.ContextBuilder
+	AgentInstance             *agent.AgentInstance
 	MaxIterations             int
 	LLMOptions                map[string]any
 	AsyncEventChan            chan AsyncEvent // optional channel for background task results
@@ -81,12 +81,13 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		ctxWindow = 128000
 	}
 	ab := &AgentBridge{
+		agentInstance:             cfg.AgentInstance,
 		cfg:                       cfg.Config,
 		provider:                  cfg.Provider,
 		modelID:                   cfg.ModelID,
-		sessions:                  cfg.Sessions,
-		tools:                     cfg.Tools,
-		contextBuilder:            cfg.ContextBuilder,
+		sessions:                  cfg.AgentInstance.Sessions,
+		tools:                     cfg.AgentInstance.Tools,
+		contextBuilder:            cfg.AgentInstance.ContextBuilder,
 		maxIterations:             cfg.MaxIterations,
 		llmOptions:                cfg.LLMOptions,
 		asyncEventChan:            asyncChan,
@@ -100,6 +101,18 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		ab.maxIterations = 10
 	}
 	return ab, nil
+}
+
+// Close gracefully releases the session memory store and then auto-deletes the active 
+// ephemeral workspace folder to prevent disk storage exhaustion natively.
+func (ab *AgentBridge) Close() {
+	if ab.agentInstance != nil {
+		ab.agentInstance.Close()
+		// ephemeral workspace garbage collection
+		if ab.agentInstance.Workspace != "" {
+			os.RemoveAll(ab.agentInstance.Workspace)
+		}
+	}
 }
 
 // AsyncEvents returns the channel that receives background task completion events.
