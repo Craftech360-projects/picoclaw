@@ -327,6 +327,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, vadEventInterface)
 	go pipeline.RunInbound(rs.ctx, stream)
+
+	// Fire proactive LLM greeting precisely when the deepgram and VAD systems
+	// are confirmed fully open and actively listening to the subscribed track.
+	go pipeline.TriggerGreeting(rs.ctx, pipeline.sessionKey())
 }
 
 func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant) {

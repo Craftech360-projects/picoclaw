@@ -435,6 +435,37 @@ func (ab *AgentBridge) GenerateSpontaneousResponse(ctx context.Context, sessionK
 	return err
 }
 
+// GenerateGreeting triggers the LLM to dynamically generate an introductory greeting
+// when the user connects to the room. It leverages the agent's system prompt to decide the persona.
+func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, cb func(chunk string), onDone func()) error {
+	if ab == nil || ab.provider == nil {
+		if onDone != nil {
+			onDone()
+		}
+		return errors.New("agent bridge or provider is nil")
+	}
+
+	greetingPrompt := providers.Message{
+		Role:    "user",
+		Content: "[System Event] The user has successfully connected to the room and is now listening. Please proactively introduce yourself and greet them using your persona guidelines.",
+	}
+
+	if ab.sessions != nil {
+		ab.sessions.AddFullMessage(sessionKey, greetingPrompt)
+	}
+
+	var history []providers.Message
+	var summary string
+	if ab.sessions != nil {
+		history = ab.sessions.GetHistory(sessionKey)
+		summary = ab.sessions.GetSummary(sessionKey)
+	}
+	messages := ab.buildMessages(history, summary, "", sessionKey)
+
+	_, err := ab.runIteration(ctx, sessionKey, messages, cb, onDone)
+	return err
+}
+
 func normalizeToolCalls(calls []providers.ToolCall) []providers.ToolCall {
 	if len(calls) == 0 {
 		return nil

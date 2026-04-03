@@ -195,6 +195,49 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	return asyncPending, nil
 }
 
+// TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
+// It bypasses the user speech wait loop and talks directly into the TTS pipeline.
+func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string) {
+	if ap.bridge == nil || ap.session == nil {
+		return
+	}
+
+	logger.InfoCF("livekit", "Triggering dynamic agent greeting", map[string]any{
+		"session": sessionKey,
+	})
+
+	ap.session.PublishAgentState("listening", "thinking")
+	firstChunkReceived := false
+	splitter := newSentenceSplitter()
+
+	go func() {
+		err := ap.bridge.GenerateGreeting(ctx, sessionKey, func(chunk string) {
+			if !firstChunkReceived {
+				firstChunkReceived = true
+				ap.session.PublishAgentState("thinking", "speaking")
+			}
+			for _, r := range chunk {
+				if sentence := splitter.Feed(r); sentence != "" {
+					ap.synthesizeAndPlay(ctx, sentence)
+				}
+			}
+		}, func() {
+			if remainder := splitter.Flush(); remainder != "" {
+				ap.synthesizeAndPlay(ctx, remainder)
+			}
+			ap.flushSilence(500)
+			ap.session.PublishAgentState("speaking", "listening")
+		})
+
+		if err != nil {
+			logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
+				"session": sessionKey,
+				"error":   err.Error(),
+			})
+		}
+	}()
+}
+
 // RunInbound reads Deepgram transcription events and calls the agent on speech end.
 // It also listens for background task completions via the bridge's async event channel.
 func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.TranscriptionStream) {
