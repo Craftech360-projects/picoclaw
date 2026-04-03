@@ -5,9 +5,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/livekit/media-sdk"
 	"github.com/livekit/protocol/auth"
@@ -37,15 +40,21 @@ type RoomSession struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 
-	serverURL   string
-	token       string
-	deepgram    *deepgram.DeepgramTranscriber
-	tts         tts.Provider
-	apiKey      string
-	apiSecret   string
-	agentName   string
-	sampleRate  int
-	fillerWords []string
+	serverURL        string
+	token            string
+	deepgram         *deepgram.DeepgramTranscriber
+	tts              tts.Provider
+	apiKey           string
+	apiSecret        string
+	agentName        string
+	sampleRate       int
+	fillerWords      []string
+	primaryLanguage  string // from room metadata, used for language-aware fallbacks
+	managerAPIURL    string
+	managerAPISecret string
+	deviceMAC        string
+	agentID          string
+	closeOnce        sync.Once
 }
 
 // ParticipantState tracks per-participant voice session state.
@@ -61,19 +70,20 @@ type ParticipantState struct {
 
 // RoomSessionConfig configures a RoomSession.
 type RoomSessionConfig struct {
-	Worker      *Worker
-	JobID       string
-	RoomInfo    *livekit.Room
-	Bridge      *AgentBridge
-	ServerURL   string
-	Token       string
-	Deepgram    *deepgram.DeepgramTranscriber
-	TTS         tts.Provider
-	APIKey      string
-	APISecret   string
-	AgentName   string
-	SampleRate  int
-	FillerWords []string
+	Worker          *Worker
+	JobID           string
+	RoomInfo        *livekit.Room
+	Bridge          *AgentBridge
+	ServerURL       string
+	Token           string
+	Deepgram        *deepgram.DeepgramTranscriber
+	TTS             tts.Provider
+	APIKey          string
+	APISecret       string
+	AgentName       string
+	SampleRate      int
+	FillerWords     []string
+	PrimaryLanguage string // e.g. "Hindi", "English" — from room metadata
 }
 
 // NewRoomSession creates a new room session for a job.
@@ -84,20 +94,32 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 	if cfg.ServerURL == "" {
 		return nil, errors.New("server url is empty")
 	}
+	managerAPIURL := strings.TrimSpace(os.Getenv("MANAGER_API_URL"))
+	if managerAPIURL == "" {
+		managerAPIURL = defaultManagerAPIURL
+	}
+	managerAPISecret := strings.TrimSpace(os.Getenv("MANAGER_API_SECRET"))
+	deviceMAC, agentID := resolvePersistenceFields(cfg.RoomInfo.Name, cfg.RoomInfo.Metadata)
+
 	return &RoomSession{
-		worker:      cfg.Worker,
-		jobID:       cfg.JobID,
-		roomInfo:    cfg.RoomInfo,
-		bridge:      cfg.Bridge,
-		serverURL:   cfg.ServerURL,
-		token:       cfg.Token,
-		deepgram:    cfg.Deepgram,
-		tts:         cfg.TTS,
-		apiKey:      cfg.APIKey,
-		apiSecret:   cfg.APISecret,
-		agentName:   cfg.AgentName,
-		sampleRate:  cfg.SampleRate,
-		fillerWords: cfg.FillerWords,
+		worker:           cfg.Worker,
+		jobID:            cfg.JobID,
+		roomInfo:         cfg.RoomInfo,
+		bridge:           cfg.Bridge,
+		serverURL:        cfg.ServerURL,
+		token:            cfg.Token,
+		deepgram:         cfg.Deepgram,
+		tts:              cfg.TTS,
+		apiKey:           cfg.APIKey,
+		apiSecret:        cfg.APISecret,
+		agentName:        cfg.AgentName,
+		sampleRate:       cfg.SampleRate,
+		fillerWords:      cfg.FillerWords,
+		primaryLanguage:  cfg.PrimaryLanguage,
+		managerAPIURL:    managerAPIURL,
+		managerAPISecret: managerAPISecret,
+		deviceMAC:        deviceMAC,
+		agentID:          agentID,
 	}, nil
 }
 
@@ -121,6 +143,9 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 		})
 		rs.Leave()
 	}
+	cb.OnDataReceived = func(data []byte, params lksdk.DataReceiveParams) {
+		rs.handleDataMessage(data)
+	}
 
 	var token string
 	if rs.apiKey != "" && rs.apiSecret != "" {
@@ -141,6 +166,21 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 		return err
 	}
 	rs.room = room
+
+	// ── Duplicate agent guard ──────────────────────────────────────────────────
+	// If another agent (AGENT kind participant) is already in the room, this job
+	// is a duplicate dispatch — bail out cleanly so there's only ever one agent.
+	for _, rp := range room.GetRemoteParticipants() {
+		if rp.Kind() == lksdk.ParticipantAgent {
+			logger.WarnCF("livekit", "Duplicate agent detected — leaving room", map[string]any{
+				"existing_agent": rp.Identity(),
+				"room":           rs.roomInfo.Name,
+			})
+			room.Disconnect()
+			return errors.New("duplicate agent already in room")
+		}
+	}
+
 	logger.InfoCF("livekit", "Joined room", map[string]any{
 		"room":      rs.roomInfo.Name,
 		"job_id":    rs.jobID,
@@ -219,13 +259,32 @@ func (rs *RoomSession) PublishSpeechCreated(text string) error {
 
 // Leave disconnects from the room.
 func (rs *RoomSession) Leave() {
+	if rs == nil {
+		return
+	}
+	rs.closeOnce.Do(func() {
+		rs.leave()
+	})
+}
+
+func (rs *RoomSession) leave() {
 	rs.mu.Lock()
 	if rs.cancel != nil {
 		rs.cancel()
+		rs.cancel = nil
 	}
 	participant := rs.participant
 	rs.participant = nil
+	localTrack := rs.localTrack
+	rs.localTrack = nil
+	room := rs.room
+	rs.room = nil
+	bridge := rs.bridge
+	rs.bridge = nil
 	rs.mu.Unlock()
+
+	// Persist usage + transcript before bridge/session teardown.
+	rs.persistPostSessionData(bridge)
 
 	if participant != nil {
 		participant.mu.Lock()
@@ -241,15 +300,83 @@ func (rs *RoomSession) Leave() {
 		participant.mu.Unlock()
 	}
 
-	if rs.localTrack != nil {
-		_ = rs.localTrack.Close()
+	if localTrack != nil {
+		_ = localTrack.Close()
 	}
-	if rs.room != nil {
-		rs.room.Disconnect()
+	if room != nil {
+		room.Disconnect()
 	}
-	if rs.bridge != nil {
-		rs.bridge.Close()
+	if bridge != nil {
+		bridge.Close()
 	}
+}
+
+// handleDataMessage processes data channel messages from the MQTT gateway.
+func (rs *RoomSession) handleDataMessage(data []byte) {
+	var msg map[string]any
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return
+	}
+	msgType, _ := msg["type"].(string)
+	switch msgType {
+	case "end_prompt":
+		prompt, _ := msg["prompt"].(string)
+		if prompt == "" {
+			prompt = "It was so much fun talking with you! Take care and see you next time!"
+		}
+		logger.InfoCF("livekit", "Received end_prompt from gateway", map[string]any{"room": rs.roomInfo.Name})
+		go rs.handleEndPrompt(prompt)
+	case "shutdown_request":
+		sessionID, _ := msg["session_id"].(string)
+		requireAck, _ := msg["require_ack"].(bool)
+		logger.InfoCF("livekit", "Received shutdown_request from gateway", map[string]any{"room": rs.roomInfo.Name})
+		go rs.handleShutdownRequest(sessionID, requireAck)
+	}
+}
+
+// handleEndPrompt asks the LLM to generate and speak a farewell message,
+// then disconnects. A 10-second deadline prevents hanging on a slow model.
+func (rs *RoomSession) handleEndPrompt(prompt string) {
+	if rs.bridge == nil {
+		return
+	}
+	rs.mu.Lock()
+	participant := rs.participant
+	rs.mu.Unlock()
+	sessionKey := ""
+	if participant != nil {
+		sessionKey = participant.sessionKey
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Build a minimal pipeline just for TTS playback of the goodbye.
+	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, nil)
+	_, _ = pipeline.HandleUtterance(ctx, sessionKey, prompt, nil)
+
+	// Brief pause so TTS audio finishes flushing before we disconnect.
+	time.Sleep(500 * time.Millisecond)
+	rs.Leave()
+}
+
+// handleShutdownRequest sends an ACK back to the gateway (if requested)
+// then triggers a clean Leave sequence.
+func (rs *RoomSession) handleShutdownRequest(sessionID string, requireAck bool) {
+	if requireAck && rs.room != nil && rs.room.LocalParticipant != nil {
+		ack, _ := json.Marshal(map[string]any{
+			"type":       "shutdown_ack",
+			"session_id": sessionID,
+			"timestamp":  time.Now().UnixMilli(),
+			"source":     "picoclaw_agent",
+		})
+		_ = rs.room.LocalParticipant.PublishData(ack, lksdk.WithDataPublishReliable(true))
+		logger.InfoCF("livekit", "Sent shutdown_ack to gateway", map[string]any{
+			"session_id": sessionID,
+			"room":       rs.roomInfo.Name,
+		})
+	}
+	rs.Leave()
 }
 
 func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksdk.RemoteParticipant) {
@@ -269,7 +396,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	ps := &ParticipantState{
 		identity:   rp.Identity(),
-		sessionKey: "",
+		sessionKey: fmt.Sprintf("livekit:%s:%s", rs.roomName(), rp.Identity()),
 	}
 	rs.participant = ps
 	rs.mu.Unlock()
@@ -381,6 +508,13 @@ func (rs *RoomSession) generateRoomToken() (string, error) {
 		"lk.agent.state": "listening",
 	})
 	return at.ToJWT()
+}
+
+func (rs *RoomSession) roomName() string {
+	if rs == nil || rs.roomInfo == nil {
+		return ""
+	}
+	return rs.roomInfo.Name
 }
 
 func sanitizeIdentity(value string) string {

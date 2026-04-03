@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -9,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"text/template"
 
+	"github.com/joho/godotenv"
 	livekitproto "github.com/livekit/protocol/livekit"
 	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/agent"
@@ -17,6 +21,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/livekit"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice/cartesia_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
@@ -26,6 +31,9 @@ import (
 )
 
 func main() {
+	// Best-effort .env loading for local/dev runs. Existing env vars keep precedence.
+	_ = godotenv.Load()
+
 	agentName := flag.String("agent-name", "", "LiveKit named agent identifier (required)")
 	configPath := flag.String("config", "", "Path to config.json (default: ~/.picoclaw/config.json)")
 	logLevel := flag.String("log-level", "info", "Log level (debug, info, warn, error)")
@@ -87,9 +95,79 @@ func main() {
 			ID:   job.Room.Name,
 			Name: "LiveKit-" + job.Room.Name,
 		}
-		
+
+		// 1. Calculate the ephemeral workspace for this exact job identical to NewAgentInstance
+		// This ensures we drop the personalized prompt precisely where this room reads it.
+		var workspace string
+		if cfg.Agents.Defaults.Workspace != "" {
+			home := os.Getenv(config.EnvHome)
+			userHome, _ := os.UserHomeDir()
+			if home == "" {
+				home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
+			}
+			baseWorkspace := strings.Replace(cfg.Agents.Defaults.Workspace, "~", userHome, 1)
+			if !filepath.IsAbs(baseWorkspace) && strings.Contains(cfg.Agents.Defaults.Workspace, "~") {
+				baseWorkspace = strings.Replace(cfg.Agents.Defaults.Workspace, "~", userHome, 1)
+			}
+			id := routing.NormalizeAgentID(agentCfg.ID)
+			workspace = filepath.Join(baseWorkspace, "..", "workspace-"+id)
+		}
+
+		// 2. Fetch and decode Room Metadata payload from MQTT gateway
+		if job.Room != nil && job.Room.Metadata != "" && workspace != "" {
+			type RoomMetadata struct {
+				ChildProfile struct {
+					Name      string `json:"name"`
+					Age       int    `json:"age"`
+					Gender    string `json:"gender"`
+					Interests string `json:"interests"`
+				} `json:"child_profile"`
+				LongTermMemories []string `json:"long_term_memories"`
+				MemoryRelations  []struct {
+					Source   string `json:"source"`
+					Relation string `json:"relation"`
+					Target   string `json:"target"`
+				} `json:"memory_relations"`
+				MemoryEntities []struct {
+					Name string `json:"name"`
+					Type string `json:"type"`
+				} `json:"memory_entities"`
+				PrimaryLanguage string `json:"primary_language"`
+				AdditionalNotes string `json:"additional_notes"`
+			}
+
+			var md RoomMetadata
+			if err := json.Unmarshal([]byte(job.Room.Metadata), &md); err == nil {
+				// 3. Load the Go template we built
+				tmplPath := filepath.Join(".", "prompts", "cheeko.tmpl")
+				if tmplBytes, readErr := os.ReadFile(tmplPath); readErr == nil {
+					if tmpl, parseErr := template.New("cheeko").Parse(string(tmplBytes)); parseErr == nil {
+						var buf bytes.Buffer
+						if execErr := tmpl.Execute(&buf, md); execErr == nil {
+							// 4. Write the perfectly rendered prompt directly into the ephemeral workspace
+							// The AgentInstance's ContextBuilder will swallow it instantly on boot
+							os.MkdirAll(workspace, 0755)
+							os.WriteFile(filepath.Join(workspace, "IDENTITY.md"), buf.Bytes(), 0644)
+							logger.InfoCF("livekit", "Successfully injected zero-latency dynamic IDENTITY.md", map[string]any{
+								"room":  job.Room.Name,
+								"child": md.ChildProfile.Name,
+							})
+						} else {
+							logger.ErrorCF("livekit", "Template exec failed", map[string]any{"error": execErr.Error()})
+						}
+					} else {
+						logger.ErrorCF("livekit", "Template parse failed", map[string]any{"error": parseErr.Error()})
+					}
+				} else {
+					logger.ErrorCF("livekit", "Could not read cheeko.tmpl", map[string]any{"error": readErr.Error()})
+				}
+			} else {
+				logger.ErrorCF("livekit", "Invalid job.Room.Metadata", map[string]any{"error": err.Error()})
+			}
+		}
+
 		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
-		
+
 		// Register shared tools on the ephemeral agent instance
 		singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
 		agent.RegisterSharedTools(agent.SharedToolDependencies{
@@ -97,7 +175,7 @@ func main() {
 			Registry: singleAgentRegistry,
 			Provider: provider,
 		})
-		
+
 		if defaultAgent := singleAgentRegistry.GetDefaultAgent(); defaultAgent != nil {
 			for _, toolName := range defaultAgent.Tools.List() {
 				if t, ok := defaultAgent.Tools.Get(toolName); ok {
@@ -108,11 +186,11 @@ func main() {
 		agentInstance.Tools.Register(tools.NewTimerTool())
 
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:         cfg,
-			Provider:       provider,
-			ModelID:        modelID,
-			AgentInstance:  agentInstance,
-			MaxIterations:  cfg.Agents.Defaults.MaxToolIterations,
+			Config:        cfg,
+			Provider:      provider,
+			ModelID:       modelID,
+			AgentInstance: agentInstance,
+			MaxIterations: cfg.Agents.Defaults.MaxToolIterations,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
@@ -137,20 +215,31 @@ func main() {
 			if assignment != nil {
 				token = assignment.Token
 			}
+			// Extract primaryLanguage from metadata for language-aware fallback phrases
+			primaryLanguage := ""
+			if job.Room != nil && job.Room.Metadata != "" {
+				var mdLang struct {
+					PrimaryLanguage string `json:"primary_language"`
+				}
+				if jsonErr := json.Unmarshal([]byte(job.Room.Metadata), &mdLang); jsonErr == nil {
+					primaryLanguage = mdLang.PrimaryLanguage
+				}
+			}
 			return livekit.NewRoomSession(livekit.RoomSessionConfig{
-				Worker:      worker,
-				JobID:       job.Id,
-				RoomInfo:    job.Room,
-				Bridge:      bridge,
-				ServerURL:   serverURL,
-				Token:       token,
-				Deepgram:    dg,
-				TTS:         ttsProvider,
-				APIKey:      lkCfg.APIKey(),
-				APISecret:   lkCfg.APISecret(),
-				AgentName:   *agentName,
-				SampleRate:  ttsSampleRate,
-				FillerWords: lkCfg.TTS.FillerWords,
+				Worker:          worker,
+				JobID:           job.Id,
+				RoomInfo:        job.Room,
+				Bridge:          bridge,
+				ServerURL:       serverURL,
+				Token:           token,
+				Deepgram:        dg,
+				TTS:             ttsProvider,
+				APIKey:          lkCfg.APIKey(),
+				APISecret:       lkCfg.APISecret(),
+				AgentName:       *agentName,
+				SampleRate:      ttsSampleRate,
+				FillerWords:     lkCfg.TTS.FillerWords,
+				PrimaryLanguage: primaryLanguage,
 			})
 		},
 	}
@@ -190,29 +279,6 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
-}
-
-func parsePCMOutputSampleRate(format string) int {
-	format = strings.TrimSpace(format)
-	if format == "" {
-		return 24000
-	}
-	if strings.HasPrefix(format, "pcm_") {
-		value := strings.TrimPrefix(format, "pcm_")
-		switch value {
-		case "16000":
-			return 16000
-		case "22050":
-			return 22050
-		case "24000":
-			return 24000
-		case "44100":
-			return 44100
-		case "48000":
-			return 48000
-		}
-	}
-	return 24000
 }
 
 func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tts.Provider, int) {

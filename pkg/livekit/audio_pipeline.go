@@ -103,18 +103,24 @@ func (s *sentenceSplitter) Flush() string {
 
 // AudioPipeline coordinates STT -> Agent -> TTS for one participant in a room.
 type AudioPipeline struct {
-	session  *RoomSession
-	bridge   *AgentBridge
-	tts      tts.Provider
-	vadEvent <-chan interface{}
+	session         *RoomSession
+	bridge          *AgentBridge
+	tts             tts.Provider
+	vadEvent        <-chan interface{}
+	primaryLanguage string // used for language-aware error fallback phrases
 }
 
 func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
+	var lang string
+	if session != nil {
+		lang = session.primaryLanguage
+	}
 	return &AudioPipeline{
-		session:  session,
-		bridge:   bridge,
-		tts:      tts,
-		vadEvent: vadEvent,
+		session:         session,
+		bridge:          bridge,
+		tts:             tts,
+		vadEvent:        vadEvent,
+		primaryLanguage: lang,
 	}
 }
 
@@ -151,7 +157,12 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		}()
 	}
 
-	asyncPending, err := ap.bridge.ChatStream(ctx, sessionKey, text, func(chunk string) {
+	// ── Retry loop: up to 3 attempts with exponential back-off ───────────────
+	const maxRetries = 3
+	backoff := 200 * time.Millisecond
+
+	// Build the chunk/done callbacks once; they close over splitter & firstChunkReceived.
+	onChunk := func(chunk string) {
 		if !firstChunkReceived {
 			firstChunkReceived = true
 			if ap.session != nil {
@@ -168,7 +179,8 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 				ap.synthesizeAndPlay(ctx, sentence)
 			}
 		}
-	}, func() {
+	}
+	onDoneCallback := func() {
 		// onDone is called when the LLM turn is finished (including async tools)
 		if fillerCancel != nil {
 			fillerCancel()
@@ -183,11 +195,58 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		if onDone != nil {
 			onDone()
 		}
-	})
+	}
+
+	var asyncPending bool
+	var err error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Reset splitter on each retry so partial text doesn't bleed through
+		if attempt > 0 {
+			splitter = newSentenceSplitter()
+			firstChunkReceived = false
+		}
+		asyncPending, err = ap.bridge.ChatStream(ctx, sessionKey, text, onChunk, onDoneCallback)
+		if err == nil {
+			break
+		}
+		logger.WarnCF("livekit", "ChatStream failed, retrying", map[string]any{
+			"attempt": attempt + 1,
+			"max":     maxRetries,
+			"error":   err.Error(),
+			"session": sessionKey,
+		})
+		if attempt < maxRetries-1 {
+			select {
+			case <-ctx.Done():
+				// Context cancelled (e.g. user interrupted) — don't retry
+				if onDone != nil {
+					onDone()
+				}
+				return false, ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+			}
+		}
+	}
 
 	if err != nil {
-		// ChatStream will have called onDone already
-		return false, fmt.Errorf("agent: %w", err)
+		// All retries exhausted — play a language-aware friendly fallback and clean up.
+		fallback := ap.retryFallbackPhrase()
+		logger.ErrorCF("livekit", "All ChatStream retries failed — playing fallback", map[string]any{
+			"session": sessionKey,
+			"error":   err.Error(),
+		})
+		if fillerCancel != nil {
+			fillerCancel()
+		}
+		ap.synthesizeAndPlay(ctx, fallback)
+		if ap.session != nil {
+			ap.session.PublishAgentState("speaking", "listening")
+		}
+		if onDone != nil {
+			onDone()
+		}
+		return false, fmt.Errorf("agent (after %d retries): %w", maxRetries, err)
 	}
 
 	// If a tool is running asynchronously, we don't clear the context immediately.
@@ -197,6 +256,28 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 
 // TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
 // It bypasses the user speech wait loop and talks directly into the TTS pipeline.
+// retryFallbackPhrase returns a child-friendly "I glitched, say again" phrase
+// in the session's primary language so the child is not left in silence.
+func (ap *AudioPipeline) retryFallbackPhrase() string {
+	switch strings.ToLower(ap.primaryLanguage) {
+	case "hindi":
+		return "Oho! Mujhe thoda confusion ho gaya. Kya tum dobara bol sakte ho?"
+	case "kannada":
+		return "Oho! Nanage swalpa gond aaytu. Matte heli, please?"
+	case "malayalam":
+		return "Oho! Ente brain oru second confused ayi. Vere helo please?"
+	case "tamil":
+		return "Oho! Enakku konjam confusion achu. Mela solla mudiyuma?"
+	case "telugu":
+		return "Oho! Naaku koddiga confusion aindi. Malli cheppagalava?"
+	default:
+		return "Oops! My brain got a little confused just now. Can you say that again?"
+	}
+}
+
+// TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
+// It bypasses the user speech wait loop and talks directly into the TTS pipeline.
+
 func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string) {
 	if ap.bridge == nil || ap.session == nil {
 		return
@@ -551,7 +632,13 @@ func (ap *AudioPipeline) setTTSCancel(cancel context.CancelFunc) {
 }
 
 func (ap *AudioPipeline) sessionKey() string {
-	if ap.session == nil || ap.session.participant == nil || ap.session.roomInfo == nil {
+	if ap.session == nil || ap.session.participant == nil {
+		return ""
+	}
+	if ap.session.participant.sessionKey != "" {
+		return ap.session.participant.sessionKey
+	}
+	if ap.session.roomInfo == nil {
 		return ""
 	}
 	return fmt.Sprintf("livekit:%s:%s", ap.session.roomInfo.Name, ap.session.participant.identity)

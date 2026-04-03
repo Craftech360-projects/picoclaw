@@ -26,6 +26,45 @@ type AsyncEvent struct {
 	Result     *tools.ToolResult
 }
 
+const (
+	chatTypeUser      = 1
+	chatTypeAssistant = 2
+	maxChatContentLen = 2000
+)
+
+// PersistedChatMessage is the serialized chat history shape expected by Manager API.
+type PersistedChatMessage struct {
+	ChatType  int    `json:"chatType"`
+	Content   string `json:"content"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// UsageSnapshot stores aggregate token/latency counters for session-end persistence.
+type UsageSnapshot struct {
+	SessionDurationSeconds      float64
+	MessageCount                int
+	AvgTTFTSeconds              float64
+	TotalResponseDurationSecond float64
+	InputTokens                 int
+	InputAudioTokens            int
+	InputTextTokens             int
+	InputCachedTokens           int
+	OutputTokens                int
+	OutputAudioTokens           int
+	OutputTextTokens            int
+	TotalTokens                 int
+}
+
+type usageState struct {
+	sessionStart                time.Time
+	messageCount                int
+	totalResponseDurationSecond float64
+	inputTokens                 int
+	inputTextTokens             int
+	outputTokens                int
+	outputTextTokens            int
+}
+
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
 	agentInstance  *agent.AgentInstance
@@ -44,23 +83,28 @@ type AgentBridge struct {
 	summarizeMessageThreshold int
 	contextWindow             int
 	summarizing               sync.Map
+
+	usageMu    sync.Mutex
+	usage      usageState
+	historyMu  sync.Mutex
+	historyLog []PersistedChatMessage
 }
 
 // AgentBridgeConfig defines shared resources for creating bridges.
 type AgentBridgeConfig struct {
-	Config                    *config.Config
-	Provider                  providers.LLMProvider
-	ModelID                   string
-	AgentInstance             *agent.AgentInstance
-	MaxIterations             int
-	LLMOptions                map[string]any
-	AsyncEventChan            chan AsyncEvent // optional channel for background task results
+	Config         *config.Config
+	Provider       providers.LLMProvider
+	ModelID        string
+	AgentInstance  *agent.AgentInstance
+	MaxIterations  int
+	LLMOptions     map[string]any
+	AsyncEventChan chan AsyncEvent // optional channel for background task results
 	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
 	// Defaults to 20 if zero.
 	SummarizeMessageThreshold int
 	// ContextWindow is the model's context size in tokens (approximate), used to detect
 	// when the token budget is being approached. Defaults to 128000 if zero.
-	ContextWindow             int
+	ContextWindow int
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -94,6 +138,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		summarizeMessageThreshold: summarizeThreshold,
 		contextWindow:             ctxWindow,
 	}
+	ab.usage.sessionStart = time.Now()
 	if sp, ok := cfg.Provider.(providers.StreamingProvider); ok {
 		ab.streamProvider = sp
 	}
@@ -103,7 +148,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 	return ab, nil
 }
 
-// Close gracefully releases the session memory store and then auto-deletes the active 
+// Close gracefully releases the session memory store and then auto-deletes the active
 // ephemeral workspace folder to prevent disk storage exhaustion natively.
 func (ab *AgentBridge) Close() {
 	if ab.agentInstance != nil {
@@ -146,6 +191,9 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 	}
 
 	messages := ab.buildMessages(history, summary, text, sessionKey)
+	if strings.TrimSpace(text) != "" {
+		ab.recordTranscript(chatTypeUser, text)
+	}
 	if ab.sessions != nil && strings.TrimSpace(text) != "" {
 		ab.sessions.AddMessage(sessionKey, "user", text)
 	}
@@ -172,6 +220,7 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 	}
 
 	toolDefs := ab.toolDefs()
+	callStarted := time.Now()
 	resp, err := ab.callLLM(ctx, messages, toolDefs, cb)
 	if err != nil {
 		if onDone != nil {
@@ -179,6 +228,7 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 		}
 		return false, err
 	}
+	ab.recordUsage(resp.Usage, time.Since(callStarted))
 
 	assistantMsg := providers.Message{
 		Role:    "assistant",
@@ -203,6 +253,7 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 	}
 
 	messages = append(messages, assistantMsg)
+	ab.recordTranscript(chatTypeAssistant, assistantMsg.Content)
 	if ab.sessions != nil {
 		ab.sessions.AddFullMessage(sessionKey, assistantMsg)
 	}
@@ -594,4 +645,77 @@ func (ab *AgentBridge) bridgeSummarizeBatch(ctx context.Context, batch []provide
 		return "", err
 	}
 	return strings.TrimSpace(resp.Content), nil
+}
+
+func (ab *AgentBridge) recordTranscript(chatType int, content string) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return
+	}
+	if len(content) > maxChatContentLen {
+		content = content[:maxChatContentLen]
+	}
+	if chatType != chatTypeUser && chatType != chatTypeAssistant {
+		chatType = chatTypeAssistant
+	}
+
+	ab.historyMu.Lock()
+	ab.historyLog = append(ab.historyLog, PersistedChatMessage{
+		ChatType:  chatType,
+		Content:   content,
+		Timestamp: time.Now().Unix(),
+	})
+	ab.historyMu.Unlock()
+}
+
+func (ab *AgentBridge) recordUsage(usage *providers.UsageInfo, elapsed time.Duration) {
+	ab.usageMu.Lock()
+	defer ab.usageMu.Unlock()
+
+	ab.usage.messageCount++
+	ab.usage.totalResponseDurationSecond += elapsed.Seconds()
+	if usage == nil {
+		return
+	}
+
+	ab.usage.inputTokens += usage.PromptTokens
+	ab.usage.outputTokens += usage.CompletionTokens
+	ab.usage.inputTextTokens += usage.PromptTokens
+	ab.usage.outputTextTokens += usage.CompletionTokens
+}
+
+// UsageSnapshot returns aggregated usage counters for this voice session.
+func (ab *AgentBridge) UsageSnapshot() UsageSnapshot {
+	ab.usageMu.Lock()
+	defer ab.usageMu.Unlock()
+
+	duration := 0.0
+	if !ab.usage.sessionStart.IsZero() {
+		duration = time.Since(ab.usage.sessionStart).Seconds()
+	}
+	total := ab.usage.inputTokens + ab.usage.outputTokens
+	return UsageSnapshot{
+		SessionDurationSeconds:      duration,
+		MessageCount:                ab.usage.messageCount,
+		AvgTTFTSeconds:              0,
+		TotalResponseDurationSecond: ab.usage.totalResponseDurationSecond,
+		InputTokens:                 ab.usage.inputTokens,
+		InputAudioTokens:            0,
+		InputTextTokens:             ab.usage.inputTextTokens,
+		InputCachedTokens:           0,
+		OutputTokens:                ab.usage.outputTokens,
+		OutputAudioTokens:           0,
+		OutputTextTokens:            ab.usage.outputTextTokens,
+		TotalTokens:                 total,
+	}
+}
+
+// TranscriptSnapshot returns a defensive copy of the conversation transcript.
+func (ab *AgentBridge) TranscriptSnapshot() []PersistedChatMessage {
+	ab.historyMu.Lock()
+	defer ab.historyMu.Unlock()
+
+	out := make([]PersistedChatMessage, len(ab.historyLog))
+	copy(out, ab.historyLog)
+	return out
 }
