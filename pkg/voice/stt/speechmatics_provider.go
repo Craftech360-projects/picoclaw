@@ -38,7 +38,7 @@ func (p *speechmaticsProvider) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		Languages:            []string{"en", "es", "fr", "de", "it", "pt", "nl", "hi", "ja", "ko", "zh", "auto"},
 		Models:               []string{"enhanced", "standard"},
-		SupportsStreaming:     true,
+		SupportsStreaming:    true,
 		SupportsDiarization:  true,
 		SupportsMultilingual: true,
 	}
@@ -238,8 +238,8 @@ func (s *speechmaticsStream) Close() error {
 		s.mu.Lock()
 		// Send EndOfStream
 		endMsg := map[string]interface{}{
-			"message":      "EndOfStream",
-			"last_seq_no":  0,
+			"message":     "EndOfStream",
+			"last_seq_no": 0,
 		}
 		endData, _ := json.Marshal(endMsg)
 		_ = s.conn.WriteMessage(websocket.TextMessage, endData)
@@ -347,9 +347,9 @@ func (s *speechmaticsStream) readLoop() {
 
 		case "Error":
 			logger.ErrorCF("livekit", "Speechmatics error", map[string]any{
-				"type":    msg.Type,
-				"reason":  msg.Reason,
-				"raw":     string(data),
+				"type":   msg.Type,
+				"reason": msg.Reason,
+				"raw":    string(data),
 			})
 			return
 
@@ -404,8 +404,8 @@ func normalizeLangCode(lang string) string {
 
 type speechmaticsStartRecognition struct {
 	Message             string                          `json:"message"`
-	AudioFormat         speechmaticsAudioFormat          `json:"audio_format"`
-	TranscriptionConfig speechmaticsTranscriptionConfig  `json:"transcription_config"`
+	AudioFormat         speechmaticsAudioFormat         `json:"audio_format"`
+	TranscriptionConfig speechmaticsTranscriptionConfig `json:"transcription_config"`
 }
 
 type speechmaticsAudioFormat struct {
@@ -420,11 +420,6 @@ type speechmaticsTranscriptionConfig struct {
 	OperatingPoint string  `json:"operating_point,omitempty"`
 	MaxDelay       float64 `json:"max_delay,omitempty"`
 	MaxDelayMode   string  `json:"max_delay_mode,omitempty"`
-}
-
-type speechmaticsPunctuation struct {
-	PermittedMarks []string `json:"permitted_marks,omitempty"`
-	Sensitivity    float64  `json:"sensitivity,omitempty"`
 }
 
 type speechmaticsMessage struct {

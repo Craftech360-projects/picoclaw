@@ -262,8 +262,8 @@ func (s *awsStreamAdapter) transcribeBuffer() error {
 		alt := result.Transcript.Results[0].Alternatives[0]
 		if alt.Transcript != "" {
 			event := TranscriptEvent{
-				Text:    alt.Transcript,
-				IsFinal: !result.Transcript.Results[0].IsPartial,
+				Text:     alt.Transcript,
+				IsFinal:  !result.Transcript.Results[0].IsPartial,
 				Duration: s.calculateDuration(),
 			}
 
@@ -276,11 +276,6 @@ func (s *awsStreamAdapter) transcribeBuffer() error {
 
 	s.audioBuffer = make([]byte, 0)
 	return nil
-}
-
-func (s *awsStreamAdapter) endpointingThreshold() int {
-	bytesPerSecond := s.sampleRate * 2
-	return bytesPerSecond // 1 second chunks
 }
 
 func (s *awsStreamAdapter) calculateDuration() float64 {

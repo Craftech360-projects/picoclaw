@@ -7,10 +7,10 @@ import (
 
 func TestProviderCapabilities_NotEmpty(t *testing.T) {
 	caps := ProviderCapabilities{
-		Languages:           []string{"en", "es"},
-		Models:              []string{"nova-2"},
-		SupportsStreaming:   true,
-		SupportsDiarization: false,
+		Languages:            []string{"en", "es"},
+		Models:               []string{"nova-2"},
+		SupportsStreaming:    true,
+		SupportsDiarization:  false,
 		SupportsMultilingual: true,
 	}
 
@@ -87,6 +87,12 @@ func TestStreamOptions_Defaults(t *testing.T) {
 	if opts.Model != "nova-2" {
 		t.Errorf("Expected Model 'nova-2', got '%s'", opts.Model)
 	}
+	if !opts.InterimResults {
+		t.Error("Expected InterimResults to be true")
+	}
+	if opts.EndpointingMS != 800 {
+		t.Errorf("Expected EndpointingMS 800, got %d", opts.EndpointingMS)
+	}
 }
 
 // mockProvider is a simple implementation for testing the interface contract
@@ -95,8 +101,8 @@ type mockProvider struct {
 	caps ProviderCapabilities
 }
 
-func (m *mockProvider) Name() string                           { return m.name }
-func (m *mockProvider) Capabilities() ProviderCapabilities     { return m.caps }
+func (m *mockProvider) Name() string                       { return m.name }
+func (m *mockProvider) Capabilities() ProviderCapabilities { return m.caps }
 func (m *mockProvider) OpenStream(ctx context.Context, opts StreamOptions) (TranscriptionStream, error) {
 	return nil, nil
 }

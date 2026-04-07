@@ -158,9 +158,10 @@ func (s *azureStreamAdapter) transcribeBuffer() error {
 
 	// Build Azure Speech API URL
 	url := fmt.Sprintf("https://%s.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1", s.region)
-	if s.model == "conversation" {
+	switch s.model {
+	case "conversation":
 		url = fmt.Sprintf("https://%s.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1", s.region)
-	} else if s.model == "baseline" {
+	case "baseline":
 		url = fmt.Sprintf("https://%s.stt.speech.microsoft.com/speech/recognition/interactive/cognitiveservices/v1", s.region)
 	}
 
