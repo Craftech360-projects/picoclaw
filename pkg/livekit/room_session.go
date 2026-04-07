@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,16 +456,27 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	var vadPipe *vad.VADPipeline
 	var vadEventChan chan vad.VADEvent
-	engine, err := vad.NewTenVAD(256, 0.7) // Increased threshold to 0.7 for better noise rejection
+	vadThreshold := envFloat("PICOCLAW_VAD_THRESHOLD", 0.7)
+	vadEndpointMS := envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
+	engine, err := vad.NewTenVAD(256, vadThreshold)
 	if err == nil {
-		vadPipe = vad.NewVADPipeline(engine, 0.7, 1000) // 1000ms endpoint for more stable detection
+		vadPipe = vad.NewVADPipeline(engine, vadThreshold, vadEndpointMS)
 		vadEventChan = make(chan vad.VADEvent, 10)
-		logger.InfoCF("livekit", "TEN VAD initialized", map[string]any{"room": rs.roomInfo.Name})
+		logger.InfoCF("livekit", "TEN VAD initialized", map[string]any{
+			"room":        rs.roomInfo.Name,
+			"threshold":   vadThreshold,
+			"endpoint_ms": vadEndpointMS,
+		})
 	} else {
 		logger.ErrorCF("livekit", "Failed to init TEN VAD", map[string]any{"error": err.Error()})
 	}
 
-	writer := &sttStreamWriter{stream: stream, vad: vadPipe, vadEvent: vadEventChan}
+	writer := &sttStreamWriter{
+		stream:       stream,
+		vad:          vadPipe,
+		vadEvent:     vadEventChan,
+		providerName: rs.stt.Name(),
+	}
 	pcmTrack, err := lkmedia.NewPCMRemoteTrack(track, writer, lkmedia.WithTargetSampleRate(16000), lkmedia.WithTargetChannels(1))
 	if err != nil {
 		logger.ErrorCF("livekit", "PCM remote track error", map[string]any{"error": err.Error()})
@@ -565,6 +577,9 @@ type sttStreamWriter struct {
 	stream   stt.TranscriptionStream
 	vad      *vad.VADPipeline
 	vadEvent chan vad.VADEvent
+
+	providerName string
+	sendErrCount int
 }
 
 func (w *sttStreamWriter) WriteSample(sample media.PCM16Sample) error {
@@ -597,7 +612,20 @@ func (w *sttStreamWriter) WriteSample(sample media.PCM16Sample) error {
 		binary.LittleEndian.PutUint16(buf[i*2:i*2+2], uint16(v))
 	}
 
-	return w.stream.SendAudio(buf)
+	if err := w.stream.SendAudio(buf); err != nil {
+		w.sendErrCount++
+		if w.sendErrCount == 1 || w.sendErrCount%200 == 0 {
+			logger.WarnCF("livekit", "STT SendAudio failed", map[string]any{
+				"provider":       w.providerName,
+				"send_err_count": w.sendErrCount,
+				"error":          err.Error(),
+			})
+		}
+		// Keep ingesting audio/VAD even if STT backend has transient issues.
+		return nil
+	}
+	w.sendErrCount = 0
+	return nil
 }
 
 func (w *sttStreamWriter) Close() error {
@@ -608,4 +636,28 @@ func (w *sttStreamWriter) Close() error {
 		return nil
 	}
 	return w.stream.Close()
+}
+
+func envFloat(key string, def float32) float32 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f <= 0 || f >= 1 {
+		return def
+	}
+	return float32(f)
+}
+
+func envInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
