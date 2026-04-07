@@ -856,6 +856,7 @@ type LiveKitServiceSTTConfig struct {
 	Model        string `json:"model,omitempty"           env:"PICOCLAW_LIVEKIT_STT_MODEL"`
 	Language     string `json:"language,omitempty"        env:"PICOCLAW_LIVEKIT_STT_LANGUAGE"`
 	SampleRateHz int    `json:"sample_rate_hz,omitempty"   env:"PICOCLAW_LIVEKIT_STT_SAMPLE_RATE_HZ"`
+	DatabaseURL  string `json:"database_url,omitempty"     env:"PICOCLAW_LIVEKIT_STT_DATABASE_URL"`
 }
 
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.

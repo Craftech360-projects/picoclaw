@@ -73,18 +73,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize STT factory
-	configDir := filepath.Dir(cfgPath)
-	sttDBPath := filepath.Join(configDir, "stt_providers.db")
+	// Initialize STT factory with PostgreSQL
+	sttDBURL := os.Getenv("STT_DATABASE_URL")
+	if sttDBURL == "" {
+		// Try to get from config file field if present
+		sttDBURL = cfg.LiveKitService.STT.DatabaseURL
+	}
+	if sttDBURL == "" {
+		// Fallback to Supabase PostgreSQL URL from environment
+		sttDBURL = os.Getenv("DIRECT_URL")
+	}
+	if sttDBURL == "" {
+		// Default Supabase URL if nothing configured
+		sttDBURL = "postgresql://postgres.tsiocygczplmnjpqmutc:seg0QTbvLjPt4E8V@aws-1-ap-south-1.pooler.supabase.com:5432/postgres"
+	}
 
-	sttFactory, err := stt.NewFactory(sttDBPath)
+	sttFactory, err := stt.NewFactory(sttDBURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating STT factory: %v\n", err)
 		os.Exit(1)
 	}
 
 	logger.InfoCF("livekit", "STT factory initialized", map[string]any{
-		"db_path":   sttDBPath,
+		"db_url":    sttDBURL,
 		"providers": sttFactory.ListProviders(),
 	})
 
