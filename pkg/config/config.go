@@ -850,10 +850,19 @@ type LiveKitServiceTTSConfig struct {
 	FillerWords  []string `json:"filler_words,omitempty"     env:"PICOCLAW_LIVEKIT_TTS_FILLER_WORDS"`
 }
 
+// LiveKitServiceSTTConfig configures STT for the LiveKit voice agent.
+type LiveKitServiceSTTConfig struct {
+	Provider     string `json:"provider,omitempty"        env:"PICOCLAW_LIVEKIT_STT_PROVIDER"`
+	Model        string `json:"model,omitempty"           env:"PICOCLAW_LIVEKIT_STT_MODEL"`
+	Language     string `json:"language,omitempty"        env:"PICOCLAW_LIVEKIT_STT_LANGUAGE"`
+	SampleRateHz int    `json:"sample_rate_hz,omitempty"   env:"PICOCLAW_LIVEKIT_STT_SAMPLE_RATE_HZ"`
+}
+
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.
 type LiveKitServiceConfig struct {
 	ServerURL    string                  `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
 	TTS          LiveKitServiceTTSConfig `json:"tts"`
+	STT          LiveKitServiceSTTConfig `json:"stt"`
 	ToolFeedback map[string]string       `json:"tool_feedback,omitempty"`
 
 	apiKey         string

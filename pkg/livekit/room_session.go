@@ -21,7 +21,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
+	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
@@ -42,7 +42,7 @@ type RoomSession struct {
 
 	serverURL        string
 	token            string
-	deepgram         *deepgram.DeepgramTranscriber
+	stt              stt.Provider
 	tts              tts.Provider
 	apiKey           string
 	apiSecret        string
@@ -61,7 +61,7 @@ type RoomSession struct {
 type ParticipantState struct {
 	identity       string
 	sessionKey     string
-	deepgramStream deepgram.TranscriptionStream
+	sttStream      stt.TranscriptionStream
 	pcmTrack       *lkmedia.PCMRemoteTrack
 	ttsCancel      context.CancelFunc
 	speaking       atomic.Bool
@@ -76,7 +76,7 @@ type RoomSessionConfig struct {
 	Bridge          *AgentBridge
 	ServerURL       string
 	Token           string
-	Deepgram        *deepgram.DeepgramTranscriber
+	STT             stt.Provider
 	TTS             tts.Provider
 	APIKey          string
 	APISecret       string
@@ -108,7 +108,7 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		bridge:           cfg.Bridge,
 		serverURL:        cfg.ServerURL,
 		token:            cfg.Token,
-		deepgram:         cfg.Deepgram,
+		stt:              cfg.STT,
 		tts:              cfg.TTS,
 		apiKey:           cfg.APIKey,
 		apiSecret:        cfg.APISecret,
@@ -288,8 +288,8 @@ func (rs *RoomSession) leave() {
 
 	if participant != nil {
 		participant.mu.Lock()
-		if participant.deepgramStream != nil {
-			_ = participant.deepgramStream.Close()
+		if participant.sttStream != nil {
+			_ = participant.sttStream.Close()
 		}
 		if participant.pcmTrack != nil {
 			participant.pcmTrack.Close()
@@ -401,19 +401,56 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	rs.participant = ps
 	rs.mu.Unlock()
 
-	if rs.deepgram == nil {
-		logger.WarnC("livekit", "Deepgram transcriber not configured")
+	if rs.stt == nil {
+		logger.WarnC("livekit", "STT provider not configured")
 		return
 	}
 
-	stream, err := rs.deepgram.OpenStream(deepgram.StreamOpts{})
+	// Get provider capabilities and configure stream options
+	caps := rs.stt.Capabilities()
+
+	// Determine model and language
+	model := "auto"
+	language := rs.primaryLanguage
+
+	// Validate language support if provider declares languages
+	if len(caps.Languages) > 0 && language != "" {
+		supported := false
+		for _, lang := range caps.Languages {
+			if lang == language || lang == "auto" || lang == "multi" {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			logger.WarnCF("livekit", "Language not supported, using auto", map[string]any{
+				"language": language,
+				"provider": rs.stt.Name(),
+			})
+			language = "auto"
+		}
+	}
+
+	// Open transcription stream with provider-specific options
+	stream, err := rs.stt.OpenStream(rs.ctx, stt.StreamOptions{
+		SampleRate:     16000,
+		Channels:       1,
+		Language:       language,
+		Model:          model,
+		InterimResults: true,
+		EndpointingMS:  800,
+	})
 	if err != nil {
-		logger.ErrorCF("livekit", "Deepgram stream error", map[string]any{"error": err.Error()})
+		logger.ErrorCF("livekit", "Failed to open STT stream", map[string]any{
+			"provider": rs.stt.Name(),
+			"error":    err.Error(),
+		})
 		return
 	}
-	logger.InfoCF("livekit", "Deepgram stream opened", map[string]any{
-		"room":        rs.roomInfo.Name,
-		"participant": rp.Identity(),
+
+	logger.InfoCF("livekit", "STT stream opened", map[string]any{
+		"provider": rs.stt.Name(),
+		"language": language,
 	})
 
 	var vadPipe *vad.VADPipeline
@@ -427,7 +464,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		logger.ErrorCF("livekit", "Failed to init TEN VAD", map[string]any{"error": err.Error()})
 	}
 
-	writer := &deepgramWriter{stream: stream, vad: vadPipe, vadEvent: vadEventChan}
+	writer := &sttStreamWriter{stream: stream, vad: vadPipe, vadEvent: vadEventChan}
 	pcmTrack, err := lkmedia.NewPCMRemoteTrack(track, writer, lkmedia.WithTargetSampleRate(16000), lkmedia.WithTargetChannels(1))
 	if err != nil {
 		logger.ErrorCF("livekit", "PCM remote track error", map[string]any{"error": err.Error()})
@@ -436,7 +473,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	}
 
 	ps.mu.Lock()
-	ps.deepgramStream = stream
+	ps.sttStream = stream
 	ps.pcmTrack = pcmTrack
 	ps.mu.Unlock()
 
@@ -471,8 +508,8 @@ func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant
 	rs.mu.Unlock()
 
 	participant.mu.Lock()
-	if participant.deepgramStream != nil {
-		_ = participant.deepgramStream.Close()
+	if participant.sttStream != nil {
+		_ = participant.sttStream.Close()
 	}
 	if participant.pcmTrack != nil {
 		participant.pcmTrack.Close()
@@ -524,13 +561,13 @@ func sanitizeIdentity(value string) string {
 	return value
 }
 
-type deepgramWriter struct {
-	stream   deepgram.TranscriptionStream
+type sttStreamWriter struct {
+	stream   stt.TranscriptionStream
 	vad      *vad.VADPipeline
 	vadEvent chan vad.VADEvent
 }
 
-func (w *deepgramWriter) WriteSample(sample media.PCM16Sample) error {
+func (w *sttStreamWriter) WriteSample(sample media.PCM16Sample) error {
 	if w.stream == nil {
 		return nil
 	}
@@ -538,20 +575,13 @@ func (w *deepgramWriter) WriteSample(sample media.PCM16Sample) error {
 		return nil
 	}
 
+	// Feed audio to VAD pipeline if available
 	if w.vad != nil {
-		// Feed audio to VAD pipeline
-		// Convert sample to []int16
 		int16Samples := make([]int16, len(sample))
 		copy(int16Samples, sample)
 
 		events := w.vad.Push(int16Samples)
 		for _, evt := range events {
-			if evt.SpeechStart {
-				logger.DebugCF("livekit", "TEN VAD Speech Start", map[string]any{"probability": evt.Probability})
-			}
-			if evt.SpeechEnd {
-				logger.DebugCF("livekit", "TEN VAD Speech End", map[string]any{"probability": evt.Probability})
-			}
 			if w.vadEvent != nil {
 				select {
 				case w.vadEvent <- evt:
@@ -561,14 +591,16 @@ func (w *deepgramWriter) WriteSample(sample media.PCM16Sample) error {
 		}
 	}
 
+	// Convert sample to PCM bytes (16-bit little-endian)
 	buf := make([]byte, len(sample)*2)
 	for i, v := range sample {
 		binary.LittleEndian.PutUint16(buf[i*2:i*2+2], uint16(v))
 	}
+
 	return w.stream.SendAudio(buf)
 }
 
-func (w *deepgramWriter) Close() error {
+func (w *sttStreamWriter) Close() error {
 	if w.vad != nil {
 		w.vad.Close()
 	}

@@ -14,7 +14,7 @@ import (
 	"github.com/neurosnap/sentences"
 	"github.com/neurosnap/sentences/english"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
+	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
@@ -319,10 +319,10 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 	}()
 }
 
-// RunInbound reads Deepgram transcription events and calls the agent on speech end.
+// RunInbound reads STT transcription events and calls the agent on speech end.
 // It also listens for background task completions via the bridge's async event channel.
-func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.TranscriptionStream) {
-	if dgStream == nil {
+func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.TranscriptionStream) {
+	if sttStream == nil {
 		return
 	}
 	var utterance strings.Builder
@@ -359,12 +359,12 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 
 				if evt.SpeechEnd {
 					vadSpeechEnded = true
-					logger.DebugCF("livekit", "VAD Speech end, sending finalize to Deepgram", map[string]any{
+					logger.DebugCF("livekit", "VAD Speech end, finalizing STT stream", map[string]any{
 						"session":     ap.sessionKey(),
 						"probability": evt.Probability,
 					})
-					if err := dgStream.Finalize(); err != nil {
-						logger.ErrorCF("livekit", "Failed to finalize Deepgram stream", map[string]any{
+					if err := sttStream.Finalize(); err != nil {
+						logger.ErrorCF("livekit", "Failed to finalize STT stream", map[string]any{
 							"session": ap.sessionKey(),
 							"error":   err.Error(),
 						})
@@ -372,7 +372,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, dgStream deepgram.Trans
 				}
 			}
 
-		case evt, ok := <-dgStream.Results():
+		case evt, ok := <-sttStream.Results():
 			if !ok {
 				return
 			}
