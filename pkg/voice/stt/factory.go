@@ -117,6 +117,12 @@ func (f *Factory) initDB() error {
 
 		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
 		VALUES ('deepgram', '', 'nova-2', 0, 1);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('groq', '', 'whisper-large-v3', 0, 5);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('assemblyai', '', 'universal', 0, 2);
 	`
 
 	_, err := f.db.Exec(schema)
@@ -125,4 +131,6 @@ func (f *Factory) initDB() error {
 
 func (f *Factory) registerBuiltInProviders() {
 	f.providers["deepgram"] = &deepgramProvider{}
+	f.providers["groq"] = NewGroqProvider("", "")
+	f.providers["assemblyai"] = NewAssemblyAIProvider("", "")
 }

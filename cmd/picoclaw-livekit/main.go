@@ -97,6 +97,22 @@ func main() {
 		}
 	}
 
+	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
+		if err := sttFactory.UpdateProviderConfig("groq", apiKey, "whisper-large-v3", false, 5); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Groq provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	if apiKey := os.Getenv("ASSEMBLYAI_API_KEY"); apiKey != "" {
+		if err := sttFactory.UpdateProviderConfig("assemblyai", apiKey, "universal", false, 2); err != nil {
+			logger.WarnCF("livekit", "Failed to configure AssemblyAI provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
 	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
 		"provider":           lkCfg.TTS.Provider,
