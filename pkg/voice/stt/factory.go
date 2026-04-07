@@ -295,7 +295,10 @@ func (f *Factory) initDB() error {
 			('aws', '', 'Conversational', FALSE, 11),
 			('soniox', '', 'standard_v2', FALSE, 12),
 			('speechmatics', '', '2.0-a', FALSE, 13),
-			('gladia', '', 'gladia-2', FALSE, 14)
+			('gladia', '', 'gladia-2', FALSE, 14),
+			('gradium', '', 'default', FALSE, 15),
+			('mistral', '', 'voxtral-mini-latest', FALSE, 16),
+			('voxtral', '', 'voxtral-mini-latest', FALSE, 17)
 		ON CONFLICT (provider_name) DO NOTHING;
 	`
 
@@ -316,4 +319,7 @@ func (f *Factory) registerBuiltInProviders() {
 	f.providers["soniox"] = NewSonioxProvider("", "")
 	f.providers["speechmatics"] = NewSpeechmaticsProvider("", "", "")
 	f.providers["gladia"] = NewGladiaProvider("", "")
+	f.providers["gradium"] = NewGradiumProvider("", "")
+	f.providers["mistral"] = NewMistralProvider("", "")
+	f.providers["voxtral"] = NewVoxtralProvider("", "")
 }

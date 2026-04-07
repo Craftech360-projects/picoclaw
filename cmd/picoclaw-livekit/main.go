@@ -148,6 +148,28 @@ func main() {
 		}
 	}
 
+	if apiKey := os.Getenv("GRADIUM_API_KEY"); apiKey != "" {
+		if err := sttFactory.SeedProviderConfig("gradium", apiKey, "default", 15); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Gradium provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	if apiKey := os.Getenv("MISTRAL_API_KEY"); apiKey != "" {
+		if err := sttFactory.SeedProviderConfig("mistral", apiKey, "voxtral-mini-latest", 16); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Mistral provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+		// Alias for users who want provider_name=voxtral in database.
+		if err := sttFactory.SeedProviderConfig("voxtral", apiKey, "voxtral-mini-latest", 17); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Voxtral provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
 	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
 		"provider":           lkCfg.TTS.Provider,
