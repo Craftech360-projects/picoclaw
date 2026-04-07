@@ -113,6 +113,30 @@ func main() {
 		}
 	}
 
+	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+		if err := sttFactory.UpdateProviderConfig("openai", apiKey, "whisper-1", false, 6); err != nil {
+			logger.WarnCF("livekit", "Failed to configure OpenAI provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	if apiKey := os.Getenv("CARTESIA_API_KEY"); apiKey != "" {
+		if err := sttFactory.UpdateProviderConfig("cartesia", apiKey, "ink-whisper", false, 7); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Cartesia provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	if apiKey := os.Getenv("ELEVENLABS_API_KEY"); apiKey != "" {
+		if err := sttFactory.UpdateProviderConfig("elevenlabs", apiKey, "scribe_v2", false, 8); err != nil {
+			logger.WarnCF("livekit", "Failed to configure ElevenLabs provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
 	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
 		"provider":           lkCfg.TTS.Provider,

@@ -123,6 +123,15 @@ func (f *Factory) initDB() error {
 
 		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
 		VALUES ('assemblyai', '', 'universal', 0, 2);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('openai', '', 'whisper-1', 0, 6);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('cartesia', '', 'ink-whisper', 0, 7);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('elevenlabs', '', 'scribe_v2', 0, 8);
 	`
 
 	_, err := f.db.Exec(schema)
@@ -133,4 +142,7 @@ func (f *Factory) registerBuiltInProviders() {
 	f.providers["deepgram"] = &deepgramProvider{}
 	f.providers["groq"] = NewGroqProvider("", "")
 	f.providers["assemblyai"] = NewAssemblyAIProvider("", "")
+	f.providers["openai"] = NewOpenAIProvider("", "")
+	f.providers["cartesia"] = NewCartesiaProvider("", "")
+	f.providers["elevenlabs"] = NewElevenLabsProvider("", "")
 }
