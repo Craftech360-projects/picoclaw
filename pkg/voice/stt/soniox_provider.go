@@ -152,8 +152,30 @@ func (s *sonioxRealtimeStream) Finalize() error {
 	case <-s.closed:
 		return fmt.Errorf("soniox stream closed")
 	default:
-		return nil
 	}
+
+	// Soniox manual finalization:
+	// https://soniox.com/docs/stt/core-concepts/manual-finalization
+	// Sending this forces pending tokens to become final and emits <fin>.
+	ctrl := map[string]any{
+		"type":                "finalize",
+		"trailing_silence_ms": 300,
+	}
+	data, err := json.Marshal(ctrl)
+	if err != nil {
+		return fmt.Errorf("soniox: marshal finalize control: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		return fmt.Errorf("soniox: send finalize control: %w", err)
+	}
+
+	logger.DebugCF("livekit", "Soniox finalize sent", map[string]any{
+		"provider": "soniox",
+	})
+	return nil
 }
 
 func (s *sonioxRealtimeStream) Close() error {
