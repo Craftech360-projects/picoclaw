@@ -24,9 +24,9 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice/cartesia_tts"
-	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/inworld_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
@@ -73,9 +73,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	var dg *deepgram.DeepgramTranscriber
-	if lkCfg.DeepgramAPIKey() != "" {
-		dg = deepgram.NewDeepgramTranscriber(lkCfg.DeepgramAPIKey())
+	// Initialize STT factory
+	configDir := filepath.Dir(cfgPath)
+	sttDBPath := filepath.Join(configDir, "stt_providers.db")
+
+	sttFactory, err := stt.NewFactory(sttDBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating STT factory: %v\n", err)
+		os.Exit(1)
+	}
+
+	logger.InfoCF("livekit", "STT factory initialized", map[string]any{
+		"db_path":   sttDBPath,
+		"providers": sttFactory.ListProviders(),
+	})
+
+	// Seed providers from environment variables
+	if apiKey := lkCfg.DeepgramAPIKey(); apiKey != "" {
+		if err := sttFactory.UpdateProviderConfig("deepgram", apiKey, "nova-2", true, 1); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Deepgram provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
@@ -225,6 +244,10 @@ func main() {
 					primaryLanguage = mdLang.PrimaryLanguage
 				}
 			}
+
+			// Get active STT provider for this session
+			sttProvider := buildSTTProvider(sttFactory)
+
 			return livekit.NewRoomSession(livekit.RoomSessionConfig{
 				Worker:          worker,
 				JobID:           job.Id,
@@ -232,7 +255,7 @@ func main() {
 				Bridge:          bridge,
 				ServerURL:       serverURL,
 				Token:           token,
-				Deepgram:        dg,
+				STT:             sttProvider,
 				TTS:             ttsProvider,
 				APIKey:          lkCfg.APIKey(),
 				APISecret:       lkCfg.APISecret(),
@@ -279,6 +302,26 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
+}
+
+func buildSTTProvider(factory *stt.Factory) stt.Provider {
+	if factory == nil {
+		return nil
+	}
+
+	provider, err := factory.GetActiveProvider()
+	if err != nil {
+		logger.WarnCF("livekit", "No active STT provider, using default", map[string]any{
+			"error": err.Error(),
+		})
+		return nil
+	}
+
+	logger.InfoCF("livekit", "Using STT provider", map[string]any{
+		"provider": provider.Name(),
+	})
+
+	return provider
 }
 
 func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tts.Provider, int) {
