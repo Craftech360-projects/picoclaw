@@ -132,6 +132,24 @@ func (f *Factory) initDB() error {
 
 		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
 		VALUES ('elevenlabs', '', 'scribe_v2', 0, 8);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('azure', '', 'latest', 0, 9);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('google', '', 'latest_long', 0, 10);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('aws', '', 'Conversational', 0, 11);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('soniox', '', 'standard_v2', 0, 12);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('speechmatics', '', '2.0-a', 0, 13);
+
+		INSERT OR IGNORE INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ('gladia', '', 'gladia-2', 0, 14);
 	`
 
 	_, err := f.db.Exec(schema)
@@ -145,4 +163,7 @@ func (f *Factory) registerBuiltInProviders() {
 	f.providers["openai"] = NewOpenAIProvider("", "")
 	f.providers["cartesia"] = NewCartesiaProvider("", "")
 	f.providers["elevenlabs"] = NewElevenLabsProvider("", "")
+	f.providers["azure"] = NewAzureProvider("", "", "", "")
+	f.providers["google"] = NewGoogleProvider("", "", "", false)
+	f.providers["aws"] = NewAWSProvider("", "", "", "", "")
 }
