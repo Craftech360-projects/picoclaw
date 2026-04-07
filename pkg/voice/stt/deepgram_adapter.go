@@ -8,9 +8,26 @@ import (
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 )
 
-type deepgramProvider struct{}
+type deepgramProvider struct {
+	apiKey string
+	model  string
+}
+
+func NewDeepgramProvider(apiKey, model string) Provider {
+	if model == "" {
+		model = "nova-2"
+	}
+	return &deepgramProvider{
+		apiKey: apiKey,
+		model:  model,
+	}
+}
 
 func (p *deepgramProvider) Name() string { return "deepgram" }
+
+func (p *deepgramProvider) WithConfig(apiKey, model string) Provider {
+	return NewDeepgramProvider(apiKey, model)
+}
 
 func (p *deepgramProvider) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{
@@ -23,17 +40,25 @@ func (p *deepgramProvider) Capabilities() ProviderCapabilities {
 }
 
 func (p *deepgramProvider) OpenStream(ctx context.Context, opts StreamOptions) (TranscriptionStream, error) {
-	apiKey := os.Getenv("DEEPGRAM_API_KEY")
+	apiKey := p.apiKey
+	if apiKey == "" {
+		apiKey = os.Getenv("DEEPGRAM_API_KEY")
+	}
 	if apiKey == "" {
 		return nil, fmt.Errorf("deepgram: API key not configured")
 	}
 
 	dg := deepgram.NewDeepgramTranscriber(apiKey)
 
+	model := p.model
+	if opts.Model != "" {
+		model = opts.Model
+	}
+
 	streamOpts := deepgram.StreamOpts{
 		SampleRate:     opts.SampleRate,
 		Language:       opts.Language,
-		Model:          opts.Model,
+		Model:          model,
 		InterimResults: opts.InterimResults,
 		EndpointingMS:  opts.EndpointingMS,
 		Channels:       opts.Channels,

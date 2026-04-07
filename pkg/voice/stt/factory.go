@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	_ "github.com/lib/pq"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // Factory creates STT providers based on database configuration.
@@ -14,6 +15,10 @@ type Factory struct {
 	db        *sql.DB
 	providers map[string]Provider
 	mu        sync.RWMutex
+}
+
+type configurableProvider interface {
+	WithConfig(apiKey, model string) Provider
 }
 
 // NewFactory creates a new STT provider factory with PostgreSQL.
@@ -56,23 +61,64 @@ func (f *Factory) GetActiveProvider() (Provider, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	var providerName, model string
+	// Debug: log ALL active providers to detect accidental multi-activation
+	debugRows, debugErr := f.db.Query(
+		"SELECT provider_name, model, priority, LENGTH(api_key) AS key_len FROM stt_providers WHERE is_active IS TRUE ORDER BY priority DESC",
+	)
+	if debugErr == nil {
+		defer debugRows.Close()
+		var activeList []map[string]any
+		for debugRows.Next() {
+			var name, model string
+			var priority, keyLen int
+			if scanErr := debugRows.Scan(&name, &model, &priority, &keyLen); scanErr == nil {
+				activeList = append(activeList, map[string]any{
+					"provider": name, "model": model, "priority": priority, "has_key": keyLen > 0,
+				})
+			}
+		}
+		logger.DebugCF("livekit", "All active STT providers in DB", map[string]any{
+			"active_providers": activeList,
+			"count":            len(activeList),
+		})
+	}
+
+	var providerName, apiKey, model string
 	err := f.db.QueryRow(
-		"SELECT provider_name, model FROM stt_providers WHERE is_active = 1 LIMIT 1",
-	).Scan(&providerName, &model)
+		"SELECT provider_name, api_key, model FROM stt_providers WHERE is_active IS TRUE ORDER BY priority DESC LIMIT 1",
+	).Scan(&providerName, &apiKey, &model)
 
 	if err == sql.ErrNoRows {
 		// Default to deepgram if no provider is active
 		providerName = "deepgram"
-		model = "nova-2"
+		logger.WarnCF("livekit", "No active provider found in database, using default", map[string]any{
+			"default_provider": providerName,
+		})
 	} else if err != nil {
 		return nil, fmt.Errorf("query active provider: %w", err)
+	} else {
+		logger.InfoCF("livekit", "Found active provider in database", map[string]any{
+			"provider":    providerName,
+			"model":       model,
+			"has_api_key": len(apiKey) > 0,
+			"key_length":  len(apiKey),
+		})
 	}
 
-	provider, ok := f.providers[providerName]
+	baseProvider, ok := f.providers[providerName]
 	if !ok {
 		return nil, fmt.Errorf("provider %q not registered", providerName)
 	}
+
+	provider := baseProvider
+	if cfgProvider, ok := baseProvider.(configurableProvider); ok {
+		provider = cfgProvider.WithConfig(apiKey, model)
+	}
+
+	logger.InfoCF("livekit", "Using STT provider from factory", map[string]any{
+		"provider": providerName,
+		"model":    model,
+	})
 
 	return provider, nil
 }
@@ -89,6 +135,21 @@ func (f *Factory) UpdateProviderConfig(name, apiKey, model string, isActive bool
 			priority = EXCLUDED.priority,
 			updated_at = CURRENT_TIMESTAMP
 	`, name, apiKey, model, isActive, priority)
+
+	return err
+}
+
+// SeedProviderConfig updates provider credentials/model/priority without changing activation state.
+func (f *Factory) SeedProviderConfig(name, apiKey, model string, priority int) error {
+	_, err := f.db.Exec(`
+		INSERT INTO stt_providers (provider_name, api_key, model, is_active, priority)
+		VALUES ($1, $2, $3, FALSE, $4)
+		ON CONFLICT(provider_name) DO UPDATE SET
+			api_key = EXCLUDED.api_key,
+			model = EXCLUDED.model,
+			priority = EXCLUDED.priority,
+			updated_at = CURRENT_TIMESTAMP
+	`, name, apiKey, model, priority)
 
 	return err
 }
@@ -214,6 +275,7 @@ func (f *Factory) initDB() error {
 		END;
 		$$ LANGUAGE plpgsql;
 
+		DROP TRIGGER IF EXISTS stt_providers_updated_at ON stt_providers;
 		CREATE TRIGGER stt_providers_updated_at
 		BEFORE UPDATE ON stt_providers
 		FOR EACH ROW
@@ -242,7 +304,7 @@ func (f *Factory) initDB() error {
 }
 
 func (f *Factory) registerBuiltInProviders() {
-	f.providers["deepgram"] = &deepgramProvider{}
+	f.providers["deepgram"] = NewDeepgramProvider("", "")
 	f.providers["groq"] = NewGroqProvider("", "")
 	f.providers["assemblyai"] = NewAssemblyAIProvider("", "")
 	f.providers["openai"] = NewOpenAIProvider("", "")
@@ -251,4 +313,7 @@ func (f *Factory) registerBuiltInProviders() {
 	f.providers["azure"] = NewAzureProvider("", "", "", "")
 	f.providers["google"] = NewGoogleProvider("", "", "", false)
 	f.providers["aws"] = NewAWSProvider("", "", "", "", "")
+	f.providers["soniox"] = NewSonioxProvider("", "")
+	f.providers["speechmatics"] = NewSpeechmaticsProvider("", "", "")
+	f.providers["gladia"] = NewGladiaProvider("", "")
 }

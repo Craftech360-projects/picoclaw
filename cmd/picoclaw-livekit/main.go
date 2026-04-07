@@ -101,7 +101,7 @@ func main() {
 
 	// Seed providers from environment variables
 	if apiKey := lkCfg.DeepgramAPIKey(); apiKey != "" {
-		if err := sttFactory.UpdateProviderConfig("deepgram", apiKey, "nova-2", true, 1); err != nil {
+		if err := sttFactory.SeedProviderConfig("deepgram", apiKey, "nova-2", 1); err != nil {
 			logger.WarnCF("livekit", "Failed to configure Deepgram provider", map[string]any{
 				"error": err.Error(),
 			})
@@ -109,7 +109,7 @@ func main() {
 	}
 
 	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
-		if err := sttFactory.UpdateProviderConfig("groq", apiKey, "whisper-large-v3", false, 5); err != nil {
+		if err := sttFactory.SeedProviderConfig("groq", apiKey, "whisper-large-v3", 5); err != nil {
 			logger.WarnCF("livekit", "Failed to configure Groq provider", map[string]any{
 				"error": err.Error(),
 			})
@@ -117,7 +117,7 @@ func main() {
 	}
 
 	if apiKey := os.Getenv("ASSEMBLYAI_API_KEY"); apiKey != "" {
-		if err := sttFactory.UpdateProviderConfig("assemblyai", apiKey, "universal", false, 2); err != nil {
+		if err := sttFactory.SeedProviderConfig("assemblyai", apiKey, "universal", 2); err != nil {
 			logger.WarnCF("livekit", "Failed to configure AssemblyAI provider", map[string]any{
 				"error": err.Error(),
 			})
@@ -125,7 +125,7 @@ func main() {
 	}
 
 	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
-		if err := sttFactory.UpdateProviderConfig("openai", apiKey, "whisper-1", false, 6); err != nil {
+		if err := sttFactory.SeedProviderConfig("openai", apiKey, "whisper-1", 6); err != nil {
 			logger.WarnCF("livekit", "Failed to configure OpenAI provider", map[string]any{
 				"error": err.Error(),
 			})
@@ -133,7 +133,7 @@ func main() {
 	}
 
 	if apiKey := os.Getenv("CARTESIA_API_KEY"); apiKey != "" {
-		if err := sttFactory.UpdateProviderConfig("cartesia", apiKey, "ink-whisper", false, 7); err != nil {
+		if err := sttFactory.SeedProviderConfig("cartesia", apiKey, "ink-whisper", 7); err != nil {
 			logger.WarnCF("livekit", "Failed to configure Cartesia provider", map[string]any{
 				"error": err.Error(),
 			})
@@ -141,7 +141,7 @@ func main() {
 	}
 
 	if apiKey := os.Getenv("ELEVENLABS_API_KEY"); apiKey != "" {
-		if err := sttFactory.UpdateProviderConfig("elevenlabs", apiKey, "scribe_v2", false, 8); err != nil {
+		if err := sttFactory.SeedProviderConfig("elevenlabs", apiKey, "scribe_v2", 8); err != nil {
 			logger.WarnCF("livekit", "Failed to configure ElevenLabs provider", map[string]any{
 				"error": err.Error(),
 			})

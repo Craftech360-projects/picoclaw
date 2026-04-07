@@ -59,13 +59,13 @@ type RoomSession struct {
 
 // ParticipantState tracks per-participant voice session state.
 type ParticipantState struct {
-	identity       string
-	sessionKey     string
-	sttStream      stt.TranscriptionStream
-	pcmTrack       *lkmedia.PCMRemoteTrack
-	ttsCancel      context.CancelFunc
-	speaking       atomic.Bool
-	mu             sync.Mutex
+	identity   string
+	sessionKey string
+	sttStream  stt.TranscriptionStream
+	pcmTrack   *lkmedia.PCMRemoteTrack
+	ttsCancel  context.CancelFunc
+	speaking   atomic.Bool
+	mu         sync.Mutex
 }
 
 // RoomSessionConfig configures a RoomSession.
@@ -410,7 +410,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	caps := rs.stt.Capabilities()
 
 	// Determine model and language
-	model := "auto"
+	model := ""
 	language := rs.primaryLanguage
 
 	// Validate language support if provider declares languages

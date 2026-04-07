@@ -1,56 +1,108 @@
-# Background Task Feature for Voice Agent
+# Goal: Support Multiple STT Providers for LiveKit Low-Latency Voice Agent
 
-This implements the architecture plan for low-latency background tasks for the LiveKit voice agent, allowing background tools like `spawn` to run and spontaneously signal the voice agent to announce their results.
+Currently, the `picoclaw-livekit` voice agent hardcodes its Speech-To-Text (STT) layer entirely to Deepgram. LiveKit's ecosystem supports various STT providers (AssemblyAI, Deepgram, ElevenLabs, OpenAI, Groq, Cartesia, etc.) for real-time streaming transciption.
 
-## Proposed Changes
-
-### 1. Refactor Tool Registration in Core Agent
-Moved `registerSharedTools` from `pkg/agent/loop.go` to a public function so `AgentBridge` can access shared tools without instantiating the heavy `AgentLoop`.
-
-#### [MODIFY] [loop.go](file:///D:/picoclaw/pkg/agent/loop.go)
-- Extract the `registerSharedTools` block into a new public function `RegisterSharedTools` (or a helper in `tools`).
-- Modify the `AgentLoop`'s usage to call this new public function.
-
-#### [NEW] [shared_tools.go](file:///D:/picoclaw/pkg/agent/shared_tools.go)
-- Define `RegisterSharedTools` which adds all shared tools (`spawn`, `subagent`, `web`, `i2c`, `message`, etc.) to a given `ToolRegistry`.
-- Expose the required spawner logic so different environments (like `AgentBridge`) can inject their own `SubTurnSpawner` implementation, preventing the shared registration from depending tightly on `AgentLoop`.
-
----
-
-### 2. Configure AgentBridge and Worker
-Add tool registration to `picoclaw-livekit`, wire up the asynchronous event channel, and implement a custom spawner for the `spawn` tool that works natively within the `AgentBridge` context.
-
-#### [MODIFY] [main.go](file:///D:/picoclaw/cmd/picoclaw-livekit/main.go)
-- Initialize shared tools on the `agentInstance` before returning it, using the newly exposed `agent.RegisterSharedTools`.
-- Implement a simple `SubTurnSpawner` for `main.go` that can handle the synchronous execution of `spawn` tools by recursively invoking a temporary `AgentBridge` or passing it to `AgentInstance`.
-
-#### [MODIFY] [agent_bridge.go](file:///D:/picoclaw/pkg/livekit/agent_bridge.go)
-- Add `AsyncEventChan chan *tools.ToolResult` to `AgentBridgeConfig` and `AgentBridge`.
-- Implement testing for `tc.AsyncCallback`. When the `executeTool` method is invoked, pass an anonymous function as the `asyncCb` that sends the finished `ToolResult` back to `AsyncEventChan` allowing asynchronous tracking of the background tool.
-
----
-
-### 3. Spontaneous Speech Generation (Wake Up Mechanism)
-Wire the LiveKit room session components to react to background task completions dynamically by interacting with the `asyncEventChan`.
-
-#### [MODIFY] [audio_pipeline.go](file:///D:/picoclaw/pkg/livekit/audio_pipeline.go)
-- Modify the main `select` loop inside `RunInbound` to listen to `ab.AsyncEventChan` alongside Deepgram and VAD events.
-- When an event is received from the channel:
-  - Check if the user is actively speaking via `!ap.session.participant.speaking.Load()` (or tracking `vadSpeechEnded`).
-  - If **currently speaking**, append the background task result stealthily to the conversation history as a system message.
-  - If **not speaking**, append the result to conversation history as a system message, and invoke a spontaneous LLM generation via `ap.HandleUtterance` to "wake up" the agent and announce the new result over TTS.
-
-#### [MODIFY] [room_session.go](file:///D:/picoclaw/pkg/livekit/room_session.go)
-- Wire `asyncEventChan` created per session into `AgentBridgeConfig` and `AudioPipeline` so it correctly maps async events back to the specific user/room.
+This implementation plan outlines the architecture required to abstract out the current STT layer in `pkg/voice` and build a scalable STT Provider Factory pattern (mirroring the existing TTS implementation) so that new providers can be plugged in trivially.
 
 ## User Review Required
 
-- Is a basic spontaneous `system` message like "The background task just finished, here is the result..." acceptable for the "Wake up" trigger? 
-- For the `cmd/picoclaw-livekit/main.go` SubTurnSpawner, should we use a completely new `AgentBridge` instance per subagent, or re-use existing infrastructure from `AgentInstance`? (A new instance prevents shared state collisions).
+> [!WARNING]
+> Before modifying the core `livekit` worker loop, I need you to review this architecture. By doing this, we will abstract away `deepgramStream` into a generic `TranscriptionStream` interface. This prepares the code to support multiple backends, but I need your approval to modify `pkg/voice/deepgram` and `room_session.go`.
+
+## Proposed Changes
+
+### 1. Configuration Layer
+
+#### [MODIFY] `pkg/config/livekit.go` (or wherever LiveKit config is)
+- Add an `STT` configuration struct to `LiveKitServiceConfig`.
+- Map new fields: `Provider` (string), `ModelID` (string), `Language` (string).
+
+---
+
+### 2. Provider Abstraction / The STT Package
+
+#### [NEW] `pkg/voice/stt/stt.go`
+Define the generic interfaces that all streaming STT providers must adhere to (based on the current deepgram types):
+```go
+package stt
+
+type StreamOpts struct {
+	SampleRate     int
+	Encoding       string
+	Channels       int
+	Language       string
+    Model          string
+}
+
+type TranscriptEvent struct {
+	Text        string
+	IsFinal     bool
+	SpeechStart bool
+	SpeechEnd   bool
+}
+
+type TranscriptionStream interface {
+	Results() <-chan TranscriptEvent
+	SendAudio(pcm []byte) error
+	Finalize() error
+	Close() error
+}
+
+type Provider interface {
+	OpenStream(opts StreamOpts) (TranscriptionStream, error)
+}
+```
+
+#### [NEW] `pkg/voice/stt/factory.go`
+Implement a Factory registry so providers can be initialized cleanly without tightly coupling `main.go` to every API client SDK:
+```go
+type ProviderBuilder func(cfg *config.Config, lkCfg config.LiveKitServiceConfig) Provider
+
+type Factory struct {
+	builders map[string]ProviderBuilder
+}
+// Implements NewFactory, Register, and Create()
+```
+
+---
+
+### 3. Migrating Deepgram
+
+#### [MODIFY] `pkg/voice/deepgram/streaming.go`
+#### [MODIFY] `pkg/voice/deepgram/types.go`
+- Refactor the code so that `deepgramStream` implements `stt.TranscriptionStream`.
+- Remove the local interfaces and import `pkg/voice/stt`.
+
+---
+
+### 4. Updating the LiveKit Agent
+
+#### [MODIFY] `pkg/livekit/room_session.go`
+- **Replace**: `cfg.Deepgram *deepgram.DeepgramTranscriber` with `cfg.STT stt.Provider`.
+- When dealing with incoming tracks inside `handleTrackSubscribed`, use `rs.stt.OpenStream()` generically. No Deepgram-specific logic should exist here.
+
+#### [MODIFY] `cmd/picoclaw-livekit/main.go`
+- Call the `stt.NewFactory()` on boot.
+- Register `deepgram` and initial placeholders/adapters for kid-friendly providers:
+  - `groq` (to use Whisper for high resilience to kid pitches)
+  - `speechmatics` (for high inclusive accuracy)
+  - `soapbox` (as an infrastructure placeholder for SoapBox Labs)
+- Inject the chosen `stt.Provider` into the `RoomSessionConfig`.
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> 1. We will prioritize building the **Groq (Whisper)** and **Speechmatics** adapters first because they have excellent kid-speech recognition and standard APIs. Do you have API keys available for those?
+> 2. Right now Deepgram relies heavily on `EndpointingMS` and specific `SpeechFinal` websocket events. Does the new STT provider need to support specific endpointing events natively, or are you comfortable with the existing TEN VAD pipeline taking over silence detection?
 
 ## Verification Plan
 
-### Automated/Manual Verification
-1. I will verify that `picoclaw-livekit` compiles successfully.
-2. I will ensure all unit tests pass, tracking any breakages in `AgentLoop` tests.
-3. Reviewer will need to test via client app that triggering a slow background tool successfully speaks an announcement when finished without blocking intermediate conversation.
+### Automated / Build
+- Run `go build ./cmd/picoclaw-livekit` to ensure no interface breakages.
+- Pass existing Deepgram tests.
+
+### Manual Verification
+- Join the LiveKit room with the refactored code using `deepgram` to ensure the abstraction didn't break real-time VAD or transcription mapping.
+- Change the `livekit_service.stt.provider` param and test the pluggable nature.
