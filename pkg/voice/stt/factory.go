@@ -298,7 +298,8 @@ func (f *Factory) initDB() error {
 			('gladia', '', 'gladia-2', FALSE, 14),
 			('gradium', '', 'default', FALSE, 15),
 			('mistral', '', 'voxtral-mini-latest', FALSE, 16),
-			('voxtral', '', 'voxtral-mini-latest', FALSE, 17)
+			('voxtral', '', 'voxtral-mini-latest', FALSE, 17),
+			('sarvam', '', 'saaras:v3', FALSE, 18)
 		ON CONFLICT (provider_name) DO NOTHING;
 	`
 
@@ -322,4 +323,5 @@ func (f *Factory) registerBuiltInProviders() {
 	f.providers["gradium"] = NewGradiumProvider("", "")
 	f.providers["mistral"] = NewMistralProvider("", "")
 	f.providers["voxtral"] = NewVoxtralProvider("", "")
+	f.providers["sarvam"] = NewSarvamProvider("", "")
 }

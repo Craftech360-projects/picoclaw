@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram"
 )
@@ -57,7 +58,7 @@ func (p *deepgramProvider) OpenStream(ctx context.Context, opts StreamOptions) (
 
 	streamOpts := deepgram.StreamOpts{
 		SampleRate:     opts.SampleRate,
-		Language:       opts.Language,
+		Language:       normalizeDeepgramLanguage(opts.Language),
 		Model:          model,
 		InterimResults: opts.InterimResults,
 		EndpointingMS:  opts.EndpointingMS,
@@ -103,4 +104,39 @@ func (a *deepgramStreamAdapter) Finalize() error {
 
 func (a *deepgramStreamAdapter) Close() error {
 	return a.stream.Close()
+}
+
+func normalizeDeepgramLanguage(lang string) string {
+	lang = strings.TrimSpace(strings.ToLower(lang))
+	switch lang {
+	case "", "auto", "multi":
+		// Let Deepgram auto-detect by omitting the language param.
+		return ""
+	case "english":
+		return "en"
+	case "hindi":
+		return "hi"
+	case "spanish":
+		return "es"
+	case "french":
+		return "fr"
+	case "german":
+		return "de"
+	case "italian":
+		return "it"
+	case "portuguese":
+		return "pt"
+	case "japanese":
+		return "ja"
+	case "korean":
+		return "ko"
+	case "chinese", "mandarin":
+		return "zh"
+	default:
+		// Keep language codes as-is (e.g. en, hi, en-US).
+		if len(lang) == 2 || len(lang) == 5 {
+			return lang
+		}
+		return ""
+	}
 }

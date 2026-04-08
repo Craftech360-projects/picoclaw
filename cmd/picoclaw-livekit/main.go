@@ -170,6 +170,14 @@ func main() {
 		}
 	}
 
+	if apiKey := os.Getenv("SARVAM_API_KEY"); apiKey != "" {
+		if err := sttFactory.SeedProviderConfig("sarvam", apiKey, "saaras:v3", 18); err != nil {
+			logger.WarnCF("livekit", "Failed to configure Sarvam provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
 	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
 		"provider":           lkCfg.TTS.Provider,

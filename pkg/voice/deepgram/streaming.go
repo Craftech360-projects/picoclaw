@@ -3,6 +3,8 @@ package deepgram
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -65,8 +67,16 @@ func (d *DeepgramTranscriber) OpenStream(opts StreamOpts) (TranscriptionStream, 
 		"Authorization": {"Token " + d.apiKey},
 	}
 
-	conn, _, err := d.dialer.Dial(u.String(), headers)
+	conn, resp, err := d.dialer.Dial(u.String(), headers)
 	if err != nil {
+		if resp != nil {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			if len(bodyBytes) > 0 {
+				return nil, fmt.Errorf("deepgram websocket dial failed: %w (status=%s body=%s)", err, resp.Status, strings.TrimSpace(string(bodyBytes)))
+			}
+			return nil, fmt.Errorf("deepgram websocket dial failed: %w (status=%s)", err, resp.Status)
+		}
 		return nil, err
 	}
 
