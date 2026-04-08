@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"strconv"
 	"strings"
@@ -159,17 +158,13 @@ func (s *deepgramStream) readLoop() {
 	for {
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
-			log.Printf("deepgram ReadMessage error: %v", err)
 			return
 		}
 
 		var resp deepgramResponse
 		if err := json.Unmarshal(data, &resp); err != nil {
-			log.Printf("deepgram unmarshal error: %v, raw data: %s", err, string(data))
 			continue
 		}
-
-		log.Printf("deepgram debug raw response: %s", string(data))
 
 		text := ""
 		if len(resp.Channel.Alternatives) > 0 {
