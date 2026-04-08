@@ -510,8 +510,9 @@ func DefaultConfig() *Config {
 			MonitorUSB: true,
 		},
 		Voice: VoiceConfig{
-			ModelName:         "",
-			EchoTranscription: false,
+			ModelName:             "",
+			EchoTranscription:     false,
+			GoogleCredentialsFile: "",
 		},
 		LiveKitService: LiveKitServiceConfig{
 			ServerURL: "",

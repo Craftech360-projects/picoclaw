@@ -834,9 +834,10 @@ type DevicesConfig struct {
 }
 
 type VoiceConfig struct {
-	ModelName         string `json:"model_name,omitempty"         env:"PICOCLAW_VOICE_MODEL_NAME"`
-	EchoTranscription bool   `json:"echo_transcription"           env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
-	ElevenLabsAPIKey  string `json:"elevenlabs_api_key,omitempty" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
+	ModelName             string `json:"model_name,omitempty"              env:"PICOCLAW_VOICE_MODEL_NAME"`
+	EchoTranscription     bool   `json:"echo_transcription"                env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
+	ElevenLabsAPIKey      string `json:"elevenlabs_api_key,omitempty"      env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
+	GoogleCredentialsFile string `json:"google_credentials_file,omitempty" env:"PICOCLAW_VOICE_GOOGLE_CREDENTIALS_FILE"`
 }
 
 // LiveKitServiceTTSConfig configures TTS for the LiveKit voice agent.

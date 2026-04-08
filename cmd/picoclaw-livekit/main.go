@@ -56,6 +56,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger.SetLevelFromString(*logLevel)
+	configureGoogleCredentials(cfg, cfgPath)
 
 	provider, modelID, err := providers.CreateProvider(cfg)
 	if err != nil {
@@ -383,6 +384,52 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
+}
+
+func configureGoogleCredentials(cfg *config.Config, cfgPath string) {
+	if cfg == nil {
+		return
+	}
+	if strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")) != "" {
+		return
+	}
+
+	credPath := strings.TrimSpace(cfg.Voice.GoogleCredentialsFile)
+	if credPath == "" {
+		return
+	}
+
+	if strings.HasPrefix(credPath, "~") {
+		if userHome, err := os.UserHomeDir(); err == nil {
+			credPath = filepath.Join(userHome, strings.TrimPrefix(credPath, "~"))
+		}
+	}
+	if !filepath.IsAbs(credPath) {
+		credPath = filepath.Join(filepath.Dir(cfgPath), credPath)
+	}
+
+	resolved, err := filepath.Abs(credPath)
+	if err == nil {
+		credPath = resolved
+	}
+	if _, err := os.Stat(credPath); err != nil {
+		logger.WarnCF("livekit", "Configured Google credentials file not found", map[string]any{
+			"path":  credPath,
+			"error": err.Error(),
+		})
+		return
+	}
+	if err := os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credPath); err != nil {
+		logger.WarnCF("livekit", "Failed to export Google credentials file", map[string]any{
+			"path":  credPath,
+			"error": err.Error(),
+		})
+		return
+	}
+
+	logger.InfoCF("livekit", "Configured Google credentials file from config", map[string]any{
+		"path": credPath,
+	})
 }
 
 func buildSTTProvider(factory *stt.Factory) stt.Provider {
