@@ -285,7 +285,7 @@ func (f *Factory) initDB() error {
 		INSERT INTO stt_providers (provider_name, api_key, model, is_active, priority)
 		VALUES
 			('deepgram', '', 'nova-2', FALSE, 1),
-			('assemblyai', '', 'universal', FALSE, 2),
+			('assemblyai', '', 'u3-rt-pro', FALSE, 2),
 			('groq', '', 'whisper-large-v3', FALSE, 5),
 			('openai', '', 'whisper-1', FALSE, 6),
 			('cartesia', '', 'ink-whisper', FALSE, 7),

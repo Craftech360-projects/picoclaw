@@ -1,27 +1,33 @@
 package stt
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
-	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
-// assemblyaiProvider implements STT using AssemblyAI REST API (non-streaming with adapter)
+const assemblyAIStreamingURL = "wss://streaming.assemblyai.com/v3/ws"
+
+// assemblyaiProvider implements STT using AssemblyAI realtime WebSocket API.
 type assemblyaiProvider struct {
 	apiKey string
 	model  string
 }
 
-// NewAssemblyAIProvider creates a new AssemblyAI provider
+// NewAssemblyAIProvider creates a new AssemblyAI provider.
 func NewAssemblyAIProvider(apiKey, model string) Provider {
 	if model == "" {
-		model = "universal"
+		model = "u3-rt-pro"
 	}
 	return &assemblyaiProvider{
 		apiKey: apiKey,
@@ -33,11 +39,11 @@ func (p *assemblyaiProvider) Name() string { return "assemblyai" }
 
 func (p *assemblyaiProvider) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{
-		Languages:            []string{"en", "auto"},
-		Models:               []string{"universal", "universal_pro"},
-		SupportsStreaming:    false, // Using REST API with adapter
+		Languages:            []string{"auto", "en", "es", "de", "fr", "pt", "it"},
+		Models:               []string{"u3-rt-pro", "universal-streaming-english", "universal-streaming-multilingual", "whisper-rt"},
+		SupportsStreaming:    true,
 		SupportsDiarization:  true,
-		SupportsMultilingual: false,
+		SupportsMultilingual: true,
 	}
 }
 
@@ -46,68 +52,109 @@ func (p *assemblyaiProvider) WithConfig(apiKey, model string) Provider {
 }
 
 func (p *assemblyaiProvider) OpenStream(ctx context.Context, opts StreamOptions) (TranscriptionStream, error) {
-	apiKey := p.apiKey
+	apiKey := strings.TrimSpace(p.apiKey)
 	if apiKey == "" {
-		apiKey = os.Getenv("ASSEMBLYAI_API_KEY")
+		apiKey = strings.TrimSpace(os.Getenv("ASSEMBLYAI_API_KEY"))
 	}
 	if apiKey == "" {
 		return nil, fmt.Errorf("assemblyai: API key not configured")
 	}
 
-	model := p.model
-	if opts.Model != "" {
-		model = opts.Model
+	model := strings.TrimSpace(p.model)
+	if strings.TrimSpace(opts.Model) != "" {
+		model = strings.TrimSpace(opts.Model)
+	}
+	model = normalizeAssemblyAIStreamingModel(model)
+
+	sampleRate := opts.SampleRate
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+	channels := opts.Channels
+	if channels <= 0 {
+		channels = 1
+	}
+
+	minTurnSilence, maxTurnSilence := assemblyAITurnSilence(model, opts.EndpointingMS)
+
+	q := url.Values{}
+	q.Set("sample_rate", strconv.Itoa(sampleRate))
+	q.Set("speech_model", model)
+	q.Set("encoding", "pcm_s16le")
+	q.Set("min_turn_silence", strconv.Itoa(minTurnSilence))
+	q.Set("max_turn_silence", strconv.Itoa(maxTurnSilence))
+	q.Set("speaker_labels", "false")
+
+	wsURL := assemblyAIStreamingBaseURL() + "?" + q.Encode()
+	header := http.Header{}
+	header.Set("Authorization", apiKey)
+
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		if resp != nil {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			if len(bodyBytes) > 0 {
+				return nil, fmt.Errorf("assemblyai websocket dial failed: %w (status=%s body=%s)", err, resp.Status, strings.TrimSpace(string(bodyBytes)))
+			}
+			return nil, fmt.Errorf("assemblyai websocket dial failed: %w (status=%s)", err, resp.Status)
+		}
+		return nil, fmt.Errorf("assemblyai websocket dial failed: %w", err)
 	}
 
 	stream := &assemblyaiStreamAdapter{
-		apiKey:      apiKey,
-		model:       model,
-		language:    opts.Language,
-		sampleRate:  opts.SampleRate,
-		endpointing: time.Duration(opts.EndpointingMS) * time.Millisecond,
-		audioBuffer: make([]byte, 0),
-		resultChan:  make(chan TranscriptEvent, 10),
-		ctx:         ctx,
-		mu:          sync.Mutex{},
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		conn:       conn,
+		resultChan: make(chan TranscriptEvent, 32),
+		closed:     make(chan struct{}),
+		frameBytes: assemblyAIFrameBytes(sampleRate, channels),
+		pendingPCM: make([]byte, 0),
 	}
 
+	logger.DebugCF("livekit", "AssemblyAI websocket opened", map[string]any{
+		"provider":          "assemblyai",
+		"model":             model,
+		"sample_rate":       sampleRate,
+		"channels":          channels,
+		"min_turn_silence":  minTurnSilence,
+		"max_turn_silence":  maxTurnSilence,
+		"frame_bytes_50_ms": stream.frameBytes,
+	})
+
+	go stream.readLoop()
 	return stream, nil
 }
 
-// assemblyaiStreamAdapter buffers audio and sends it to AssemblyAI REST API
 type assemblyaiStreamAdapter struct {
-	apiKey      string
-	model       string
-	language    string
-	sampleRate  int
-	endpointing time.Duration
-	audioBuffer []byte
-	resultChan  chan TranscriptEvent
-	ctx         context.Context
-	mu          sync.Mutex
-	closed      bool
-	httpClient  *http.Client
+	conn       *websocket.Conn
+	resultChan chan TranscriptEvent
+	closed     chan struct{}
+	frameBytes int
+	pendingPCM []byte
+	mu         sync.Mutex
+	closeOnce  sync.Once
+	speaking   bool
 }
 
 func (s *assemblyaiStreamAdapter) SendAudio(pcm []byte) error {
+	if len(pcm) == 0 {
+		return nil
+	}
+	select {
+	case <-s.closed:
+		return fmt.Errorf("assemblyai stream closed")
+	default:
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
-		return fmt.Errorf("stream is closed")
+	s.pendingPCM = append(s.pendingPCM, pcm...)
+	for len(s.pendingPCM) >= s.frameBytes {
+		if err := s.conn.WriteMessage(websocket.BinaryMessage, s.pendingPCM[:s.frameBytes]); err != nil {
+			return fmt.Errorf("assemblyai send audio: %w", err)
+		}
+		s.pendingPCM = s.pendingPCM[s.frameBytes:]
 	}
-
-	// Buffer the audio data
-	s.audioBuffer = append(s.audioBuffer, pcm...)
-
-	// If we have enough audio (based on endpointing), transcribe it
-	if s.endpointing > 0 && len(s.audioBuffer) > s.endpointingThreshold() {
-		return s.flushBuffer()
-	}
-
 	return nil
 }
 
@@ -116,160 +163,209 @@ func (s *assemblyaiStreamAdapter) Results() <-chan TranscriptEvent {
 }
 
 func (s *assemblyaiStreamAdapter) Finalize() error {
-	return s.flushBuffer()
-}
+	select {
+	case <-s.closed:
+		return fmt.Errorf("assemblyai stream closed")
+	default:
+	}
 
-func (s *assemblyaiStreamAdapter) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.closed = true
-	close(s.resultChan)
+	if len(s.pendingPCM) > 0 {
+		if len(s.pendingPCM) < s.frameBytes {
+			padding := make([]byte, s.frameBytes-len(s.pendingPCM))
+			s.pendingPCM = append(s.pendingPCM, padding...)
+		}
+		if err := s.conn.WriteMessage(websocket.BinaryMessage, s.pendingPCM); err != nil {
+			return fmt.Errorf("assemblyai flush audio: %w", err)
+		}
+		s.pendingPCM = s.pendingPCM[:0]
+	}
+
+	if err := s.conn.WriteJSON(map[string]string{"type": "ForceEndpoint"}); err != nil {
+		return fmt.Errorf("assemblyai force endpoint: %w", err)
+	}
 	return nil
 }
 
-// flushBuffer sends buffered audio to AssemblyAI API and emits results
-func (s *assemblyaiStreamAdapter) flushBuffer() error {
-	if len(s.audioBuffer) == 0 {
-		return nil
-	}
+func (s *assemblyaiStreamAdapter) Close() error {
+	return s.close(true)
+}
 
-	// Create WAV file from PCM data
-	wavData, err := createWAVFromPCM(s.audioBuffer, s.sampleRate)
-	if err != nil {
-		return fmt.Errorf("create WAV: %w", err)
-	}
+func (s *assemblyaiStreamAdapter) close(sendTerminate bool) error {
+	var retErr error
+	s.closeOnce.Do(func() {
+		close(s.closed)
 
-	// Upload audio file to AssemblyAI
-	uploadURL := "https://api.assemblyai.com/v2/upload"
-	req, err := http.NewRequestWithContext(s.ctx, "POST", uploadURL, bytes.NewReader(wavData))
-	if err != nil {
-		return fmt.Errorf("create upload request: %w", err)
-	}
-	req.Header.Set("Authorization", s.apiKey)
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("upload audio: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upload failed: %s - %s", resp.Status, string(body))
-	}
-
-	var uploadResp struct {
-		UploadURL string `json:"upload_url"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
-		return fmt.Errorf("decode upload response: %w", err)
-	}
-
-	// Create transcription request
-	transcribeURL := "https://api.assemblyai.com/v2/transcript"
-	transcriptReq := map[string]interface{}{
-		"audio_url":     uploadResp.UploadURL,
-		"speech_model":  s.model,
-		"language_code": s.language,
-	}
-
-	if s.language == "" || s.language == "auto" {
-		transcriptReq["language_detection"] = true
-	}
-
-	transcriptJSON, err := json.Marshal(transcriptReq)
-	if err != nil {
-		return fmt.Errorf("marshal transcript request: %w", err)
-	}
-
-	req, err = http.NewRequestWithContext(s.ctx, "POST", transcribeURL, bytes.NewReader(transcriptJSON))
-	if err != nil {
-		return fmt.Errorf("create transcript request: %w", err)
-	}
-	req.Header.Set("Authorization", s.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err = s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("create transcription: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("transcription failed: %s - %s", resp.Status, string(body))
-	}
-
-	var transcriptResp struct {
-		ID         string  `json:"id"`
-		Status     string  `json:"status"`
-		Text       string  `json:"text"`
-		Confidence float64 `json:"confidence"`
-		Language   string  `json:"language_code"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&transcriptResp); err != nil {
-		return fmt.Errorf("decode transcript response: %w", err)
-	}
-
-	// Poll for completion if still processing
-	for transcriptResp.Status == "processing" || transcriptResp.Status == "queued" {
-		time.Sleep(500 * time.Millisecond)
-
-		pollURL := fmt.Sprintf("https://api.assemblyai.com/v2/transcript/%s", transcriptResp.ID)
-		req, err := http.NewRequestWithContext(s.ctx, "GET", pollURL, nil)
-		if err != nil {
-			continue
+		s.mu.Lock()
+		if sendTerminate {
+			_ = s.conn.WriteJSON(map[string]string{"type": "Terminate"})
 		}
-		req.Header.Set("Authorization", s.apiKey)
+		_ = s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		retErr = s.conn.Close()
+		s.mu.Unlock()
+	})
+	return retErr
+}
 
-		resp, err := s.httpClient.Do(req)
-		if err != nil {
-			continue
-		}
+func (s *assemblyaiStreamAdapter) readLoop() {
+	defer func() {
+		_ = s.close(false)
+		close(s.resultChan)
+	}()
 
-		if err := json.NewDecoder(resp.Body).Decode(&transcriptResp); err != nil {
-			resp.Body.Close()
-			continue
-		}
-		resp.Body.Close()
-	}
-
-	if transcriptResp.Status == "error" {
-		return fmt.Errorf("transcription error")
-	}
-
-	// Send result
-	if transcriptResp.Text != "" {
-		event := TranscriptEvent{
-			Text:       transcriptResp.Text,
-			IsFinal:    true,
-			Confidence: transcriptResp.Confidence,
-			Language:   transcriptResp.Language,
-			Duration:   s.calculateDuration(),
-		}
-
+	for {
 		select {
-		case s.resultChan <- event:
+		case <-s.closed:
+			return
 		default:
 		}
-	}
 
-	// Clear buffer
-	s.audioBuffer = make([]byte, 0)
-	return nil
+		_, data, err := s.conn.ReadMessage()
+		if err != nil {
+			select {
+			case <-s.closed:
+			default:
+				logger.WarnCF("livekit", "AssemblyAI read error", map[string]any{
+					"provider": "assemblyai",
+					"error":    err.Error(),
+				})
+			}
+			return
+		}
+
+		var msg struct {
+			Type                 string  `json:"type"`
+			ID                   string  `json:"id"`
+			Transcript           string  `json:"transcript"`
+			EndOfTurn            bool    `json:"end_of_turn"`
+			Confidence           float64 `json:"confidence"`
+			LanguageCode         string  `json:"language_code"`
+			AudioDurationSeconds float64 `json:"audio_duration_seconds"`
+			SessionDuration      float64 `json:"session_duration_seconds"`
+			Error                string  `json:"error"`
+			Message              string  `json:"message"`
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+
+		switch strings.ToLower(msg.Type) {
+		case "begin":
+			logger.DebugCF("livekit", "AssemblyAI session started", map[string]any{
+				"provider":   "assemblyai",
+				"session_id": msg.ID,
+			})
+
+		case "speechstarted", "speech_started":
+			s.speaking = true
+			select {
+			case s.resultChan <- TranscriptEvent{SpeechStart: true}:
+			case <-s.closed:
+				return
+			}
+
+		case "turn":
+			text := strings.TrimSpace(msg.Transcript)
+			evt := TranscriptEvent{
+				Text:       text,
+				IsFinal:    msg.EndOfTurn,
+				SpeechEnd:  msg.EndOfTurn,
+				Confidence: msg.Confidence,
+				Language:   strings.TrimSpace(msg.LanguageCode),
+			}
+			if text != "" && !s.speaking {
+				evt.SpeechStart = true
+				s.speaking = true
+			}
+			if msg.EndOfTurn {
+				s.speaking = false
+			}
+			if evt.Text == "" && !evt.SpeechEnd && !evt.SpeechStart {
+				continue
+			}
+
+			select {
+			case s.resultChan <- evt:
+			case <-s.closed:
+				return
+			}
+
+		case "termination":
+			logger.DebugCF("livekit", "AssemblyAI session terminated", map[string]any{
+				"provider":               "assemblyai",
+				"audio_duration_seconds": msg.AudioDurationSeconds,
+				"session_duration_secs":  msg.SessionDuration,
+			})
+			return
+
+		case "error":
+			errText := strings.TrimSpace(msg.Error)
+			if errText == "" {
+				errText = strings.TrimSpace(msg.Message)
+			}
+			logger.ErrorCF("livekit", "AssemblyAI websocket error", map[string]any{
+				"provider": "assemblyai",
+				"error":    errText,
+				"raw":      string(data),
+			})
+			return
+		}
+	}
 }
 
-func (s *assemblyaiStreamAdapter) endpointingThreshold() int {
-	if s.endpointing <= 0 {
-		return 30000 // ~1 second at 16kHz mono 16-bit
+func assemblyAIStreamingBaseURL() string {
+	if override := strings.TrimSpace(os.Getenv("ASSEMBLYAI_STREAMING_URL")); override != "" {
+		return override
 	}
-	bytesPerSecond := s.sampleRate * 2 // 16-bit samples
-	return int(s.endpointing.Seconds() * float64(bytesPerSecond))
+	return assemblyAIStreamingURL
 }
 
-func (s *assemblyaiStreamAdapter) calculateDuration() float64 {
-	numSamples := len(s.audioBuffer) / 2
-	return float64(numSamples) / float64(s.sampleRate)
+func assemblyAIFrameBytes(sampleRate, channels int) int {
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+	if channels <= 0 {
+		channels = 1
+	}
+	frameBytes := (sampleRate * channels * 2) / 20 // 50ms PCM16 frame
+	if frameBytes <= 0 {
+		return 1600
+	}
+	return frameBytes
+}
+
+func assemblyAITurnSilence(model string, endpointingMS int) (minTurnSilence int, maxTurnSilence int) {
+	if model == "u3-rt-pro" {
+		minTurnSilence = 100
+		maxTurnSilence = 1000
+	} else {
+		minTurnSilence = 400
+		maxTurnSilence = 1280
+	}
+
+	if endpointingMS > 0 {
+		maxTurnSilence = endpointingMS
+		if maxTurnSilence < minTurnSilence {
+			maxTurnSilence = minTurnSilence
+		}
+	}
+
+	return minTurnSilence, maxTurnSilence
+}
+
+func normalizeAssemblyAIStreamingModel(model string) string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "", "u3-rt-pro", "universal-3-pro", "universal_pro", "best":
+		return "u3-rt-pro"
+	case "universal", "universal-2", "universal-streaming-english":
+		return "universal-streaming-english"
+	case "universal-streaming-multilingual", "multilingual":
+		return "universal-streaming-multilingual"
+	case "whisper-rt", "whisper", "whisper-1", "slam-1":
+		return "whisper-rt"
+	default:
+		return strings.TrimSpace(model)
+	}
 }
