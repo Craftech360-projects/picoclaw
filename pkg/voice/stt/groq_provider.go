@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -65,7 +66,7 @@ func (p *groqProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tran
 	stream := &groqStreamAdapter{
 		client:       client,
 		model:        model,
-		language:     opts.Language,
+		language:     normalizeGroqLang(opts.Language),
 		sampleRate:   opts.SampleRate,
 		interim:      opts.InterimResults,
 		endpointing:  opts.EndpointingMS,
@@ -104,11 +105,6 @@ func (s *groqStreamAdapter) SendAudio(pcm []byte) error {
 	// Buffer the audio data
 	s.audioBuffer = append(s.audioBuffer, pcm...)
 
-	// If we have enough audio (based on endpointing), transcribe it
-	if s.endpointing > 0 && len(s.audioBuffer) > s.endpointingThreshold() {
-		return s.flushBuffer()
-	}
-
 	return nil
 }
 
@@ -117,6 +113,8 @@ func (s *groqStreamAdapter) Results() <-chan TranscriptEvent {
 }
 
 func (s *groqStreamAdapter) Finalize() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.flushBuffer()
 }
 
@@ -183,20 +181,47 @@ func (s *groqStreamAdapter) flushBuffer() error {
 	return nil
 }
 
-func (s *groqStreamAdapter) endpointingThreshold() int {
-	if s.endpointing <= 0 {
-		return 30000 // 30KB default (~1 second at 16kHz mono 16-bit)
-	}
-	// Convert ms to bytes: sampleRate * (endpointingMS / 1000) * 2 bytes per sample
-	return s.sampleRate * (s.endpointing / 1000) * 2
-}
-
 func (s *groqStreamAdapter) calculateDuration() float64 {
 	// Calculate duration from buffer size
 	// Duration = numSamples / sampleRate
 	// numBytes = numSamples * 2 (16-bit)
 	numSamples := len(s.audioBuffer) / 2
 	return float64(numSamples) / float64(s.sampleRate)
+}
+
+func normalizeGroqLang(lang string) string {
+	lang = strings.TrimSpace(strings.ToLower(lang))
+	switch lang {
+	case "", "auto":
+		return ""
+	case "english":
+		return "en"
+	case "hindi":
+		return "hi"
+	case "spanish":
+		return "es"
+	case "french":
+		return "fr"
+	case "german":
+		return "de"
+	case "italian":
+		return "it"
+	case "japanese":
+		return "ja"
+	case "korean":
+		return "ko"
+	case "portuguese":
+		return "pt"
+	case "russian":
+		return "ru"
+	case "chinese", "mandarin":
+		return "zh"
+	default:
+		if len(lang) == 2 || len(lang) == 5 {
+			return lang
+		}
+		return ""
+	}
 }
 
 // createWAV creates a minimal WAV file from PCM data
