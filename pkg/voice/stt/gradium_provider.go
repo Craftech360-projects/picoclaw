@@ -147,6 +147,7 @@ type gradiumStream struct {
 	closeOnce        sync.Once
 
 	speaking   bool
+	utterance  strings.Builder
 	flushSeqNo int64
 }
 
@@ -290,11 +291,16 @@ func (s *gradiumStream) readLoop() {
 			if text == "" {
 				continue
 			}
-			// Gradium emits text chunks progressively. Treat chunks as final transcript tokens
-			// and rely on end_text/flushed as utterance boundary markers.
+			// Gradium emits progressive text chunks. Keep buffering internally and
+			// only emit a final transcript on flush completion.
+			if s.utterance.Len() > 0 {
+				s.utterance.WriteString(" ")
+			}
+			s.utterance.WriteString(text)
+
 			evt := TranscriptEvent{
 				Text:     text,
-				IsFinal:  true,
+				IsFinal:  false,
 				Language: s.language,
 			}
 			if !s.speaking {
@@ -313,13 +319,18 @@ func (s *gradiumStream) readLoop() {
 			continue
 
 		case "flushed", "flush_done":
+			finalText := strings.TrimSpace(s.utterance.String())
+			s.utterance.Reset()
 			evt := TranscriptEvent{
-				Text:      "",
+				Text:      finalText,
 				IsFinal:   true,
 				SpeechEnd: true,
 				Language:  s.language,
 			}
 			s.speaking = false
+			if evt.Text == "" {
+				continue
+			}
 			select {
 			case s.resultChan <- evt:
 			case <-s.closed:

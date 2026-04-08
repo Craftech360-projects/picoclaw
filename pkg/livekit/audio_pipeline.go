@@ -327,6 +327,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	}
 	var utterance strings.Builder
 	var vadSpeechEnded bool
+	var latestTranscript string
+	var finalizeTimer *time.Timer
+	var finalizeTimerC <-chan time.Time
 
 	// Get the async event channel from the bridge (may be nil)
 	var asyncEvents <-chan AsyncEvent
@@ -334,9 +337,77 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		asyncEvents = ap.bridge.AsyncEvents()
 	}
 
+	stopFinalizeTimer := func() {
+		if finalizeTimer == nil {
+			finalizeTimerC = nil
+			return
+		}
+		if !finalizeTimer.Stop() {
+			select {
+			case <-finalizeTimer.C:
+			default:
+			}
+		}
+		finalizeTimer = nil
+		finalizeTimerC = nil
+	}
+
+	startFinalizeTimer := func() {
+		const finalizeGracePeriod = 750 * time.Millisecond
+		if finalizeTimer == nil {
+			finalizeTimer = time.NewTimer(finalizeGracePeriod)
+		} else {
+			if !finalizeTimer.Stop() {
+				select {
+				case <-finalizeTimer.C:
+				default:
+				}
+			}
+			finalizeTimer.Reset(finalizeGracePeriod)
+		}
+		finalizeTimerC = finalizeTimer.C
+	}
+
+	flushBufferedUtterance := func(trigger string) {
+		text := strings.TrimSpace(utterance.String())
+		if text == "" {
+			text = strings.TrimSpace(latestTranscript)
+		}
+		utterance.Reset()
+		latestTranscript = ""
+		vadSpeechEnded = false
+		stopFinalizeTimer()
+
+		if ap.session != nil && ap.session.participant != nil {
+			ap.session.participant.speaking.Store(false)
+		}
+
+		if text == "" {
+			return
+		}
+		logger.DebugCF("livekit", "Speech end with text", map[string]any{
+			"session": ap.sessionKey(),
+			"text":    text,
+			"trigger": trigger,
+		})
+
+		sessionKey := ap.sessionKey()
+		if sessionKey == "" {
+			return
+		}
+
+		ttsCtx, ttsCancel := context.WithCancel(context.Background())
+		ap.setTTSCancel(ttsCancel)
+
+		go func() {
+			_, _ = ap.HandleUtterance(ttsCtx, sessionKey, text, ttsCancel)
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			stopFinalizeTimer()
 			return
 
 		case vadEvt, ok := <-ap.vadEvent:
@@ -346,6 +417,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			}
 			if evt, ok := vadEvt.(vad.VADEvent); ok {
 				if evt.SpeechStart {
+					if vadSpeechEnded && (utterance.Len() > 0 || strings.TrimSpace(latestTranscript) != "") {
+						flushBufferedUtterance("next_vad_start")
+					}
 					if ap.session != nil && ap.session.participant != nil {
 						ap.session.participant.speaking.Store(true)
 					}
@@ -354,6 +428,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 						"probability": evt.Probability,
 					})
 					ap.cancelTTS("vad_speech_start")
+					stopFinalizeTimer()
 					vadSpeechEnded = false
 				}
 
@@ -369,12 +444,20 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 							"error":   err.Error(),
 						})
 					}
+					startFinalizeTimer()
 				}
 			}
 
 		case evt, ok := <-sttStream.Results():
 			if !ok {
+				logger.WarnCF("livekit", "STT stream closed, exiting RunInbound", map[string]any{
+					"session": ap.sessionKey(),
+				})
 				return
+			}
+
+			if evt.Text != "" {
+				latestTranscript = evt.Text
 			}
 
 			if evt.IsFinal && evt.Text != "" {
@@ -383,33 +466,18 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			}
 
 			if evt.SpeechEnd || (vadSpeechEnded && utterance.Len() > 0) {
-				text := strings.TrimSpace(utterance.String())
-				utterance.Reset()
-				vadSpeechEnded = false
-
-				if ap.session != nil && ap.session.participant != nil {
-					ap.session.participant.speaking.Store(false)
+				trigger := "stt_speech_end"
+				if vadSpeechEnded && !evt.SpeechEnd {
+					trigger = "vad_with_final_text"
 				}
+				flushBufferedUtterance(trigger)
+			}
 
-				if text == "" {
-					continue
-				}
-				logger.DebugCF("livekit", "Speech end with text", map[string]any{
-					"session": ap.sessionKey(),
-					"text":    text,
-				})
-
-				sessionKey := ap.sessionKey()
-				if sessionKey == "" {
-					continue
-				}
-
-				ttsCtx, ttsCancel := context.WithCancel(context.Background())
-				ap.setTTSCancel(ttsCancel)
-
-				go func() {
-					_, _ = ap.HandleUtterance(ttsCtx, sessionKey, text, ttsCancel)
-				}()
+		case <-finalizeTimerC:
+			finalizeTimer = nil
+			finalizeTimerC = nil
+			if vadSpeechEnded && (utterance.Len() > 0 || strings.TrimSpace(latestTranscript) != "") {
+				flushBufferedUtterance("vad_finalize_timeout")
 			}
 
 		case asyncEvt, ok := <-asyncEvents:

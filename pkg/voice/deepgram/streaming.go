@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"strconv"
 	"strings"
@@ -158,26 +159,32 @@ func (s *deepgramStream) readLoop() {
 	for {
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
+			log.Printf("deepgram ReadMessage error: %v", err)
 			return
 		}
 
 		var resp deepgramResponse
 		if err := json.Unmarshal(data, &resp); err != nil {
+			log.Printf("deepgram unmarshal error: %v, raw data: %s", err, string(data))
 			continue
 		}
+
+		log.Printf("deepgram debug raw response: %s", string(data))
 
 		text := ""
 		if len(resp.Channel.Alternatives) > 0 {
 			text = strings.TrimSpace(resp.Channel.Alternatives[0].Transcript)
 		}
 
-		if text == "" && !resp.SpeechFinal {
+		if text == "" && !resp.SpeechFinal && !resp.FromFinalize && !resp.IsFinal {
 			continue
 		}
 
 		evt := TranscriptEvent{
 			Text:    text,
-			IsFinal: resp.IsFinal,
+			// Some Deepgram responses can carry speech_final=true even when is_final=false.
+			// Treat those as final so the pipeline can flush utterance text on turn end.
+			IsFinal: resp.IsFinal || resp.SpeechFinal || resp.FromFinalize,
 		}
 
 		if text != "" && !s.speaking {
@@ -200,7 +207,7 @@ func (s *deepgramStream) readLoop() {
 		}
 
 		// Reverting to strict SpeechFinal for SpeechEnd to prevent premature interruption
-		if resp.SpeechFinal {
+		if resp.SpeechFinal || resp.FromFinalize {
 			evt.SpeechEnd = true
 			s.speaking = false
 		}

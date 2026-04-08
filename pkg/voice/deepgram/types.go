@@ -35,10 +35,12 @@ type StreamingTranscriber interface {
 }
 
 type deepgramResponse struct {
-	Type        string `json:"type,omitempty"`
-	IsFinal     bool   `json:"is_final"`
-	SpeechFinal bool   `json:"speech_final"`
-	Channel     struct {
+	Type         string  `json:"type,omitempty"`
+	IsFinal      bool    `json:"is_final"`
+	SpeechFinal  bool    `json:"speech_final"`
+	FromFinalize bool    `json:"from_finalize,omitempty"`
+	LastWordEnd  float64 `json:"last_word_end,omitempty"`
+	Channel      struct {
 		Alternatives []struct {
 			Transcript string `json:"transcript"`
 		} `json:"alternatives"`

@@ -70,23 +70,20 @@ func (p *deepgramProvider) OpenStream(ctx context.Context, opts StreamOptions) (
 		return nil, err
 	}
 
-	return &deepgramStreamAdapter{stream: stream}, nil
+	return newDeepgramStreamAdapter(stream), nil
 }
 
 // deepgramStreamAdapter wraps the existing Deepgram stream to implement stt.TranscriptionStream.
 type deepgramStreamAdapter struct {
 	stream deepgram.TranscriptionStream
+	out    chan TranscriptEvent
 }
 
-func (a *deepgramStreamAdapter) SendAudio(pcm []byte) error {
-	return a.stream.SendAudio(pcm)
-}
-
-func (a *deepgramStreamAdapter) Results() <-chan TranscriptEvent {
-	out := make(chan TranscriptEvent, 10)
+func newDeepgramStreamAdapter(stream deepgram.TranscriptionStream) *deepgramStreamAdapter {
+	out := make(chan TranscriptEvent, 32)
 	go func() {
 		defer close(out)
-		for evt := range a.stream.Results() {
+		for evt := range stream.Results() {
 			out <- TranscriptEvent{
 				Text:        evt.Text,
 				IsFinal:     evt.IsFinal,
@@ -95,7 +92,18 @@ func (a *deepgramStreamAdapter) Results() <-chan TranscriptEvent {
 			}
 		}
 	}()
-	return out
+	return &deepgramStreamAdapter{
+		stream: stream,
+		out:    out,
+	}
+}
+
+func (a *deepgramStreamAdapter) SendAudio(pcm []byte) error {
+	return a.stream.SendAudio(pcm)
+}
+
+func (a *deepgramStreamAdapter) Results() <-chan TranscriptEvent {
+	return a.out
 }
 
 func (a *deepgramStreamAdapter) Finalize() error {
