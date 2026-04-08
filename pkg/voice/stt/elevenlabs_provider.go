@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -180,15 +181,20 @@ func (s *elevenlabsStreamAdapter) transcribeBuffer() error {
 	}
 
 	var result struct {
-		Text string `json:"text"`
+		Text  string `json:"text"`
+		Words []struct {
+			Text string `json:"text"`
+			Type string `json:"type"`
+		} `json:"words"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
-	if result.Text != "" {
+	cleanText := sanitizeElevenLabsTranscript(result.Text, result.Words)
+	if cleanText != "" {
 		event := TranscriptEvent{
-			Text:    result.Text,
+			Text:    cleanText,
 			IsFinal: true,
 		}
 
@@ -200,6 +206,39 @@ func (s *elevenlabsStreamAdapter) transcribeBuffer() error {
 
 	s.audioBuffer = make([]byte, 0)
 	return nil
+}
+
+func sanitizeElevenLabsTranscript(raw string, words []struct {
+	Text string `json:"text"`
+	Type string `json:"type"`
+}) string {
+	if len(words) > 0 {
+		var b strings.Builder
+		for _, w := range words {
+			switch strings.ToLower(strings.TrimSpace(w.Type)) {
+			case "word", "spacing":
+				b.WriteString(w.Text)
+			}
+		}
+		if cleaned := strings.TrimSpace(strings.Join(strings.Fields(b.String()), " ")); cleaned != "" {
+			return cleaned
+		}
+	}
+
+	// Fallback for responses without detailed word metadata.
+	var out []rune
+	inTag := false
+	for _, r := range raw {
+		switch {
+		case r == '[':
+			inTag = true
+		case r == ']':
+			inTag = false
+		case !inTag:
+			out = append(out, r)
+		}
+	}
+	return strings.TrimSpace(strings.Join(strings.Fields(string(out)), " "))
 }
 
 func (s *elevenlabsStreamAdapter) endpointingThreshold() int {
