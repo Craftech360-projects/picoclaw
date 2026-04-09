@@ -1,0 +1,42 @@
+{
+  "skills": [
+    "go-concurrency-patterns",
+    "voice-ai-development",
+    "voice-ai-engine-development",
+    "backend-development-feature-development",
+    "agent-framework-azure-ai-py",
+    "autonomous-agents",
+    "backend-architect",
+    "code-reviewer",
+    "database-architect",
+    "performance-optimizer",
+    "plan-writing",
+    "prompt-engineer"
+  ],
+  "permissions": {
+    "allow": [
+      "WebFetch(raw.githubusercontent.com)",
+      "Bash(git clone *)",
+      "Bash(mkdir *)",
+      "Bash(xcopy *)",
+      "Bash(rmdir *)",
+      "Read(C:\\Users\\rahul\\.picoclaw/**)",
+      "Bash(go *)",
+      "Bash(./picoclaw-livekit-test.exe *)",
+      "Bash(timeout *)",
+      "Bash(curl *)",
+      "Bash(powershell *)",
+      "Bash(tasklist)",
+      "Bash(findstr *)",
+      "Bash(netstat *)",
+      "Bash(taskkill *)",
+      "Bash(ping *)",
+      "Bash(type *)",
+      "Bash(set *)",
+      "Bash(picoclaw-livekit-test.exe *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  },
+  "$version": 3
+}
