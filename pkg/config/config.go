@@ -866,6 +866,8 @@ type LiveKitServiceConfig struct {
 	TTS          LiveKitServiceTTSConfig `json:"tts"`
 	STT          LiveKitServiceSTTConfig `json:"stt"`
 	ToolFeedback map[string]string       `json:"tool_feedback,omitempty"`
+	HealthPort   int                     `json:"health_port,omitempty" env:"PICOCLAW_LIVEKIT_HEALTH_PORT"`
+	MaxSessions  int                     `json:"max_sessions,omitempty" env:"PICOCLAW_LIVEKIT_MAX_SESSIONS"`
 
 	apiKey         string
 	apiSecret      string

@@ -307,6 +307,8 @@ func main() {
 		APIKey:        lkCfg.APIKey(),
 		APISecret:     lkCfg.APISecret(),
 		BridgeFactory: bridgeFactory,
+		MaxSessions:   lkCfg.MaxSessions,
+		HealthPort:    lkCfg.HealthPort,
 		RoomFactory: func(job *livekitproto.Job, assignment *livekitproto.JobAssignment, bridge *livekit.AgentBridge) (*livekit.RoomSession, error) {
 			serverURL := lkCfg.ServerURL
 			if assignment != nil && assignment.Url != nil && *assignment.Url != "" {

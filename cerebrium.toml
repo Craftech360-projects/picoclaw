@@ -1,0 +1,44 @@
+[cerebrium]
+name = "picoclaw-voice-agent"
+region = "asia-south1"  # Mumbai — closest to India users
+
+[cerebrium.compute]
+gpu = "None"    # CPU-only — voice processing doesn't need GPU
+cpu = 8         # vCPUs per replica
+memory = 32     # GB RAM per replica
+
+[cerebrium.scaling]
+min_replicas = 1              # keep 1 alive always (no cold start for voice)
+max_replicas = 5              # auto-scale up to this
+cooldown = 30                 # seconds between scaling actions
+replica_concurrency = 1       # 1 live session per worker slot
+response_grace_period = 900   # wait 15 min before terminating idle replica
+scaling_metric = "cpu_utilization"  # CPU-based scaling (not HTTP queue)
+scaling_target = 80           # scale up when CPU hits 80%
+
+[cerebrium.runtime.custom]
+port = 8192
+dockerfile_path = "./Dockerfile.cerebrium"
+healthcheck_endpoint = "/health"
+readycheck_endpoint = "/ready"
+
+[cerebrium.secrets]
+PICOCLAW_LIVEKIT_SERVER_URL = true
+PICOCLAW_LIVEKIT_API_KEY = true
+PICOCLAW_LIVEKIT_API_SECRET = true
+PICOCLAW_LIVEKIT_STT_DATABASE_URL = true
+PICOCLAW_LIVEKIT_STT_PROVIDER = false
+PICOCLAW_LIVEKIT_STT_LANGUAGE = false
+PICOCLAW_LIVEKIT_TTS_PROVIDER = false
+PICOCLAW_LIVEKIT_TTS_VOICE_ID = false
+PICOCLAW_LIVEKIT_TTS_MODEL_ID = false
+PICOCLAW_LIVEKIT_TTS_FILLER_WORDS = false
+PICOCLAW_LIVEKIT_HEALTH_PORT = false
+PICOCLAW_LIVEKIT_MAX_SESSIONS = false
+PICOCLAW_AGENTS_DEFAULTS_PROVIDER = false
+PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME = false
+DEEPGRAM_API_KEY = true
+ELEVENLABS_API_KEY = true
+OPENROUTER_API_KEY = true
+GROQ_API_KEY = true
+SARVAM_API_KEY = true

@@ -2,8 +2,10 @@ package livekit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -34,6 +36,12 @@ type Worker struct {
 
 	skipRoomJoin bool
 	maxSessions  int // Maximum number of concurrent sessions this worker will handle
+
+	// Health check server
+	healthPort   int
+	healthServer *http.Server
+	connected    bool // true after successful WebSocket connection
+	ready        bool // true after worker registration
 }
 
 // WorkerConfig holds configuration for creating a Worker.
@@ -45,6 +53,7 @@ type WorkerConfig struct {
 	BridgeFactory func(job *livekit.Job) *AgentBridge
 	RoomFactory   func(job *livekit.Job, assignment *livekit.JobAssignment, bridge *AgentBridge) (*RoomSession, error)
 	MaxSessions   int
+	HealthPort    int // HTTP port for /health and /ready endpoints (0 = disabled)
 }
 
 // NewWorker creates a new LiveKit agent worker.
@@ -62,6 +71,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		bridgeFactory: cfg.BridgeFactory,
 		roomFactory:   cfg.RoomFactory,
 		maxSessions:   maxSessions,
+		healthPort:    cfg.HealthPort,
 	}
 }
 
@@ -70,6 +80,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w == nil {
 		return errors.New("worker is nil")
 	}
+
+	// Start health check server if port is configured
+	if w.healthPort > 0 {
+		w.startHealthServer()
+	}
+
 	backoff := time.Second
 	for {
 		select {
@@ -116,6 +132,9 @@ func (w *Worker) runOnce(ctx context.Context) error {
 		return err
 	}
 	w.conn = conn
+	w.mu.Lock()
+	w.connected = true
+	w.mu.Unlock()
 	logger.InfoCF("livekit", "Connected to LiveKit agent endpoint", map[string]any{
 		"ws_url": wsURL,
 	})
@@ -149,6 +168,9 @@ func (w *Worker) handleServerMessage(ctx context.Context, msg *livekit.ServerMes
 	case *livekit.ServerMessage_Register:
 		if m.Register != nil {
 			w.workerID = m.Register.WorkerId
+			w.mu.Lock()
+			w.ready = true
+			w.mu.Unlock()
 			logger.InfoCF("livekit", "Worker registered", map[string]any{
 				"worker_id": w.workerID,
 				"agent":     w.agentName,
@@ -335,6 +357,11 @@ func (w *Worker) pingLoop(ctx context.Context) {
 
 // Shutdown gracefully stops all jobs and disconnects.
 func (w *Worker) Shutdown() {
+	// Stop health check server
+	if w.healthServer != nil {
+		_ = w.healthServer.Shutdown(context.Background())
+	}
+
 	w.mu.RLock()
 	sessions := make([]*RoomSession, 0, len(w.jobs))
 	for _, s := range w.jobs {
@@ -363,6 +390,92 @@ func (w *Worker) workerToken() (string, error) {
 	at.SetVideoGrant(grant)
 	at.SetIdentity("picoclaw-worker")
 	return at.ToJWT()
+}
+
+// startHealthServer starts an HTTP server with /health and /ready endpoints.
+func (w *Worker) startHealthServer() {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health", func(rw http.ResponseWriter, r *http.Request) {
+		w.mu.RLock()
+		connected := w.connected
+		activeJobs := len(w.jobs)
+		w.mu.RUnlock()
+
+		if !connected {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(rw).Encode(map[string]any{
+				"status": "unhealthy",
+				"reason": "not connected to LiveKit",
+			})
+			return
+		}
+
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusOK)
+		json.NewEncoder(rw).Encode(map[string]any{
+			"status":      "healthy",
+			"activeJobs":  activeJobs,
+			"maxSessions": w.maxSessions,
+		})
+	})
+
+	mux.HandleFunc("/ready", func(rw http.ResponseWriter, r *http.Request) {
+		w.mu.RLock()
+		connected := w.connected
+		ready := w.ready
+		activeJobs := len(w.jobs)
+		maxSessions := w.maxSessions
+		w.mu.RUnlock()
+
+		if !connected || !ready {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(rw).Encode(map[string]any{
+				"status": "not ready",
+				"connected": connected,
+				"registered": ready,
+			})
+			return
+		}
+
+		// Worker is ready if it has capacity for more sessions
+		available := activeJobs < maxSessions
+		statusCode := http.StatusOK
+		status := "ready"
+		if !available {
+			statusCode = http.StatusTooManyRequests
+			status = "at capacity"
+		}
+
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(statusCode)
+		json.NewEncoder(rw).Encode(map[string]any{
+			"status":      status,
+			"activeJobs":  activeJobs,
+			"maxSessions": maxSessions,
+			"available":   available,
+		})
+	})
+
+	w.healthServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", w.healthPort),
+		Handler: mux,
+	}
+
+	go func() {
+		logger.InfoCF("livekit", "Health check server started", map[string]any{
+			"port": w.healthPort,
+			"health": fmt.Sprintf("http://0.0.0.0:%d/health", w.healthPort),
+			"ready": fmt.Sprintf("http://0.0.0.0:%d/ready", w.healthPort),
+		})
+		if err := w.healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.ErrorCF("livekit", "Health check server error", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}()
 }
 
 func agentWebsocketURL(serverURL string) (string, error) {
