@@ -59,6 +59,7 @@ UPDATE stt_providers SET api_key = 'sk-deepgram-key' WHERE provider_name = 'deep
 UPDATE stt_providers SET api_key = 'gsk-groq-key' WHERE provider_name = 'groq';
 UPDATE stt_providers SET api_key = 'sk-openai-key' WHERE provider_name = 'openai';
 UPDATE stt_providers SET api_key = 'sk-sarvam-key' WHERE provider_name = 'sarvam';
+UPDATE stt_providers SET api_key = 'xai-your-key' WHERE provider_name = 'xai';
 ```
 
 > **Key point:** Changing `is_active` in the database takes effect on **new sessions only**. Active calls are not interrupted.
@@ -96,6 +97,7 @@ These are the **minimum** env vars you need to set in the Cerebrium dashboard:
 | `DEEPGRAM_API_KEY` | `sk_xxxxxxxx` | Seeds Deepgram into the DB on startup |
 | `GROQ_API_KEY` | `gsk_xxxxxxxx` | Seeds Groq into the DB (optional) |
 | `SARVAM_API_KEY` | `sk_xxxxxxxx` | Seeds Sarvam into the DB (optional, best for Indian languages) |
+| `XAI_API_KEY` | `xai_xxxxxxxx` | Seeds xAI STT into the DB (optional) |
 
 #### TTS (Text-to-Speech)
 | Variable | Example Value | Purpose |

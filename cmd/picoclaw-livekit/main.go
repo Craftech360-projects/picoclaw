@@ -192,6 +192,14 @@ func main() {
 		}
 	}
 
+	if apiKey := os.Getenv("XAI_API_KEY"); apiKey != "" {
+		if err := sttFactory.SeedProviderConfig("xai", apiKey, "stt", 19); err != nil {
+			logger.WarnCF("livekit", "Failed to configure xAI provider", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
 	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
 		"provider":           lkCfg.TTS.Provider,
