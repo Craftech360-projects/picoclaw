@@ -67,17 +67,18 @@ type usageState struct {
 
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
-	agentInstance  *agent.AgentInstance
-	cfg            *config.Config
-	provider       providers.LLMProvider
-	streamProvider providers.StreamingProvider
-	modelID        string
-	sessions       session.SessionStore
-	tools          *tools.ToolRegistry
-	contextBuilder *agent.ContextBuilder
-	maxIterations  int
-	llmOptions     map[string]any
-	asyncEventChan chan AsyncEvent // receives background task completions
+	agentInstance     *agent.AgentInstance
+	cfg               *config.Config
+	provider          providers.LLMProvider
+	streamProvider    providers.StreamingProvider
+	preserveWorkspace bool
+	modelID           string
+	sessions          session.SessionStore
+	tools             *tools.ToolRegistry
+	contextBuilder    *agent.ContextBuilder
+	maxIterations     int
+	llmOptions        map[string]any
+	asyncEventChan    chan AsyncEvent // receives background task completions
 
 	// summarization config
 	summarizeMessageThreshold int
@@ -92,13 +93,14 @@ type AgentBridge struct {
 
 // AgentBridgeConfig defines shared resources for creating bridges.
 type AgentBridgeConfig struct {
-	Config         *config.Config
-	Provider       providers.LLMProvider
-	ModelID        string
-	AgentInstance  *agent.AgentInstance
-	MaxIterations  int
-	LLMOptions     map[string]any
-	AsyncEventChan chan AsyncEvent // optional channel for background task results
+	Config            *config.Config
+	Provider          providers.LLMProvider
+	ModelID           string
+	AgentInstance     *agent.AgentInstance
+	PreserveWorkspace bool
+	MaxIterations     int
+	LLMOptions        map[string]any
+	AsyncEventChan    chan AsyncEvent // optional channel for background task results
 	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
 	// Defaults to 20 if zero.
 	SummarizeMessageThreshold int
@@ -129,6 +131,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		cfg:                       cfg.Config,
 		provider:                  cfg.Provider,
 		modelID:                   cfg.ModelID,
+		preserveWorkspace:         cfg.PreserveWorkspace,
 		sessions:                  cfg.AgentInstance.Sessions,
 		tools:                     cfg.AgentInstance.Tools,
 		contextBuilder:            cfg.AgentInstance.ContextBuilder,
@@ -148,13 +151,13 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 	return ab, nil
 }
 
-// Close gracefully releases the session memory store and then auto-deletes the active
-// ephemeral workspace folder to prevent disk storage exhaustion natively.
+// Close gracefully releases the session memory store and conditionally cleans
+// the active workspace.
 func (ab *AgentBridge) Close() {
 	if ab.agentInstance != nil {
 		ab.agentInstance.Close()
-		// ephemeral workspace garbage collection
-		if ab.agentInstance.Workspace != "" {
+		// Default behavior is ephemeral cleanup unless persistence is requested.
+		if !ab.preserveWorkspace && ab.agentInstance.Workspace != "" {
 			os.RemoveAll(ab.agentInstance.Workspace)
 		}
 	}

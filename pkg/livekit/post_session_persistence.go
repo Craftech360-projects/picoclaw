@@ -202,6 +202,12 @@ func roundTo3(value float64) float64 {
 	return math.Round(value*1000) / 1000
 }
 
+// ResolvePersistenceFields extracts stable persistence identifiers from room info.
+// deviceMAC is normalized to aa:bb:cc:dd:ee:ff when present.
+func ResolvePersistenceFields(roomName, metadata string) (deviceMAC, agentID string) {
+	return resolvePersistenceFields(roomName, metadata)
+}
+
 func resolvePersistenceFields(roomName, metadata string) (deviceMAC, agentID string) {
 	deviceMAC = resolveDeviceMAC(roomName, metadata)
 	agentID = resolveAgentID(metadata)

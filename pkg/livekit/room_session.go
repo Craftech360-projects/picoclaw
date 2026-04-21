@@ -397,7 +397,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	ps := &ParticipantState{
 		identity:   rp.Identity(),
-		sessionKey: fmt.Sprintf("livekit:%s:%s", rs.roomName(), rp.Identity()),
+		sessionKey: rs.sessionKeyForParticipant(rp.Identity()),
 	}
 	rs.participant = ps
 	rs.mu.Unlock()
@@ -564,6 +564,19 @@ func (rs *RoomSession) roomName() string {
 		return ""
 	}
 	return rs.roomInfo.Name
+}
+
+func (rs *RoomSession) sessionKeyForParticipant(identity string) string {
+	if rs == nil {
+		return ""
+	}
+	if rs.deviceMAC != "" {
+		return "livekit:device:" + strings.ReplaceAll(rs.deviceMAC, ":", "")
+	}
+	if rs.agentID != "" {
+		return "livekit:agent:" + sanitizeIdentity(rs.agentID)
+	}
+	return fmt.Sprintf("livekit:%s:%s", rs.roomName(), identity)
 }
 
 func sanitizeIdentity(value string) string {

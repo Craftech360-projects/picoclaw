@@ -6,7 +6,7 @@ package vad
 #cgo darwin CFLAGS: -I${SRCDIR}/../../../third_party/ten-vad/lib/macOS/ten_vad.framework/Versions/A/Headers
 #cgo darwin LDFLAGS: -F${SRCDIR}/../../../third_party/ten-vad/lib/macOS -framework ten_vad -Wl,-rpath,${SRCDIR}/../../../third_party/ten-vad/lib/macOS
 
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/ten-vad/lib/Linux/x64 -lten_vad -Wl,-rpath,'$ORIGIN'/../../../third_party/ten-vad/lib/Linux/x64
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/ten-vad/lib/Linux/x64 -lten_vad -Wl,-rpath,'$ORIGIN'/../third_party/ten-vad/lib/Linux/x64 -Wl,-rpath,'$ORIGIN'/third_party/ten-vad/lib/Linux/x64
 
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/ten-vad/lib/Windows/x64 -lten_vad
 

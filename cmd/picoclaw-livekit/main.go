@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -75,28 +76,40 @@ func main() {
 	}
 
 	// Initialize STT factory with PostgreSQL
+	sttDBSource := ""
 	sttDBURL := os.Getenv("STT_DATABASE_URL")
 	if sttDBURL == "" {
 		// Try to get from config file field if present
 		sttDBURL = cfg.LiveKitService.STT.DatabaseURL
+		if sttDBURL != "" {
+			sttDBSource = "config.livekit_service.stt.database_url"
+		}
+	} else {
+		sttDBSource = "env.STT_DATABASE_URL"
 	}
 	if sttDBURL == "" {
 		// Fallback to Supabase PostgreSQL URL from environment
 		sttDBURL = os.Getenv("DIRECT_URL")
+		if sttDBURL != "" {
+			sttDBSource = "env.DIRECT_URL"
+		}
 	}
 	if sttDBURL == "" {
-		// Default Supabase URL if nothing configured
-		sttDBURL = "postgresql://postgres.tsiocygczplmnjpqmutc:seg0QTbvLjPt4E8V@aws-1-ap-south-1.pooler.supabase.com:5432/postgres"
+		fmt.Fprintln(os.Stderr, "Error creating STT factory: STT DB URL is empty.")
+		fmt.Fprintln(os.Stderr, "Set one of: STT_DATABASE_URL, PICOCLAW_LIVEKIT_STT_DATABASE_URL, or DIRECT_URL.")
+		os.Exit(1)
 	}
 
 	sttFactory, err := stt.NewFactory(sttDBURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating STT factory: %v\n", err)
+		dbHost, dbUser := summarizeDBURL(sttDBURL)
+		fmt.Fprintf(os.Stderr, "Error creating STT factory: %v (source=%s, host=%s, user=%s)\n",
+			err, sttDBSource, dbHost, dbUser)
 		os.Exit(1)
 	}
 
 	logger.InfoCF("livekit", "STT factory initialized", map[string]any{
-		"db_url":    sttDBURL,
+		"db_source": sttDBSource,
 		"providers": sttFactory.ListProviders(),
 	})
 
@@ -192,13 +205,35 @@ func main() {
 	})
 
 	bridgeFactory := func(job *livekitproto.Job) *livekit.AgentBridge {
-		agentCfg := &config.AgentConfig{
-			ID:   job.Room.Name,
-			Name: "LiveKit-" + job.Room.Name,
+		roomName := ""
+		roomMetadata := ""
+		if job != nil && job.Room != nil {
+			roomName = strings.TrimSpace(job.Room.Name)
+			roomMetadata = job.Room.Metadata
 		}
 
-		// 1. Calculate the ephemeral workspace for this exact job identical to NewAgentInstance
-		// This ensures we drop the personalized prompt precisely where this room reads it.
+		deviceMAC, persistentAgentID := livekit.ResolvePersistenceFields(roomName, roomMetadata)
+		workspaceIdentity := roomName
+		preserveWorkspace := false
+		switch {
+		case deviceMAC != "":
+			workspaceIdentity = "device-" + strings.ReplaceAll(deviceMAC, ":", "")
+			preserveWorkspace = true
+		case strings.TrimSpace(persistentAgentID) != "":
+			workspaceIdentity = "agent-" + routing.NormalizeAgentID(persistentAgentID)
+			preserveWorkspace = true
+		}
+		if workspaceIdentity == "" {
+			workspaceIdentity = "main"
+		}
+
+		agentCfg := &config.AgentConfig{
+			ID:   workspaceIdentity,
+			Name: "LiveKit-" + workspaceIdentity,
+		}
+
+		// 1. Calculate the workspace path for this job identity exactly like NewAgentInstance.
+		// This ensures we drop the personalized prompt precisely where this room identity reads it.
 		var workspace string
 		if cfg.Agents.Defaults.Workspace != "" {
 			home := os.Getenv(config.EnvHome)
@@ -215,7 +250,7 @@ func main() {
 		}
 
 		// 2. Fetch and decode Room Metadata payload from MQTT gateway
-		if job.Room != nil && job.Room.Metadata != "" && workspace != "" {
+		if roomMetadata != "" && workspace != "" {
 			type RoomMetadata struct {
 				ChildProfile struct {
 					Name      string `json:"name"`
@@ -238,20 +273,22 @@ func main() {
 			}
 
 			var md RoomMetadata
-			if err := json.Unmarshal([]byte(job.Room.Metadata), &md); err == nil {
+			if err := json.Unmarshal([]byte(roomMetadata), &md); err == nil {
 				// 3. Load the Go template we built
 				tmplPath := filepath.Join(".", "prompts", "cheeko.tmpl")
 				if tmplBytes, readErr := os.ReadFile(tmplPath); readErr == nil {
 					if tmpl, parseErr := template.New("cheeko").Parse(string(tmplBytes)); parseErr == nil {
 						var buf bytes.Buffer
 						if execErr := tmpl.Execute(&buf, md); execErr == nil {
-							// 4. Write the perfectly rendered prompt directly into the ephemeral workspace
+							// 4. Write the rendered prompt directly into the resolved workspace
 							// The AgentInstance's ContextBuilder will swallow it instantly on boot
 							os.MkdirAll(workspace, 0755)
 							os.WriteFile(filepath.Join(workspace, "IDENTITY.md"), buf.Bytes(), 0644)
 							logger.InfoCF("livekit", "Successfully injected zero-latency dynamic IDENTITY.md", map[string]any{
-								"room":  job.Room.Name,
-								"child": md.ChildProfile.Name,
+								"room":               roomName,
+								"child":              md.ChildProfile.Name,
+								"workspace_identity": workspaceIdentity,
+								"persistent":         preserveWorkspace,
 							})
 						} else {
 							logger.ErrorCF("livekit", "Template exec failed", map[string]any{"error": execErr.Error()})
@@ -287,11 +324,12 @@ func main() {
 		agentInstance.Tools.Register(tools.NewTimerTool())
 
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:        cfg,
-			Provider:      provider,
-			ModelID:       modelID,
-			AgentInstance: agentInstance,
-			MaxIterations: cfg.Agents.Defaults.MaxToolIterations,
+			Config:            cfg,
+			Provider:          provider,
+			ModelID:           modelID,
+			AgentInstance:     agentInstance,
+			PreserveWorkspace: preserveWorkspace,
+			MaxIterations:     cfg.Agents.Defaults.MaxToolIterations,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
@@ -461,4 +499,22 @@ func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tt
 	factory.Register("cartesia", cartesia_tts.NewBuilder())
 
 	return factory.Create(cfg, lkCfg)
+}
+
+func summarizeDBURL(raw string) (host, user string) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "invalid", "invalid"
+	}
+	host = parsed.Hostname()
+	if parsed.User != nil {
+		user = parsed.User.Username()
+	}
+	if host == "" {
+		host = "unknown"
+	}
+	if user == "" {
+		user = "unknown"
+	}
+	return host, user
 }
