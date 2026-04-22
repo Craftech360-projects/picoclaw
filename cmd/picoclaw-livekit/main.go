@@ -220,20 +220,11 @@ func main() {
 			roomMetadata = job.Room.Metadata
 		}
 
-		deviceMAC, persistentAgentID := livekit.ResolvePersistenceFields(roomName, roomMetadata)
-		workspaceIdentity := roomName
-		preserveWorkspace := false
-		switch {
-		case deviceMAC != "":
-			workspaceIdentity = "device-" + strings.ReplaceAll(deviceMAC, ":", "")
-			preserveWorkspace = true
-		case strings.TrimSpace(persistentAgentID) != "":
-			workspaceIdentity = "agent-" + routing.NormalizeAgentID(persistentAgentID)
-			preserveWorkspace = true
-		}
-		if workspaceIdentity == "" {
-			workspaceIdentity = "main"
-		}
+		lifecycle := resolveLiveKitWorkspaceLifecycle(roomName, roomMetadata, lkCfg.ManagerAPI)
+		deviceMAC := lifecycle.DeviceMAC
+		persistentAgentID := lifecycle.AgentID
+		workspaceIdentity := lifecycle.WorkspaceIdentity
+		preserveWorkspace := lifecycle.PreserveWorkspace
 
 		agentCfg := &config.AgentConfig{
 			ID:   workspaceIdentity,

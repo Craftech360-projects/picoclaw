@@ -711,7 +711,12 @@ Operational database note:
    - Verification: `go test ./pkg/agent -run 'TestRegisterWorkspaceToolsForcesRequiredFileToolsWhenDisabled|TestNewAgentInstance_AllowsMediaTempDirForReadListAndExec|TestNewAgentInstance_InvalidExecConfigDoesNotExit' -count=1`, `go test ./cmd/picoclaw-livekit -run 'TestEnsureLiveKitWorkspaceFileTools(AddsRequiredToolsWhenConfigDisablesThem|ReplacesDefaultWorkspaceTools)' -count=1` with `D:\picoclaw` on `PATH`, `go test ./pkg/livekit -run TestSanitizeVoiceTextForTTSDropsProviderChannelMarkers -count=1` with `D:\picoclaw` on `PATH`, `go test ./cmd/picoclaw-livekit ./pkg/livekit ./pkg/session -count=1` with `D:\picoclaw` on `PATH`, and targeted `pkg/tools` filesystem tests passed.
 
 11. Only after metadata bootstrap and chat-history API verification, make local workspaces ephemeral for LiveKit device sessions.
-   - Status: not started.
+   - Status: implemented and code-verified.
+   - Prerequisites completed: Manager API was restarted after Prisma client generation, artifact persistence is working, and two-worker/load-balanced verification has been repeated.
+   - Behavior: LiveKit device workspaces are now ephemeral when manager-backed persistence is enabled, because identity, chat history, summaries, memory, usage, and small text artifacts are durable. If manager-backed persistence is disabled, device workspaces are still preserved as a conservative fallback.
+   - Scope guard: non-device persistent agent workspaces remain preserved.
+   - Files: `D:\picoclaw\cmd\picoclaw-livekit\workspace_lifecycle.go`, `D:\picoclaw\cmd\picoclaw-livekit\workspace_lifecycle_test.go`, `D:\picoclaw\cmd\picoclaw-livekit\main.go`, and `D:\picoclaw\pkg\livekit\post_session_persistence.go`.
+   - Verification: with `D:\picoclaw` prepended to `PATH`, `go test ./cmd/picoclaw-livekit ./pkg/livekit ./pkg/session -count=1` passed.
 
 12. Add durable workspace artifact persistence before making workspaces ephemeral.
    - Status: implemented and code-verified.

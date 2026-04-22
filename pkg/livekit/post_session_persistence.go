@@ -344,10 +344,11 @@ func resolvePersistenceFields(roomName, metadata string) (deviceMAC, agentID str
 func resolveDeviceMAC(roomName, metadata string) string {
 	md := parseMetadataMap(metadata)
 	keys := map[string]struct{}{
-		"device_mac": {},
-		"devicemac":  {},
-		"mac":        {},
-		"macaddress": {},
+		"mac_address": {},
+		"device_mac":  {},
+		"devicemac":   {},
+		"mac":         {},
+		"macaddress":  {},
 	}
 	if mac := normalizeMAC(findFirstString(md, keys)); mac != "" {
 		return mac
