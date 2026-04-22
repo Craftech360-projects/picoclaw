@@ -67,18 +67,19 @@ type usageState struct {
 
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
-	agentInstance     *agent.AgentInstance
-	cfg               *config.Config
-	provider          providers.LLMProvider
-	streamProvider    providers.StreamingProvider
-	preserveWorkspace bool
-	modelID           string
-	sessions          session.SessionStore
-	tools             *tools.ToolRegistry
-	contextBuilder    *agent.ContextBuilder
-	maxIterations     int
-	llmOptions        map[string]any
-	asyncEventChan    chan AsyncEvent // receives background task completions
+	agentInstance      *agent.AgentInstance
+	cfg                *config.Config
+	provider           providers.LLMProvider
+	streamProvider     providers.StreamingProvider
+	preserveWorkspace  bool
+	modelID            string
+	sessions           session.SessionStore
+	tools              *tools.ToolRegistry
+	contextBuilder     *agent.ContextBuilder
+	maxIterations      int
+	llmOptions         map[string]any
+	asyncEventChan     chan AsyncEvent // receives background task completions
+	workspaceArtifacts WorkspaceArtifactStore
 
 	// summarization config
 	summarizeMessageThreshold int
@@ -93,14 +94,15 @@ type AgentBridge struct {
 
 // AgentBridgeConfig defines shared resources for creating bridges.
 type AgentBridgeConfig struct {
-	Config            *config.Config
-	Provider          providers.LLMProvider
-	ModelID           string
-	AgentInstance     *agent.AgentInstance
-	PreserveWorkspace bool
-	MaxIterations     int
-	LLMOptions        map[string]any
-	AsyncEventChan    chan AsyncEvent // optional channel for background task results
+	Config             *config.Config
+	Provider           providers.LLMProvider
+	ModelID            string
+	AgentInstance      *agent.AgentInstance
+	PreserveWorkspace  bool
+	MaxIterations      int
+	LLMOptions         map[string]any
+	AsyncEventChan     chan AsyncEvent // optional channel for background task results
+	WorkspaceArtifacts WorkspaceArtifactStore
 	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
 	// Defaults to 20 if zero.
 	SummarizeMessageThreshold int
@@ -138,6 +140,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		maxIterations:             cfg.MaxIterations,
 		llmOptions:                cfg.LLMOptions,
 		asyncEventChan:            asyncChan,
+		workspaceArtifacts:        cfg.WorkspaceArtifacts,
 		summarizeMessageThreshold: summarizeThreshold,
 		contextWindow:             ctxWindow,
 	}
@@ -500,7 +503,44 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 		}
 	})
 
-	return ab.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, "livekit", sessionKey, asyncCb)
+	result := ab.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, "livekit", sessionKey, asyncCb)
+	ab.maybeMirrorWorkspaceArtifact(ctx, sessionKey, tc, result)
+	return result
+}
+
+func (ab *AgentBridge) maybeMirrorWorkspaceArtifact(ctx context.Context, sessionKey string, tc providers.ToolCall, result *tools.ToolResult) {
+	if ab == nil || ab.workspaceArtifacts == nil || result == nil || result.IsError || tc.Name != "write_file" {
+		return
+	}
+	workspace := ""
+	if ab.agentInstance != nil {
+		workspace = ab.agentInstance.Workspace
+	}
+	pathArg, _ := tc.Arguments["path"].(string)
+	content, ok := tc.Arguments["content"].(string)
+	if strings.TrimSpace(pathArg) == "" || !ok {
+		return
+	}
+	rel, ok := artifactRelativePath(workspace, pathArg)
+	if !ok {
+		logger.WarnCF("livekit", "Skipping workspace artifact mirror: path is outside workspace", map[string]any{
+			"path":    pathArg,
+			"session": sessionKey,
+		})
+		return
+	}
+	if err := ab.workspaceArtifacts.SaveArtifact(ctx, WorkspaceArtifact{
+		SessionID:    sessionKey,
+		RelativePath: rel,
+		Content:      content,
+		ContentType:  "text/plain",
+	}); err != nil {
+		logger.WarnCF("livekit", "Failed to mirror workspace artifact", map[string]any{
+			"path":    rel,
+			"session": sessionKey,
+			"error":   err.Error(),
+		})
+	}
 }
 
 // GenerateSpontaneousResponse triggers a spontaneous LLM response for a background

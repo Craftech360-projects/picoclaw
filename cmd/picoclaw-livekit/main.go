@@ -298,6 +298,23 @@ func main() {
 		}
 
 		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
+		artifactStore := buildManagerArtifactStore(lkCfg, deviceMAC)
+		if artifactStore != nil {
+			hydrated, err := hydrateWorkspaceArtifacts(context.Background(), artifactStore, agentInstance.Workspace, lkCfg.ManagerAPI.RecentLimit)
+			if err != nil {
+				logger.WarnCF("livekit", "Failed to hydrate manager-backed workspace artifacts", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+			} else if hydrated > 0 {
+				logger.InfoCF("livekit", "Hydrated manager-backed workspace artifacts", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"count":      hydrated,
+				})
+			}
+		}
 		if managerStore := buildManagerSessionStore(lkCfg, deviceMAC, persistentAgentID, roomName); managerStore != nil {
 			if agentInstance.Sessions != nil {
 				_ = agentInstance.Sessions.Close()
@@ -336,12 +353,13 @@ func main() {
 		}
 
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:            cfg,
-			Provider:          provider,
-			ModelID:           modelID,
-			AgentInstance:     agentInstance,
-			PreserveWorkspace: preserveWorkspace,
-			MaxIterations:     cfg.Agents.Defaults.MaxToolIterations,
+			Config:             cfg,
+			Provider:           provider,
+			ModelID:            modelID,
+			AgentInstance:      agentInstance,
+			PreserveWorkspace:  preserveWorkspace,
+			MaxIterations:      cfg.Agents.Defaults.MaxToolIterations,
+			WorkspaceArtifacts: artifactStore,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
