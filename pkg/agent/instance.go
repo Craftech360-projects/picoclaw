@@ -50,6 +50,18 @@ type AgentInstance struct {
 	LightCandidates []providers.FallbackCandidate
 }
 
+// WorkspaceToolRegistrationOptions tunes workspace tool registration for
+// specialized agent runtimes.
+type WorkspaceToolRegistrationOptions struct {
+	// ForceFileTools registers the sandboxed file tools even when global tool
+	// toggles disable them. This is useful for runtimes whose prompt contract
+	// depends on workspace memory and skills.
+	ForceFileTools bool
+	// ReplaceFileTools replaces existing file tool registrations. This is useful
+	// after merging tools from another agent whose workspace differs.
+	ReplaceFileTools bool
+}
+
 // NewAgentInstance creates an agent instance from config.
 func NewAgentInstance(
 	agentCfg *config.AgentConfig,
@@ -63,41 +75,8 @@ func NewAgentInstance(
 	model := resolveAgentModel(agentCfg, defaults)
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
 
-	restrict := defaults.RestrictToWorkspace
-	readRestrict := restrict && !defaults.AllowReadOutsideWorkspace
-
-	// Compile path whitelist patterns from config.
-	allowReadPaths := buildAllowReadPatterns(cfg)
-	allowWritePaths := compilePatterns(cfg.Tools.AllowWritePaths)
-
 	toolsRegistry := tools.NewToolRegistry()
-
-	if cfg.Tools.IsToolEnabled("read_file") {
-		maxReadFileSize := cfg.Tools.ReadFile.MaxReadFileSize
-		toolsRegistry.Register(tools.NewReadFileTool(workspace, readRestrict, maxReadFileSize, allowReadPaths))
-	}
-	if cfg.Tools.IsToolEnabled("write_file") {
-		toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
-	}
-	if cfg.Tools.IsToolEnabled("list_dir") {
-		toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
-	}
-	if cfg.Tools.IsToolEnabled("exec") {
-		execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg, allowReadPaths)
-		if err != nil {
-			logger.ErrorCF("agent", "Failed to initialize exec tool; continuing without exec",
-				map[string]any{"error": err.Error()})
-		} else {
-			toolsRegistry.Register(execTool)
-		}
-	}
-
-	if cfg.Tools.IsToolEnabled("edit_file") {
-		toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
-	}
-	if cfg.Tools.IsToolEnabled("append_file") {
-		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
-	}
+	RegisterWorkspaceTools(toolsRegistry, workspace, defaults, cfg)
 
 	sessionsDir := filepath.Join(workspace, "sessions")
 	sessions := initSessionStore(sessionsDir)
@@ -207,6 +186,75 @@ func NewAgentInstance(
 		Candidates:                candidates,
 		Router:                    router,
 		LightCandidates:           lightCandidates,
+	}
+}
+
+// RegisterWorkspaceTools installs workspace-scoped built-in tools into a
+// registry. It is idempotent for already-registered tool names.
+func RegisterWorkspaceTools(
+	toolsRegistry *tools.ToolRegistry,
+	workspace string,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+	options ...WorkspaceToolRegistrationOptions,
+) {
+	if toolsRegistry == nil || defaults == nil || cfg == nil {
+		return
+	}
+
+	opts := WorkspaceToolRegistrationOptions{}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+
+	restrict := defaults.RestrictToWorkspace
+	readRestrict := restrict && !defaults.AllowReadOutsideWorkspace
+
+	allowReadPaths := buildAllowReadPatterns(cfg)
+	allowWritePaths := compilePatterns(cfg.Tools.AllowWritePaths)
+
+	registerIfMissing := func(tool tools.Tool) {
+		if tool == nil {
+			return
+		}
+		if _, ok := toolsRegistry.Get(tool.Name()); ok {
+			return
+		}
+		toolsRegistry.Register(tool)
+	}
+	registerFileTool := func(tool tools.Tool) {
+		if opts.ReplaceFileTools {
+			toolsRegistry.Register(tool)
+			return
+		}
+		registerIfMissing(tool)
+	}
+
+	if opts.ForceFileTools || cfg.Tools.IsToolEnabled("read_file") {
+		maxReadFileSize := cfg.Tools.ReadFile.MaxReadFileSize
+		registerFileTool(tools.NewReadFileTool(workspace, readRestrict, maxReadFileSize, allowReadPaths))
+	}
+	if opts.ForceFileTools || cfg.Tools.IsToolEnabled("write_file") {
+		registerFileTool(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
+	}
+	if opts.ForceFileTools || cfg.Tools.IsToolEnabled("list_dir") {
+		registerFileTool(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
+	}
+	if cfg.Tools.IsToolEnabled("exec") {
+		execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg, allowReadPaths)
+		if err != nil {
+			logger.ErrorCF("agent", "Failed to initialize exec tool; continuing without exec",
+				map[string]any{"error": err.Error()})
+		} else {
+			registerIfMissing(execTool)
+		}
+	}
+
+	if cfg.Tools.IsToolEnabled("edit_file") {
+		registerIfMissing(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
+	}
+	if cfg.Tools.IsToolEnabled("append_file") {
+		registerIfMissing(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
 	}
 }
 

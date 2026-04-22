@@ -9,6 +9,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 func TestNewAgentInstance_UsesDefaultsTemperatureAndMaxTokens(t *testing.T) {
@@ -279,5 +280,32 @@ func TestNewAgentInstance_InvalidExecConfigDoesNotExit(t *testing.T) {
 
 	if _, ok := agent.Tools.Get("read_file"); !ok {
 		t.Fatal("read_file tool should still be registered")
+	}
+}
+
+func TestRegisterWorkspaceToolsForcesRequiredFileToolsWhenDisabled(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.ReadFile.Enabled = false
+	cfg.Tools.WriteFile.Enabled = false
+	cfg.Tools.ListDir.Enabled = false
+	cfg.Tools.Exec.Enabled = false
+
+	registry := tools.NewToolRegistry()
+	defaults := cfg.Agents.Defaults
+	RegisterWorkspaceTools(
+		registry,
+		t.TempDir(),
+		&defaults,
+		cfg,
+		WorkspaceToolRegistrationOptions{ForceFileTools: true},
+	)
+
+	for _, name := range []string{"read_file", "write_file", "list_dir"} {
+		if _, ok := registry.Get(name); !ok {
+			t.Fatalf("%s should be registered when ForceFileTools is true", name)
+		}
+	}
+	if _, ok := registry.Get("exec"); ok {
+		t.Fatal("exec should still respect config when ForceFileTools is true")
 	}
 }

@@ -30,3 +30,10 @@ type SessionStore interface {
 	// Close releases resources held by the store.
 	Close() error
 }
+
+// RealtimeChatPersistenceMarker is implemented by stores that already persist
+// user/assistant chat turns during the session. Callers can use it to avoid
+// duplicate end-of-session transcript uploads.
+type RealtimeChatPersistenceMarker interface {
+	RealtimeChatPersistenceEnabled() bool
+}

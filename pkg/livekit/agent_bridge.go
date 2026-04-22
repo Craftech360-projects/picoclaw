@@ -171,6 +171,56 @@ func (ab *AgentBridge) AsyncEvents() <-chan AsyncEvent {
 	return ab.asyncEventChan
 }
 
+func (ab *AgentBridge) RealtimeChatPersistenceEnabled() bool {
+	if ab == nil || ab.sessions == nil {
+		return false
+	}
+	marker, ok := ab.sessions.(session.RealtimeChatPersistenceMarker)
+	return ok && marker.RealtimeChatPersistenceEnabled()
+}
+
+// FinalizeSessionSummary summarizes the completed voice session even when the
+// rolling context threshold was not reached during the call.
+func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey string) (string, int, error) {
+	if ab == nil || ab.sessions == nil {
+		return "", 0, nil
+	}
+
+	history := ab.sessions.GetHistory(sessionKey)
+	if len(history) == 0 {
+		for _, msg := range ab.TranscriptSnapshot() {
+			role := "assistant"
+			if msg.ChatType == chatTypeUser {
+				role = "user"
+			}
+			if strings.TrimSpace(msg.Content) == "" {
+				continue
+			}
+			history = append(history, providers.Message{Role: role, Content: msg.Content})
+		}
+	}
+
+	batch := make([]providers.Message, 0, len(history))
+	for _, msg := range history {
+		if (msg.Role == "user" || msg.Role == "assistant") && strings.TrimSpace(msg.Content) != "" {
+			batch = append(batch, msg)
+		}
+	}
+	if len(batch) == 0 {
+		return ab.sessions.GetSummary(sessionKey), 0, nil
+	}
+
+	existingSummary := ab.sessions.GetSummary(sessionKey)
+	newSummary, err := ab.bridgeSummarizeBatch(ctx, batch, existingSummary)
+	if err != nil || strings.TrimSpace(newSummary) == "" {
+		return "", len(batch), err
+	}
+
+	ab.sessions.SetSummary(sessionKey, newSummary)
+	_ = ab.sessions.Save(sessionKey)
+	return newSummary, len(batch), nil
+}
+
 // ChatStream sends a user message through the LLM and streams the response.
 // If a tool call is required, it returns a boolean indicating that an async tool execution is pending.
 func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text string, cb func(chunk string), onDone func()) (bool, error) {

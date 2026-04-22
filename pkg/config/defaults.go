@@ -522,6 +522,11 @@ func DefaultConfig() *Config {
 				ModelID:      "",
 				OutputFormat: "pcm_24000",
 			},
+			ManagerAPI: LiveKitServiceManagerAPIConfig{
+				BaseURL:             "",
+				SessionStoreEnabled: false,
+				RecentLimit:         50,
+			},
 		},
 		BuildInfo: BuildInfo{
 			Version:   Version,

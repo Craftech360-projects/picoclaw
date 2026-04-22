@@ -99,7 +99,7 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 	if managerAPIURL == "" {
 		managerAPIURL = defaultManagerAPIURL
 	}
-	managerAPISecret := strings.TrimSpace(os.Getenv("MANAGER_API_SECRET"))
+	managerAPISecret := managerAPIServiceKeyFromEnv()
 	deviceMAC, agentID := resolvePersistenceFields(cfg.RoomInfo.Name, cfg.RoomInfo.Metadata)
 
 	return &RoomSession{
@@ -122,6 +122,19 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		deviceMAC:        deviceMAC,
 		agentID:          agentID,
 	}, nil
+}
+
+func managerAPIServiceKeyFromEnv() string {
+	for _, key := range []string{
+		"PICOCLAW_LIVEKIT_MANAGER_API_SERVICE_KEY",
+		"SERVICE_SECRET_KEY",
+		"MANAGER_API_SECRET",
+	} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // Join connects to the LiveKit room.

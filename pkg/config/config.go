@@ -860,14 +860,24 @@ type LiveKitServiceSTTConfig struct {
 	DatabaseURL  string `json:"database_url,omitempty"     env:"PICOCLAW_LIVEKIT_STT_DATABASE_URL"`
 }
 
+// LiveKitServiceManagerAPIConfig configures Manager API integration for the
+// standalone LiveKit voice agent service. Service credentials are intentionally
+// read from environment variables by the worker, not persisted in config.json.
+type LiveKitServiceManagerAPIConfig struct {
+	BaseURL             string `json:"base_url,omitempty"              env:"PICOCLAW_LIVEKIT_MANAGER_API_URL"`
+	SessionStoreEnabled bool   `json:"session_store_enabled,omitempty" env:"PICOCLAW_LIVEKIT_MANAGER_SESSION_STORE_ENABLED"`
+	RecentLimit         int    `json:"recent_limit,omitempty"          env:"PICOCLAW_LIVEKIT_MANAGER_RECENT_LIMIT"`
+}
+
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.
 type LiveKitServiceConfig struct {
-	ServerURL    string                  `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
-	TTS          LiveKitServiceTTSConfig `json:"tts"`
-	STT          LiveKitServiceSTTConfig `json:"stt"`
-	ToolFeedback map[string]string       `json:"tool_feedback,omitempty"`
-	HealthPort   int                     `json:"health_port,omitempty" env:"PICOCLAW_LIVEKIT_HEALTH_PORT"`
-	MaxSessions  int                     `json:"max_sessions,omitempty" env:"PICOCLAW_LIVEKIT_MAX_SESSIONS"`
+	ServerURL    string                         `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
+	TTS          LiveKitServiceTTSConfig        `json:"tts"`
+	STT          LiveKitServiceSTTConfig        `json:"stt"`
+	ManagerAPI   LiveKitServiceManagerAPIConfig `json:"manager_api,omitempty"`
+	ToolFeedback map[string]string              `json:"tool_feedback,omitempty"`
+	HealthPort   int                            `json:"health_port,omitempty" env:"PICOCLAW_LIVEKIT_HEALTH_PORT"`
+	MaxSessions  int                            `json:"max_sessions,omitempty" env:"PICOCLAW_LIVEKIT_MAX_SESSIONS"`
 
 	apiKey         string
 	apiSecret      string

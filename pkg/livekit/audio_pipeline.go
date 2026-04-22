@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,21 @@ import (
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
+
+var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
+
+func sanitizeVoiceTextForTTS(text string) string {
+	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")
+	text = strings.NewReplacer(
+		"<|channel|>", "",
+		"<|message|>", "",
+		"<|start|>", "",
+		"<|end|>", "",
+		"<|channel>", "",
+		"<channel|>", "",
+	).Replace(text)
+	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+}
 
 // sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
 type sentenceSplitter struct {
@@ -572,6 +588,10 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 
 func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	if ap.tts == nil || ap.session == nil || ap.session.localTrack == nil {
+		return
+	}
+	text = sanitizeVoiceTextForTTS(text)
+	if text == "" {
 		return
 	}
 	logger.DebugCF("livekit", "Synthesizing audio chunk", map[string]any{

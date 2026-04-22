@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -61,6 +62,36 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 	}
 	usageCancel()
 
+	summary, summaryMessageCount := rs.finalizeAndPersistSessionSummary(bridge)
+
+	endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := rs.sendSessionEnd(endCtx, len(messages)); err != nil {
+		logger.WarnCF("livekit", "Failed to mark manager session ended", map[string]any{
+			"room":  rs.roomName(),
+			"error": err.Error(),
+		})
+	}
+	endCancel()
+
+	if summary != "" {
+		summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := rs.sendSessionSummary(summaryCtx, summary, summaryMessageCount); err != nil {
+			logger.WarnCF("livekit", "Failed to persist session summary", map[string]any{
+				"room":  rs.roomName(),
+				"error": err.Error(),
+			})
+		}
+		summaryCancel()
+	}
+
+	if bridge.RealtimeChatPersistenceEnabled() {
+		logger.InfoCF("livekit", "Skipping post-session chat history: real-time manager persistence enabled", map[string]any{
+			"room":     rs.roomName(),
+			"messages": len(messages),
+		})
+		return
+	}
+
 	chatCtx, chatCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	if err := rs.sendChatHistory(chatCtx, messages); err != nil {
 		logger.WarnCF("livekit", "Failed to persist chat history", map[string]any{
@@ -87,6 +118,7 @@ func (rs *RoomSession) sendUsageSummary(ctx context.Context, usage UsageSnapshot
 		"inputTokens":                  usage.InputTokens,
 		"outputAudioTokens":            usage.OutputAudioTokens,
 		"outputTextTokens":             usage.OutputTextTokens,
+		"totalTokens":                  usage.TotalTokens,
 		"outputTokens":                 usage.OutputTokens,
 		"sessionDurationSeconds":       roundTo3(usage.SessionDurationSeconds),
 		"avgTtftSeconds":               roundTo3(usage.AvgTTFTSeconds),
@@ -111,6 +143,88 @@ func (rs *RoomSession) sendUsageSummary(ctx context.Context, usage UsageSnapshot
 	return nil
 }
 
+func (rs *RoomSession) finalizeAndPersistSessionSummary(bridge *AgentBridge) (string, int) {
+	if rs == nil || bridge == nil {
+		return "", 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	summary, messageCount, err := bridge.FinalizeSessionSummary(ctx, rs.sessionKeyForParticipant(""))
+	if err != nil {
+		logger.WarnCF("livekit", "Failed to finalize session summary", map[string]any{
+			"room":  rs.roomName(),
+			"error": err.Error(),
+		})
+		return "", messageCount
+	}
+	if strings.TrimSpace(summary) == "" {
+		return "", messageCount
+	}
+
+	logger.InfoCF("livekit", "Session summary finalized", map[string]any{
+		"room":          rs.roomName(),
+		"summary_bytes": len(summary),
+		"messages":      messageCount,
+	})
+	return summary, messageCount
+}
+
+func (rs *RoomSession) sendSessionSummary(ctx context.Context, summary string, sourceMessageCount int) error {
+	if strings.TrimSpace(summary) == "" {
+		return nil
+	}
+	if strings.TrimSpace(rs.managerAPISecret) == "" {
+		return fmt.Errorf("manager API secret is not configured")
+	}
+
+	endpoint := strings.TrimRight(rs.managerAPIURL, "/") +
+		"/agent/device/" + url.PathEscape(rs.deviceMAC) +
+		"/sessions/" + url.PathEscape(rs.roomName()) + "/summary"
+	payload := map[string]any{
+		"summary":            summary,
+		"sourceMessageCount": sourceMessageCount,
+	}
+	if rs.agentID != "" {
+		payload["agentId"] = rs.agentID
+	}
+	headers := managerAPIServiceHeaders(rs.managerAPISecret)
+
+	status, body, err := doJSON(ctx, http.MethodPut, endpoint, payload, headers)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("summary API status=%d body=%s", status, body)
+	}
+	return nil
+}
+
+func (rs *RoomSession) sendSessionEnd(ctx context.Context, messageCount int) error {
+	if strings.TrimSpace(rs.managerAPISecret) == "" {
+		return fmt.Errorf("manager API secret is not configured")
+	}
+
+	endpoint := strings.TrimRight(rs.managerAPIURL, "/") +
+		"/agent/device/" + url.PathEscape(rs.deviceMAC) +
+		"/sessions/" + url.PathEscape(rs.roomName()) + "/end"
+	payload := map[string]any{
+		"status":       "ended",
+		"endedAt":      time.Now().UTC().Format(time.RFC3339Nano),
+		"messageCount": messageCount,
+	}
+	headers := managerAPIServiceHeaders(rs.managerAPISecret)
+
+	status, body, err := doJSON(ctx, http.MethodPost, endpoint, payload, headers)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("session end API status=%d body=%s", status, body)
+	}
+	return nil
+}
+
 func (rs *RoomSession) sendChatHistory(ctx context.Context, messages []PersistedChatMessage) error {
 	if len(messages) == 0 {
 		return nil
@@ -130,9 +244,7 @@ func (rs *RoomSession) sendChatHistory(ctx context.Context, messages []Persisted
 	if rs.agentID != "" {
 		payload["agentId"] = rs.agentID
 	}
-	headers := map[string]string{
-		"Authorization": "Bearer " + rs.managerAPISecret,
-	}
+	headers := managerAPIServiceHeaders(rs.managerAPISecret)
 
 	backoff := time.Second
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -173,12 +285,27 @@ func (rs *RoomSession) sendChatHistory(ctx context.Context, messages []Persisted
 	return nil
 }
 
+func managerAPIServiceHeaders(secret string) map[string]string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return nil
+	}
+	return map[string]string{
+		"Authorization": "Bearer " + secret,
+		"X-Service-Key": secret,
+	}
+}
+
 func postJSON(ctx context.Context, url string, payload any, headers map[string]string) (int, string, error) {
+	return doJSON(ctx, http.MethodPost, url, payload, headers)
+}
+
+func doJSON(ctx context.Context, method string, url string, payload any, headers map[string]string) (int, string, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return 0, "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(string(body)))
 	if err != nil {
 		return 0, "", err
 	}

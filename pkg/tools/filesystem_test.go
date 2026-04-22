@@ -304,6 +304,23 @@ func TestFilesystemTool_WriteFile_OverwriteSandboxed(t *testing.T) {
 	assert.Equal(t, "replaced in sandbox", string(data))
 }
 
+func TestFilesystemTool_WriteFile_AllowsAbsolutePathInsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "memory", "MEMORY.md")
+
+	tool := NewWriteFileTool(workspace, true)
+	result := tool.Execute(context.Background(), map[string]any{
+		"path":      target,
+		"content":   "- Name: Rahul\n- Age: 10 years old",
+		"overwrite": true,
+	})
+
+	assert.False(t, result.IsError, "expected absolute in-workspace path to succeed, got: %s", result.ForLLM)
+	data, err := os.ReadFile(target)
+	assert.NoError(t, err)
+	assert.Equal(t, "- Name: Rahul\n- Age: 10 years old", string(data))
+}
+
 // TestFilesystemTool_ListDir_Success verifies successful directory listing
 func TestFilesystemTool_ListDir_Success(t *testing.T) {
 	tmpDir := t.TempDir()

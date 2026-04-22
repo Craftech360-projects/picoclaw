@@ -535,7 +535,8 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	overwrite, _ := args["overwrite"].(bool)
 
 	if !overwrite {
-		if _, err := t.fs.Open(path); err == nil {
+		if file, err := t.fs.Open(path); err == nil {
+			file.Close()
 			return ErrorResult(fmt.Sprintf("file: %s already exists. Set overwrite=true to replace.", path))
 		}
 	}
@@ -845,10 +846,18 @@ func getSafeRelPath(workspace, path string) (string, error) {
 		return "", fmt.Errorf("workspace is not defined")
 	}
 
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
+	}
+
 	rel := filepath.Clean(path)
 	if filepath.IsAbs(rel) {
-		var err error
-		rel, err = filepath.Rel(workspace, rel)
+		absPath, err := filepath.Abs(rel)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve file path: %w", err)
+		}
+		rel, err = filepath.Rel(absWorkspace, absPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to calculate relative path: %w", err)
 		}

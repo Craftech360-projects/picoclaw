@@ -257,31 +257,12 @@ func main() {
 			workspace = filepath.Join(baseWorkspace, "..", "workspace-"+id)
 		}
 
-		// 2. Fetch and decode Room Metadata payload from MQTT gateway
+		// 2. Fetch and decode Room Metadata payload from MQTT gateway.
+		// Room metadata is the primary bootstrap path; manager API bootstrap is a future fallback.
 		if roomMetadata != "" && workspace != "" {
-			type RoomMetadata struct {
-				ChildProfile struct {
-					Name      string `json:"name"`
-					Age       int    `json:"age"`
-					Gender    string `json:"gender"`
-					Interests string `json:"interests"`
-				} `json:"child_profile"`
-				LongTermMemories []string `json:"long_term_memories"`
-				MemoryRelations  []struct {
-					Source   string `json:"source"`
-					Relation string `json:"relation"`
-					Target   string `json:"target"`
-				} `json:"memory_relations"`
-				MemoryEntities []struct {
-					Name string `json:"name"`
-					Type string `json:"type"`
-				} `json:"memory_entities"`
-				PrimaryLanguage string `json:"primary_language"`
-				AdditionalNotes string `json:"additional_notes"`
-			}
-
-			var md RoomMetadata
-			if err := json.Unmarshal([]byte(roomMetadata), &md); err == nil {
+			bootstrap, err := parseRoomMetadataBootstrap(roomMetadata)
+			if err == nil {
+				md := bootstrap.Metadata
 				// 3. Load the Go template we built
 				tmplPath := filepath.Join(".", "prompts", "cheeko.tmpl")
 				if tmplBytes, readErr := os.ReadFile(tmplPath); readErr == nil {
@@ -297,6 +278,7 @@ func main() {
 								"child":              md.ChildProfile.Name,
 								"workspace_identity": workspaceIdentity,
 								"persistent":         preserveWorkspace,
+								"bootstrap_source":   bootstrap.Source,
 							})
 						} else {
 							logger.ErrorCF("livekit", "Template exec failed", map[string]any{"error": execErr.Error()})
@@ -308,11 +290,26 @@ func main() {
 					logger.ErrorCF("livekit", "Could not read cheeko.tmpl", map[string]any{"error": readErr.Error()})
 				}
 			} else {
-				logger.ErrorCF("livekit", "Invalid job.Room.Metadata", map[string]any{"error": err.Error()})
+				logger.ErrorCF("livekit", "Invalid job.Room.Metadata", map[string]any{
+					"error":            err.Error(),
+					"bootstrap_source": bootstrap.Source,
+				})
 			}
 		}
 
 		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
+		if managerStore := buildManagerSessionStore(lkCfg, deviceMAC, persistentAgentID, roomName); managerStore != nil {
+			if agentInstance.Sessions != nil {
+				_ = agentInstance.Sessions.Close()
+			}
+			agentInstance.Sessions = managerStore
+			logger.InfoCF("livekit", "Using manager-backed session store", map[string]any{
+				"room":               roomName,
+				"device_mac":         deviceMAC,
+				"agent_id":           persistentAgentID,
+				"workspace_identity": workspaceIdentity,
+			})
+		}
 
 		// Register shared tools on the ephemeral agent instance
 		singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
@@ -330,6 +327,13 @@ func main() {
 			}
 		}
 		agentInstance.Tools.Register(tools.NewTimerTool())
+		if added := ensureLiveKitWorkspaceFileTools(agentInstance, &cfg.Agents.Defaults, cfg); len(added) > 0 {
+			logger.WarnCF("livekit", "Forced required workspace file tools for LiveKit agent", map[string]any{
+				"room":               roomName,
+				"workspace_identity": workspaceIdentity,
+				"tools":              added,
+			})
+		}
 
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
 			Config:            cfg,
