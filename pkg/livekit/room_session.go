@@ -65,8 +65,11 @@ type ParticipantState struct {
 	sttStream  stt.TranscriptionStream
 	pcmTrack   *lkmedia.PCMRemoteTrack
 	ttsCancel  context.CancelFunc
-	speaking   atomic.Bool
-	mu         sync.Mutex
+	// ttsCancelReason records why the current TTS context was cancelled so
+	// synthesize/read errors can distinguish barge-in from provider failures.
+	ttsCancelReason string
+	speaking        atomic.Bool
+	mu              sync.Mutex
 }
 
 // RoomSessionConfig configures a RoomSession.

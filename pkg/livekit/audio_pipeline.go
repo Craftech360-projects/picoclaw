@@ -3,6 +3,7 @@ package livekit
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -33,6 +34,10 @@ func sanitizeVoiceTextForTTS(text string) string {
 		"<channel|>", "",
 	).Replace(text)
 	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+}
+
+func normalizeUtteranceForDuplicateCheck(text string) string {
+	return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(text), " ")))
 }
 
 // sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
@@ -225,6 +230,18 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		if err == nil {
 			break
 		}
+		if isContextCanceled(ctx, err) {
+			interruptedErr := ctx.Err()
+			if interruptedErr == nil {
+				interruptedErr = err
+			}
+			logger.InfoCF("livekit", "ChatStream interrupted by canceled turn context", map[string]any{
+				"session":       sessionKey,
+				"cancel_reason": ap.currentTTSCancelReason(),
+				"error":         err.Error(),
+			})
+			return false, interruptedErr
+		}
 		logger.WarnCF("livekit", "ChatStream failed, retrying", map[string]any{
 			"attempt": attempt + 1,
 			"max":     maxRetries,
@@ -346,6 +363,8 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var latestTranscript string
 	var finalizeTimer *time.Timer
 	var finalizeTimerC <-chan time.Time
+	var lastFlushedText string
+	var lastFlushedAt time.Time
 
 	// Get the async event channel from the bridge (may be nil)
 	var asyncEvents <-chan AsyncEvent
@@ -401,6 +420,20 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		if text == "" {
 			return
 		}
+		normalizedText := normalizeUtteranceForDuplicateCheck(text)
+		if normalizedText != "" &&
+			normalizedText == lastFlushedText &&
+			time.Since(lastFlushedAt) < 2*time.Second {
+			logger.DebugCF("livekit", "Suppressing duplicate speech end with same text", map[string]any{
+				"session": ap.sessionKey(),
+				"text":    text,
+				"trigger": trigger,
+			})
+			return
+		}
+		lastFlushedText = normalizedText
+		lastFlushedAt = time.Now()
+
 		logger.DebugCF("livekit", "Speech end with text", map[string]any{
 			"session": ap.sessionKey(),
 			"text":    text,
@@ -443,9 +476,14 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 						"session":     ap.sessionKey(),
 						"probability": evt.Probability,
 					})
+					logger.InfoCF("livekit", "User speech detected by VAD; interrupting active agent audio if present", map[string]any{
+						"session":     ap.sessionKey(),
+						"probability": evt.Probability,
+					})
 					ap.cancelTTS("vad_speech_start")
 					stopFinalizeTimer()
 					vadSpeechEnded = false
+					lastFlushedText = ""
 				}
 
 				if evt.SpeechEnd {
@@ -600,6 +638,14 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	})
 	stream, err := ap.tts.Synthesize(ctx, text)
 	if err != nil {
+		if isContextCanceled(ctx, err) {
+			logger.InfoCF("livekit", "TTS synthesize interrupted by canceled turn context", map[string]any{
+				"session":       ap.sessionKey(),
+				"cancel_reason": ap.currentTTSCancelReason(),
+				"error":         err.Error(),
+			})
+			return
+		}
 		logger.ErrorCF("livekit", "TTS synthesize failed", map[string]any{
 			"session": ap.sessionKey(),
 			"error":   err.Error(),
@@ -620,9 +666,10 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	for {
 		select {
 		case <-ctx.Done():
-			logger.WarnCF("livekit", "Audio stream canceled", map[string]any{
+			logger.InfoCF("livekit", "TTS audio stream interrupted by canceled turn context", map[string]any{
 				"session":         ap.sessionKey(),
 				"track_sid":       ap.localTrackSID(),
+				"cancel_reason":   ap.currentTTSCancelReason(),
 				"chunks_written":  chunksWritten,
 				"samples_written": samplesWritten,
 				"duration_ms":     time.Since(started).Milliseconds(),
@@ -643,6 +690,18 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 			return
 		}
 		if err != nil {
+			if isContextCanceled(ctx, err) {
+				logger.InfoCF("livekit", "TTS stream read interrupted by canceled turn context", map[string]any{
+					"session":         ap.sessionKey(),
+					"track_sid":       ap.localTrackSID(),
+					"cancel_reason":   ap.currentTTSCancelReason(),
+					"chunks_written":  chunksWritten,
+					"samples_written": samplesWritten,
+					"duration_ms":     time.Since(started).Milliseconds(),
+					"error":           err.Error(),
+				})
+				return
+			}
 			logger.ErrorCF("livekit", "TTS stream read failed", map[string]any{
 				"session":   ap.sessionKey(),
 				"track_sid": ap.localTrackSID(),
@@ -690,6 +749,7 @@ func (ap *AudioPipeline) cancelTTS(reason string) {
 	defer ps.mu.Unlock()
 	hadActiveTTS := ps.ttsCancel != nil
 	if ps.ttsCancel != nil {
+		ps.ttsCancelReason = reason
 		ps.ttsCancel()
 		ps.ttsCancel = nil
 	}
@@ -716,7 +776,28 @@ func (ap *AudioPipeline) setTTSCancel(cancel context.CancelFunc) {
 	ps := ap.session.participant
 	ps.mu.Lock()
 	ps.ttsCancel = cancel
+	ps.ttsCancelReason = ""
 	ps.mu.Unlock()
+}
+
+func (ap *AudioPipeline) currentTTSCancelReason() string {
+	if ap.session == nil || ap.session.participant == nil {
+		return ""
+	}
+	ps := ap.session.participant
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.ttsCancelReason
+}
+
+func isContextCanceled(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 func (ap *AudioPipeline) sessionKey() string {
