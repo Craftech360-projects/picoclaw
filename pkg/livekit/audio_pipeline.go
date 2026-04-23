@@ -383,6 +383,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var finalizeTimerC <-chan time.Time
 	var lastFlushedText string
 	var lastFlushedAt time.Time
+	var pendingBargeIn bool
 
 	// Get the async event channel from the bridge (may be nil)
 	var asyncEvents <-chan AsyncEvent
@@ -429,6 +430,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		utterance.Reset()
 		latestTranscript = ""
 		vadSpeechEnded = false
+		pendingBargeIn = false
 		stopFinalizeTimer()
 
 		if ap.session != nil && ap.session.participant != nil {
@@ -494,11 +496,11 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 						"session":     ap.sessionKey(),
 						"probability": evt.Probability,
 					})
-					logger.InfoCF("livekit", "User speech detected by VAD; interrupting active agent audio if present", map[string]any{
+					logger.DebugCF("livekit", "VAD speech start detected; waiting for transcript before interrupting agent audio", map[string]any{
 						"session":     ap.sessionKey(),
 						"probability": evt.Probability,
 					})
-					ap.cancelTTS("vad_speech_start")
+					pendingBargeIn = true
 					stopFinalizeTimer()
 					vadSpeechEnded = false
 					lastFlushedText = ""
@@ -530,6 +532,14 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 
 			if evt.Text != "" {
 				latestTranscript = evt.Text
+				if pendingBargeIn {
+					logger.InfoCF("livekit", "Transcript confirmed user speech; interrupting active agent audio if present", map[string]any{
+						"session": ap.sessionKey(),
+						"text":    evt.Text,
+					})
+					ap.cancelTTS("stt_transcript_after_vad")
+					pendingBargeIn = false
+				}
 			}
 
 			if evt.IsFinal && evt.Text != "" {
@@ -550,6 +560,12 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			finalizeTimerC = nil
 			if vadSpeechEnded && (utterance.Len() > 0 || strings.TrimSpace(latestTranscript) != "") {
 				flushBufferedUtterance("vad_finalize_timeout")
+			} else {
+				pendingBargeIn = false
+				vadSpeechEnded = false
+				if ap.session != nil && ap.session.participant != nil {
+					ap.session.participant.speaking.Store(false)
+				}
 			}
 
 		case asyncEvt, ok := <-asyncEvents:

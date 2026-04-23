@@ -112,6 +112,78 @@ func TestRunInboundAllowsSameTextAfterNewVADSpeechStart(t *testing.T) {
 	}
 }
 
+func TestRunInboundDoesNotCancelTTSOnVADStartWithoutTranscript(t *testing.T) {
+	results := make(chan stt.TranscriptEvent)
+	vadEvents := make(chan interface{})
+	stream := &fakeTranscriptionStream{results: results}
+	cancelled := false
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo: &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{
+			identity:   "device-a",
+			sessionKey: "livekit:device:a",
+			ttsCancel:  func() { cancelled = true },
+		},
+	}, nil, nil, vadEvents)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.RunInbound(ctx, stream)
+		close(done)
+	}()
+
+	vadEvents <- vad.VADEvent{SpeechStart: true, Probability: 0.80}
+	vadEvents <- vad.VADEvent{SpeechEnd: true, Probability: 0.30}
+	close(results)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunInbound did not exit after results channel closed")
+	}
+	if cancelled {
+		t.Fatal("TTS was cancelled on VAD-only speech with no transcript")
+	}
+}
+
+func TestRunInboundCancelsTTSWhenTranscriptArrivesAfterVADStart(t *testing.T) {
+	results := make(chan stt.TranscriptEvent, 1)
+	vadEvents := make(chan interface{})
+	stream := &fakeTranscriptionStream{results: results}
+	cancelled := false
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo: &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{
+			identity:   "device-a",
+			sessionKey: "livekit:device:a",
+			ttsCancel:  func() { cancelled = true },
+		},
+	}, nil, nil, vadEvents)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.RunInbound(ctx, stream)
+		close(done)
+	}()
+
+	vadEvents <- vad.VADEvent{SpeechStart: true, Probability: 0.80}
+	results <- stt.TranscriptEvent{Text: "space", IsFinal: false}
+	close(results)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunInbound did not exit after results channel closed")
+	}
+	if !cancelled {
+		t.Fatal("TTS was not cancelled after transcript text arrived")
+	}
+}
+
 func TestHandleUtteranceDoesNotRetryCanceledChatStream(t *testing.T) {
 	provider := &cancelingStreamingProvider{}
 	bridge := &AgentBridge{
