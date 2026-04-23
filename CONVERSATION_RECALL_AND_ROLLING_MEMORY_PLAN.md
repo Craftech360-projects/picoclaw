@@ -131,19 +131,23 @@ The short-term fix improves reconnect continuity quickly, but it must not become
 
 ## Phase 1: Short-Term Rolling Overall Memory
 
-- [ ] Change `saveVoiceSessionSummary` so it no longer replaces `ai_agent.summary_memory` with the latest session summary.
+Status: implemented in Manager API service code; pending runtime verification with a real reconnecting device.
+
+Implementation note: the short-term merge rewrites memory into one clean `Overall memory:` block. It must not keep stacking repeated `Recent durable context:` sections. Session narratives remain in `voice_session_summaries`; the overall memory stores durable facts, preferences, recurring interests, and compact recent topic signals only.
+
+- [x] Change `saveVoiceSessionSummary` so it no longer replaces `ai_agent.summary_memory` with the latest session summary.
   Verify: saving a new session summary updates `voice_session_summaries`, but `ai_agent.summary_memory` is not equal to the raw latest session summary.
 
-- [ ] Add rolling overall-memory consolidation.
+- [x] Add rolling overall-memory consolidation.
   Verify: old overall memory plus latest session summary produces one compact stable memory, capped to a fixed length.
 
-- [ ] Mirror the rolling overall memory to `device_memory_documents(document_key='summary')` and `ai_agent.summary_memory`.
+- [x] Mirror the rolling overall memory to `device_memory_documents(document_key='summary')` and `ai_agent.summary_memory`.
   Verify: both places contain stable facts/preferences, not a chronological last-session narrative.
 
-- [ ] Add tests for memory stability.
+- [x] Add tests for memory stability.
   Verify: after two sessions, overall memory preserves durable facts and recent interests without losing the child's identity or becoming a transcript.
 
-- [ ] Keep bootstrap context bounded.
+- [x] Keep bootstrap context bounded.
   Verify: manager bootstrap still returns only stable memory plus the configured recent message window.
 
 ## Phase 2: Long-Term Conversation Recall
