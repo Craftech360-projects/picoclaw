@@ -160,6 +160,34 @@ func TestCancelTTSRecordsBargeInReason(t *testing.T) {
 	}
 }
 
+func TestSpeechChunkDeduperSuppressesConsecutiveDuplicateSentences(t *testing.T) {
+	deduper := &speechChunkDeduper{}
+
+	if !deduper.ShouldSpeak("Did you know that octopuses have three hearts?") {
+		t.Fatal("first sentence was suppressed")
+	}
+	if deduper.ShouldSpeak("  Did you know that octopuses have three hearts?  ") {
+		t.Fatal("consecutive duplicate sentence was not suppressed")
+	}
+	if !deduper.ShouldSpeak("That is a lot of love!") {
+		t.Fatal("different sentence was suppressed")
+	}
+	if !deduper.ShouldSpeak("Did you know that octopuses have three hearts?") {
+		t.Fatal("same sentence after a different sentence should be allowed")
+	}
+}
+
+func TestSpeechChunkDeduperAllowsShortExpressiveRepeats(t *testing.T) {
+	deduper := &speechChunkDeduper{}
+
+	if !deduper.ShouldSpeak("Wah!") {
+		t.Fatal("first short interjection was suppressed")
+	}
+	if !deduper.ShouldSpeak("Wah!") {
+		t.Fatal("short expressive repeat should be allowed")
+	}
+}
+
 type fakeTranscriptionStream struct {
 	results chan stt.TranscriptEvent
 }

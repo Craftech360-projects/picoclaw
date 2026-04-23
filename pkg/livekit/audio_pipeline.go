@@ -40,6 +40,22 @@ func normalizeUtteranceForDuplicateCheck(text string) string {
 	return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(text), " ")))
 }
 
+type speechChunkDeduper struct {
+	last string
+}
+
+func (d *speechChunkDeduper) ShouldSpeak(text string) bool {
+	normalized := normalizeUtteranceForDuplicateCheck(sanitizeVoiceTextForTTS(text))
+	if normalized == "" {
+		return false
+	}
+	if len(normalized) >= 12 && normalized == d.last {
+		return false
+	}
+	d.last = normalized
+	return true
+}
+
 // sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
 type sentenceSplitter struct {
 	buf       strings.Builder
@@ -161,6 +177,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	}
 
 	splitter := newSentenceSplitter()
+	speechDeduper := &speechChunkDeduper{}
 	firstChunkReceived := false
 	var fillerCtx context.Context
 	var fillerCancel context.CancelFunc
@@ -197,7 +214,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		}
 		for _, r := range chunk {
 			if sentence := splitter.Feed(r); sentence != "" {
-				ap.synthesizeAndPlay(ctx, sentence)
+				ap.synthesizeDeduped(ctx, speechDeduper, sentence)
 			}
 		}
 	}
@@ -207,7 +224,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 			fillerCancel()
 		}
 		if remainder := splitter.Flush(); remainder != "" {
-			ap.synthesizeAndPlay(ctx, remainder)
+			ap.synthesizeDeduped(ctx, speechDeduper, remainder)
 		}
 		ap.flushSilence(500) // add 500ms silence so device buffer doesn't clip the final word
 		if ap.session != nil {
@@ -323,6 +340,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 	ap.session.PublishAgentState("listening", "thinking")
 	firstChunkReceived := false
 	splitter := newSentenceSplitter()
+	speechDeduper := &speechChunkDeduper{}
 
 	go func() {
 		err := ap.bridge.GenerateGreeting(ctx, sessionKey, func(chunk string) {
@@ -332,12 +350,12 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
-					ap.synthesizeAndPlay(ctx, sentence)
+					ap.synthesizeDeduped(ctx, speechDeduper, sentence)
 				}
 			}
 		}, func() {
 			if remainder := splitter.Flush(); remainder != "" {
-				ap.synthesizeAndPlay(ctx, remainder)
+				ap.synthesizeDeduped(ctx, speechDeduper, remainder)
 			}
 			ap.flushSilence(500)
 			ap.session.PublishAgentState("speaking", "listening")
@@ -583,6 +601,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 	ap.setTTSCancel(ttsCancel)
 
 	splitter := newSentenceSplitter()
+	speechDeduper := &speechChunkDeduper{}
 
 	go func() {
 		if ap.session != nil {
@@ -600,12 +619,12 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
-					ap.synthesizeAndPlay(ttsCtx, sentence)
+					ap.synthesizeDeduped(ttsCtx, speechDeduper, sentence)
 				}
 			}
 		}, func() {
 			if remainder := splitter.Flush(); remainder != "" {
-				ap.synthesizeAndPlay(ttsCtx, remainder)
+				ap.synthesizeDeduped(ttsCtx, speechDeduper, remainder)
 			}
 			ap.flushSilence(500) // trailing silence for spontaneous replies
 			if ap.session != nil {
@@ -738,6 +757,17 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 			})
 		}
 	}
+}
+
+func (ap *AudioPipeline) synthesizeDeduped(ctx context.Context, deduper *speechChunkDeduper, text string) {
+	if deduper != nil && !deduper.ShouldSpeak(text) {
+		logger.InfoCF("livekit", "Suppressing duplicate assistant speech chunk", map[string]any{
+			"session": ap.sessionKey(),
+			"text":    sanitizeVoiceTextForTTS(text),
+		})
+		return
+	}
+	ap.synthesizeAndPlay(ctx, text)
 }
 
 func (ap *AudioPipeline) cancelTTS(reason string) {
