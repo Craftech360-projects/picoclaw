@@ -234,13 +234,14 @@ func main() {
 		// 1. Calculate the workspace path for this job identity exactly like NewAgentInstance.
 		// This ensures we drop the personalized prompt precisely where this room identity reads it.
 		var workspace string
+		var baseWorkspace string
 		if cfg.Agents.Defaults.Workspace != "" {
 			home := os.Getenv(config.EnvHome)
 			userHome, _ := os.UserHomeDir()
 			if home == "" {
 				home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 			}
-			baseWorkspace := strings.Replace(cfg.Agents.Defaults.Workspace, "~", userHome, 1)
+			baseWorkspace = strings.Replace(cfg.Agents.Defaults.Workspace, "~", userHome, 1)
 			if !filepath.IsAbs(baseWorkspace) && strings.Contains(cfg.Agents.Defaults.Workspace, "~") {
 				baseWorkspace = strings.Replace(cfg.Agents.Defaults.Workspace, "~", userHome, 1)
 			}
@@ -250,8 +251,12 @@ func main() {
 
 		// 2. Fetch and decode Room Metadata payload from MQTT gateway.
 		// Room metadata is the primary bootstrap path; manager API bootstrap is a future fallback.
-		if roomMetadata != "" && workspace != "" {
-			bootstrap, err := parseRoomMetadataBootstrap(roomMetadata)
+		bootstrap := roomMetadataBootstrap{Source: bootstrapSourceManagerAPIFallback}
+		renderedIdentity := ""
+		workspaceBootstrapSource := bootstrap.Source
+		if roomMetadata != "" {
+			var err error
+			bootstrap, err = parseRoomMetadataBootstrap(roomMetadata)
 			if err == nil {
 				md := bootstrap.Metadata
 				// 3. Load the Go template we built
@@ -260,17 +265,7 @@ func main() {
 					if tmpl, parseErr := template.New("cheeko").Parse(string(tmplBytes)); parseErr == nil {
 						var buf bytes.Buffer
 						if execErr := tmpl.Execute(&buf, md); execErr == nil {
-							// 4. Write the rendered prompt directly into the resolved workspace
-							// The AgentInstance's ContextBuilder will swallow it instantly on boot
-							os.MkdirAll(workspace, 0755)
-							os.WriteFile(filepath.Join(workspace, "IDENTITY.md"), buf.Bytes(), 0644)
-							logger.InfoCF("livekit", "Successfully injected zero-latency dynamic IDENTITY.md", map[string]any{
-								"room":               roomName,
-								"child":              md.ChildProfile.Name,
-								"workspace_identity": workspaceIdentity,
-								"persistent":         preserveWorkspace,
-								"bootstrap_source":   bootstrap.Source,
-							})
+							renderedIdentity = buf.String()
 						} else {
 							logger.ErrorCF("livekit", "Template exec failed", map[string]any{"error": execErr.Error()})
 						}
@@ -284,6 +279,56 @@ func main() {
 				logger.ErrorCF("livekit", "Invalid job.Room.Metadata", map[string]any{
 					"error":            err.Error(),
 					"bootstrap_source": bootstrap.Source,
+				})
+			}
+		}
+		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, renderedIdentity)
+		if strings.TrimSpace(renderedIdentity) == "" && strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
+			managerBootstrap, err := fetchManagerWorkspaceBootstrap(
+				context.Background(),
+				lkCfg.ManagerAPI,
+				deviceMAC,
+				managerAPIServiceKey(),
+			)
+			if err != nil {
+				logger.WarnCF("livekit", "Manager API workspace bootstrap fallback failed", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+			} else {
+				hydrationOptions = buildLiveKitWorkspaceHydrationOptionsFromManager(baseWorkspace, managerBootstrap)
+				workspaceBootstrapSource = bootstrapSourceManagerAPIFallback
+				logger.InfoCF("livekit", "Using manager API workspace bootstrap fallback", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"agent_name": managerBootstrap.Agent.AgentName,
+				})
+			}
+		} else if bootstrap.Source == bootstrapSourceRoomMetadata {
+			workspaceBootstrapSource = bootstrap.Source
+		}
+		if workspace != "" {
+			hydration, err := hydrateLiveKitWorkspaceSkeleton(
+				workspace,
+				hydrationOptions,
+			)
+			if err != nil {
+				logger.WarnCF("livekit", "Failed to hydrate LiveKit workspace skeleton", map[string]any{
+					"room":               roomName,
+					"workspace_identity": workspaceIdentity,
+					"error":              err.Error(),
+				})
+			} else {
+				logger.InfoCF("livekit", "Hydrated LiveKit workspace skeleton", map[string]any{
+					"room":               roomName,
+					"child":              bootstrap.Metadata.ChildProfile.Name,
+					"workspace_identity": workspaceIdentity,
+					"persistent":         preserveWorkspace,
+					"bootstrap_source":   workspaceBootstrapSource,
+					"identity_rendered":  strings.TrimSpace(hydrationOptions.IdentityContent) != "",
+					"memory_written":     hydration.MemoryWritten,
+					"skills_copied":      hydration.SkillsCopied,
 				})
 			}
 		}

@@ -220,9 +220,9 @@ Implementation target:
 
 - New writes go to `voice_sessions` and `voice_session_messages`.
 - Existing read endpoints query `voice_session_messages`.
-- During migration, read endpoints can fall back to `ai_agent_chat_history` only for sessions not yet backfilled.
+- During migration, read endpoints were allowed to fall back to `ai_agent_chat_history` only for sessions not yet backfilled.
 - Backfill old `ai_agent_chat_history` rows into `voice_sessions` and `voice_session_messages`.
-- After backfill and app verification, stop relying on `ai_agent_chat_history` for app reads.
+- After backfill and app verification, app reads now rely on `voice_session_messages`; the temporary `ai_agent_chat_history` fallback has been removed.
 
 This gives the app chat history without requiring app changes, while still moving the backend to the correct source of truth.
 
@@ -419,6 +419,35 @@ Temporary fallback:
 - If metadata is invalid and manager API is unavailable, allow a degraded mode with no long-term memory.
 - Log a clear warning and avoid pretending the user has durable continuity.
 
+### Hydrate PicoClaw-Compatible Workspace Skeleton
+
+Each LiveKit device workspace should look enough like the normal PicoClaw workspace for prompts and tools to be truthful. The directory is still a runtime cache, not the source of truth.
+
+On room start, create or hydrate:
+
+- `memory/`
+- `memory/MEMORY.md`
+- `sessions/`
+- `skills/`
+- `cron/`
+- `state/`
+- `AGENT.md`
+- `IDENTITY.md`
+- `USER.md`
+- `SOUL.md`
+- `HEARTBEAT.md`
+- `heartbeat.log`
+
+Hydration rules:
+
+- `IDENTITY.md`, `USER.md`, and memory context should be rendered from room metadata or manager bootstrap.
+- `memory/MEMORY.md` should be rendered from manager device memory documents, or created as an empty memory file with a clear header when no memory exists.
+- `skills/` should be copied or linked from the configured PicoClaw skill source if the LiveKit prompt advertises skill usage.
+- `cron/` should be included for PicoClaw workspace compatibility and future scheduled-task support, but cron jobs should not execute inside short LiveKit calls unless explicitly enabled.
+- `state/` should be created for tool/runtime state, but any long-lived state must be mirrored to Manager API/Postgres or another durable store.
+- Durable text artifacts should hydrate from the Manager API artifact store before the agent can use file tools.
+- The prompt builder should validate that advertised paths exist before the first LLM turn. If a path cannot be hydrated, either create the placeholder or remove that claim from the prompt.
+
 ### Add Manager-Backed SessionStore
 
 Implement a new `session.SessionStore` backend:
@@ -554,11 +583,21 @@ Goals:
 - Make local workspaces ephemeral by default for LiveKit calls.
 - Remove the need for `preserveWorkspace = true` for device continuity.
 - Keep only temporary rendered files and local outbox files.
+- Hydrate a PicoClaw-compatible runtime workspace skeleton before every voice session:
+  - `memory/MEMORY.md`
+  - `sessions/`
+  - `skills/`
+  - `cron/`
+  - `state/`
+  - `AGENT.md`, `IDENTITY.md`, `USER.md`, `SOUL.md`, `HEARTBEAT.md`, `heartbeat.log`
+- Ensure the prompt only advertises workspace files and directories that actually exist.
 
 Exit criteria:
 
 - Load-balanced workers can be restarted or replaced with no long-term memory loss.
 - Reconnect tests pass across at least two worker instances.
+- A fresh device workspace contains the expected PicoClaw skeleton before the first agent turn.
+- Skill lookup, memory read/write, artifact read/write, and cron-directory listing work from the device workspace root.
 
 ### Phase 6: Observability And Operations
 
@@ -614,10 +653,11 @@ Minimum tests before production rollout:
 7. Backfill `ai_agent_chat_history` into the new session tables and keep temporary fallback reads during migration.
 8. Run staging with two LiveKit worker instances using the same captured room metadata payload.
 9. Only after metadata bootstrap and chat-history API verification, make local workspaces ephemeral for LiveKit device sessions.
+10. Hydrate a PicoClaw-compatible device workspace skeleton on every LiveKit room start, including `memory`, `sessions`, `skills`, `cron`, `state`, identity files, and durable text artifacts.
 
 ## Implementation Progress
 
-Last updated: 2026-04-22
+Last updated: 2026-04-23
 
 Operational database note:
 
@@ -655,10 +695,10 @@ Operational database note:
    - Verification: migration SQL validated in a rollback transaction, then applied transactionally. `npx prisma migrate status` now reports `Database schema is up to date!`. `npx jest tests/unit/voice-session-schema.test.js --runInBand`, `node --check tests\unit\voice-session-schema.test.js`, and `npx prisma validate` passed.
 
 5. Update existing chat-history APIs so the app reads from `voice_session_messages` through the same routes.
-   - Status: done.
+   - Status: done; post-staging fallback removal completed.
    - Files: `D:\cheeko-backend\main\manager-api-node\src\services\agent.service.js`, `D:\cheeko-backend\main\manager-api-node\tests\unit\agent.chat-history.voice-session.test.js`.
-   - Behavior: `getAgentSessions`, `getChatHistory`, `getRecentUserChatHistory`, and `getAudioContent` prefer `voice_session_messages` and temporarily fall back to `ai_agent_chat_history` when no migrated rows exist. `addChatMessage`, `reportChatMessage`, and `batchUploadSession` now write to `voice_sessions` and `voice_session_messages`.
-   - Verification: `npx jest tests/unit/agent.bootstrap.test.js tests/unit/voice-session-schema.test.js tests/unit/agent.chat-history.voice-session.test.js --runInBand`, `node --check` for touched service/route/test files, `npx prisma validate`, `npx prisma generate`, and ESLint for the new unit tests passed. ESLint for `src\services\agent.service.js` still reports older style violations outside this change.
+   - Behavior: `getAgentSessions`, `getChatHistory`, `getRecentUserChatHistory`, `getAudioContent`, and manager bootstrap recent messages now read from `voice_session_messages` without falling back to `ai_agent_chat_history`. `addChatMessage`, `reportChatMessage`, and `batchUploadSession` write to `voice_sessions` and `voice_session_messages`.
+   - Verification: `npx jest tests/unit/agent.bootstrap.test.js tests/unit/voice-session-schema.test.js tests/unit/agent.chat-history.voice-session.test.js --runInBand`, `node --check` for touched service/route/test files, `npx prisma validate`, `npx prisma generate`, and ESLint for the new unit tests passed. ESLint for `src\services\agent.service.js` still reports older style violations outside this change. Follow-up fallback removal verification: `npm test -- --runTestsByPath tests/unit/agent.chat-history.voice-session.test.js tests/unit/agent.bootstrap.test.js` passed.
 
 6. Add manager-backed `SessionStore` in PicoClaw behind a config flag.
    - Status: done and locally runtime-verified.
@@ -728,6 +768,36 @@ Operational database note:
    - Database status: `20260422_add_workspace_artifacts` has been applied to the configured Postgres database with `npx prisma migrate deploy`.
    - Verification: `npm test -- --runTestsByPath tests/unit/agent.workspace-artifacts.test.js tests/unit/voice-session-schema.test.js tests/unit/agent.bootstrap.test.js tests/unit/agent.voice-session-lifecycle.test.js tests/unit/agent.chat-history.voice-session.test.js`, `npx prisma validate`, and with `D:\picoclaw` prepended to `PATH`, `go test ./cmd/picoclaw-livekit ./pkg/livekit ./pkg/session -count=1` passed.
    - Exit criteria: a file generated on worker A can be found/read when the same device reconnects on worker B after hydration.
+
+13. Harden Manager API Prisma startup for DB switching and new deployments.
+   - Status: implemented and code-verified.
+   - Purpose: a switched or fresh database should be prepared by committed migrations automatically during Manager API startup, and stale Prisma client generation should be handled before modules instantiate `PrismaClient`.
+   - Behavior: `server.js` now runs `npx prisma generate` before loading app/database modules, then runs `npx prisma migrate deploy` by default. `prisma db push --accept-data-loss` is no longer the development default and only runs when `ALLOW_PRISMA_DB_PUSH=1` is explicitly set for local schema prototyping. `postinstall` still generates Prisma during dependency installation, while duplicate `prestart`/`predev` generation hooks were removed because runtime generation is owned by `server.js`.
+   - Safety: `SKIP_DB_SYNC=1` still skips migration application for environments that run migrations as a separate release step, but the startup guards still verify required Prisma delegates and required DB tables before serving traffic.
+   - Files: `D:\cheeko-backend\main\manager-api-node\package.json`, `D:\cheeko-backend\main\manager-api-node\server.js`, `D:\cheeko-backend\main\manager-api-node\src\config\prisma-migrations.js`, `D:\cheeko-backend\main\manager-api-node\tests\unit\prisma-client-guard.test.js`, and `D:\cheeko-backend\main\manager-api-node\tests\unit\prisma-migrations.test.js`.
+   - Verification: `npm test -- --runTestsByPath tests/unit/prisma-migrations.test.js tests/unit/prisma-client-guard.test.js tests/unit/agent.workspace-artifacts.test.js tests/unit/voice-session-schema.test.js tests/unit/agent.chat-history.voice-session.test.js`, `node --check server.js`, `node --check src\config\prisma-migrations.js`, `node --check tests\unit\prisma-migrations.test.js`, `node --check tests\unit\prisma-client-guard.test.js`, and `npx prisma validate` passed.
+
+14. Start Phase 3 device-scoped memory storage.
+   - Status: device-memory storage and deterministic session-end consolidation implemented and DB-verified.
+   - Purpose: stop treating `ai_agent.summary_memory` as the only durable memory surface. Device memory now has canonical Postgres documents and chunks keyed by normalized MAC.
+   - Behavior: added `device_memory_documents` and `device_memory_chunks`; added service-key protected `GET /toy/agent/device/:mac/memory` and `POST /toy/agent/device/:mac/memory/documents`; session summaries and `/saveMemory/:mac` now also upsert the device `summary` memory document while keeping `ai_agent.summary_memory` as a compatibility mirror.
+   - Consolidation behavior: `endVoiceSession` now runs a deterministic memory consolidation job after marking the session ended. It reads the saved `voice_session_summaries` row and canonical `voice_session_messages`, then upserts a stable `summary` document and a per-session `session:<sessionId>` episodic memory document. If no summary or transcript exists, it records a non-fatal `no_session_memory_inputs` result.
+   - Bootstrap behavior: manager bootstrap memory retrieval reads device memory documents from Postgres first and only uses Mem0 as an optional fallback/enhancer when no Postgres documents are available.
+   - Files: `D:\cheeko-backend\main\manager-api-node\prisma\schema.prisma`, `D:\cheeko-backend\main\manager-api-node\prisma\migrations\20260423_add_device_memory_documents\migration.sql`, `D:\cheeko-backend\main\manager-api-node\src\config\prisma-client-guard.js`, `D:\cheeko-backend\main\manager-api-node\src\services\agent.service.js`, `D:\cheeko-backend\main\manager-api-node\src\routes\agent.routes.js`, `D:\cheeko-backend\main\manager-api-node\tests\unit\agent.device-memory.test.js`, `D:\cheeko-backend\main\manager-api-node\tests\unit\agent.bootstrap.test.js`, `D:\cheeko-backend\main\manager-api-node\tests\unit\agent.voice-session-lifecycle.test.js`, `D:\cheeko-backend\main\manager-api-node\tests\unit\prisma-client-guard.test.js`, and `D:\cheeko-backend\main\manager-api-node\tests\unit\voice-session-schema.test.js`.
+   - Database status: the configured Postgres database contains `device_memory_documents` and `device_memory_chunks`; `npx prisma migrate status` reports `Database schema is up to date!`.
+   - Verification: `npm test -- --runTestsByPath tests/unit/prisma-migrations.test.js tests/unit/prisma-client-guard.test.js tests/unit/agent.workspace-artifacts.test.js tests/unit/voice-session-schema.test.js tests/unit/agent.chat-history.voice-session.test.js tests/unit/agent.bootstrap.test.js tests/unit/agent.voice-session-lifecycle.test.js tests/unit/agent.device-memory.test.js`, `npx prisma validate`, `npx prisma generate`, `npx prisma migrate deploy`, and table-readiness check for the two memory tables passed. Follow-up consolidation verification: `npm test -- --runTestsByPath tests/unit/agent.voice-session-lifecycle.test.js` passed after red-green implementation.
+   - Remaining Phase 3 work: decide Mem0/Qdrant/pgvector retrieval policy for semantic memory, add optional LLM-based fact extraction if needed, and remove reliance on the legacy `device_memories` / `memory_chunks` schema models after a drift review.
+
+15. Hydrate PicoClaw-compatible device workspace skeleton for every LiveKit room.
+   - Status: implemented and code-verified.
+   - Purpose: the LiveKit prompt currently advertises memory, daily notes, and skills paths, so the runtime device workspace must contain those paths before the first LLM turn. The workspace remains ephemeral and rebuildable, but it must look like a real PicoClaw workspace while the session is running.
+   - Required skeleton: `memory/`, `memory/MEMORY.md`, `sessions/`, `skills/`, `cron/`, `state/`, `AGENT.md`, `IDENTITY.md`, `USER.md`, `SOUL.md`, `HEARTBEAT.md`, and `heartbeat.log`.
+   - Hydration behavior: on room start, render LiveKit room identity into both `AGENT.md` and `IDENTITY.md`, render `USER.md` and `memory/MEMORY.md` from room metadata, copy workspace skills from the default PicoClaw workspace skills directory, and create `cron/`, `state/`, `sessions/`, and heartbeat files. If room metadata is missing or cannot produce identity content, the worker now calls the Manager API bootstrap endpoint with `includeMemories=true` and hydrates identity, user profile, and memory from the manager response. If neither source is available, safe placeholders are created without overwriting existing `AGENT.md` or `memory/MEMORY.md`.
+   - Prompt correctness rule: before the first LLM turn, validate that every workspace path mentioned in the prompt exists. If a path cannot be hydrated, create a safe placeholder or omit that claim from the prompt.
+   - Files: `D:\picoclaw\cmd\picoclaw-livekit\workspace_hydration.go`, `D:\picoclaw\cmd\picoclaw-livekit\workspace_hydration_test.go`, `D:\picoclaw\cmd\picoclaw-livekit\manager_workspace_bootstrap.go`, `D:\picoclaw\cmd\picoclaw-livekit\manager_workspace_bootstrap_test.go`, and `D:\picoclaw\cmd\picoclaw-livekit\main.go`.
+   - Verification: with `D:\picoclaw` prepended to `PATH`, `go test ./cmd/picoclaw-livekit -run 'TestFetchManagerWorkspaceBootstrap|TestHydrateLiveKitWorkspaceSkeleton|TestBuildLiveKitWorkspaceHydrationOptions' -count=1` and `go test ./cmd/picoclaw-livekit ./pkg/livekit ./pkg/session -count=1` passed.
+   - Runtime finding: live device `00163eacb538` created the skeleton successfully, but the room metadata was absent or unusable, so placeholders were written. Manager API workspace bootstrap fallback was added to fix that next-run case.
+   - Remaining runtime verification: restart the LiveKit worker, connect device `00163eacb538`, and confirm `AGENT.md`, `USER.md`, and `memory/MEMORY.md` contain manager-hydrated child/profile/memory content instead of placeholders.
 
 ## Senior Engineering Recommendation
 
