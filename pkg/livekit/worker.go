@@ -224,9 +224,18 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 		return
 	}
 	job := assignment.Job
+	roomMetadataBytes := 0
+	if job.Room != nil {
+		roomMetadataBytes = len(strings.TrimSpace(job.Room.Metadata))
+	}
+	jobMetadataBytes := len(strings.TrimSpace(job.Metadata))
 	logger.InfoCF("livekit", "Job assignment received", map[string]any{
-		"job_id": job.Id,
-		"room":   jobRoomName(job),
+		"job_id":              job.Id,
+		"room":                jobRoomName(job),
+		"dispatch_id":         job.DispatchId,
+		"agent_name":          job.AgentName,
+		"room_metadata_bytes": roomMetadataBytes,
+		"job_metadata_bytes":  jobMetadataBytes,
 	})
 
 	if w.skipRoomJoin {

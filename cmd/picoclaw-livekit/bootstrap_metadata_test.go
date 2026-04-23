@@ -46,3 +46,57 @@ func TestParseRoomMetadataBootstrapFallsBackForInvalidMetadata(t *testing.T) {
 		t.Fatalf("Source = %q, want %q", bootstrap.Source, bootstrapSourceManagerAPIFallback)
 	}
 }
+
+func TestParseRoomMetadataBootstrapAcceptsArrayInterestsAndCamelCaseProfile(t *testing.T) {
+	metadata := `{
+		"child_profile": {
+			"name": "Rahul",
+			"age": "6",
+			"gender": "male",
+			"interests": ["science", "music", "sports"],
+			"primaryLanguage": "en",
+			"additionalNotes": "Loves story time."
+		},
+		"long_term_memories": ["likes dinosaurs"]
+	}`
+
+	bootstrap, err := parseRoomMetadataBootstrap(metadata)
+	if err != nil {
+		t.Fatalf("parseRoomMetadataBootstrap returned error: %v", err)
+	}
+	if bootstrap.Metadata.ChildProfile.Name != "Rahul" {
+		t.Fatalf("ChildProfile.Name = %q, want Rahul", bootstrap.Metadata.ChildProfile.Name)
+	}
+	if bootstrap.Metadata.ChildProfile.Age != 6 {
+		t.Fatalf("ChildProfile.Age = %d, want 6", bootstrap.Metadata.ChildProfile.Age)
+	}
+	if bootstrap.Metadata.ChildProfile.Interests != "science, music, sports" {
+		t.Fatalf("ChildProfile.Interests = %q, want joined list", bootstrap.Metadata.ChildProfile.Interests)
+	}
+	if bootstrap.Metadata.PrimaryLanguage != "en" {
+		t.Fatalf("PrimaryLanguage = %q, want en", bootstrap.Metadata.PrimaryLanguage)
+	}
+	if bootstrap.Metadata.AdditionalNotes != "Loves story time." {
+		t.Fatalf("AdditionalNotes = %q, want child profile notes", bootstrap.Metadata.AdditionalNotes)
+	}
+}
+
+func TestParseRoomMetadataBootstrapAcceptsWrappedMetadataPayload(t *testing.T) {
+	metadata := `{
+		"metadata": "{\"child_profile\":{\"name\":\"Asha\",\"age\":7},\"session_language_name\":\"Hindi\",\"long_term_memories\":[\"likes planets\"]}"
+	}`
+
+	bootstrap, err := parseRoomMetadataBootstrap(metadata)
+	if err != nil {
+		t.Fatalf("parseRoomMetadataBootstrap returned error: %v", err)
+	}
+	if bootstrap.Metadata.ChildProfile.Name != "Asha" {
+		t.Fatalf("ChildProfile.Name = %q, want Asha", bootstrap.Metadata.ChildProfile.Name)
+	}
+	if bootstrap.Metadata.PrimaryLanguage != "Hindi" {
+		t.Fatalf("PrimaryLanguage = %q, want Hindi", bootstrap.Metadata.PrimaryLanguage)
+	}
+	if got := len(bootstrap.Metadata.LongTermMemories); got != 1 {
+		t.Fatalf("LongTermMemories len = %d, want 1", got)
+	}
+}

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -213,11 +212,17 @@ func main() {
 	})
 
 	bridgeFactory := func(job *livekitproto.Job) *livekit.AgentBridge {
-		roomName := ""
-		roomMetadata := ""
-		if job != nil && job.Room != nil {
-			roomName = strings.TrimSpace(job.Room.Name)
-			roomMetadata = job.Room.Metadata
+		roomName, roomMetadata, metadataSource := resolveLiveKitJobBootstrapContext(job)
+		if strings.TrimSpace(roomMetadata) == "" {
+			logger.WarnCF("livekit", "No metadata available for LiveKit job bootstrap", map[string]any{
+				"room": roomName,
+			})
+		} else if metadataSource != "room_metadata" {
+			logger.InfoCF("livekit", "Using non-room metadata source for LiveKit bootstrap", map[string]any{
+				"room":            roomName,
+				"metadata_source": metadataSource,
+				"metadata_bytes":  len(roomMetadata),
+			})
 		}
 
 		lifecycle := resolveLiveKitWorkspaceLifecycle(roomName, roomMetadata, lkCfg.ManagerAPI)
@@ -249,8 +254,8 @@ func main() {
 			workspace = filepath.Join(baseWorkspace, "..", "workspace-"+id)
 		}
 
-		// 2. Fetch and decode Room Metadata payload from MQTT gateway.
-		// Room metadata is the primary bootstrap path; manager API bootstrap is a future fallback.
+		// 2. Fetch and decode room metadata payload from MQTT gateway.
+		// We keep this for child/memory hydration, but AGENT.md prompt prefers DB system_prompt.
 		bootstrap := roomMetadataBootstrap{Source: bootstrapSourceManagerAPIFallback}
 		renderedIdentity := ""
 		workspaceBootstrapSource := bootstrap.Source
@@ -276,14 +281,45 @@ func main() {
 					logger.ErrorCF("livekit", "Could not read cheeko.tmpl", map[string]any{"error": readErr.Error()})
 				}
 			} else {
-				logger.ErrorCF("livekit", "Invalid job.Room.Metadata", map[string]any{
+				logger.ErrorCF("livekit", "Invalid job metadata payload", map[string]any{
 					"error":            err.Error(),
 					"bootstrap_source": bootstrap.Source,
+					"metadata_source":  metadataSource,
 				})
 			}
 		}
 		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, renderedIdentity)
-		if strings.TrimSpace(renderedIdentity) == "" && strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
+		managerPromptApplied := false
+		if strings.TrimSpace(deviceMAC) != "" {
+			managerPrompt, err := fetchManagerPromptConfig(
+				context.Background(),
+				lkCfg.ManagerAPI,
+				deviceMAC,
+			)
+			if err != nil {
+				logger.WarnCF("livekit", "Manager API system prompt fetch failed", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+			} else if prompt := strings.TrimSpace(managerPrompt.SystemPrompt); prompt != "" {
+				hydrationOptions.IdentityContent = prompt
+				workspaceBootstrapSource = bootstrapSourceManagerDBPrompt
+				managerPromptApplied = true
+				logger.InfoCF("livekit", "Using manager API system prompt for LiveKit bootstrap", map[string]any{
+					"room":         roomName,
+					"device_mac":   deviceMAC,
+					"agent_name":   managerPrompt.AgentName,
+					"prompt_chars": len(prompt),
+				})
+			} else {
+				logger.WarnCF("livekit", "Manager API system prompt was empty", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+				})
+			}
+		}
+		if !managerPromptApplied && strings.TrimSpace(renderedIdentity) == "" && strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
 			managerBootstrap, err := fetchManagerWorkspaceBootstrap(
 				context.Background(),
 				lkCfg.ManagerAPI,
@@ -305,7 +341,7 @@ func main() {
 					"agent_name": managerBootstrap.Agent.AgentName,
 				})
 			}
-		} else if bootstrap.Source == bootstrapSourceRoomMetadata {
+		} else if !managerPromptApplied && bootstrap.Source == bootstrapSourceRoomMetadata {
 			workspaceBootstrapSource = bootstrap.Source
 		}
 		if workspace != "" {
@@ -424,12 +460,15 @@ func main() {
 			}
 			// Extract primaryLanguage from metadata for language-aware fallback phrases
 			primaryLanguage := ""
-			if job.Room != nil && job.Room.Metadata != "" {
-				var mdLang struct {
-					PrimaryLanguage string `json:"primary_language"`
-				}
-				if jsonErr := json.Unmarshal([]byte(job.Room.Metadata), &mdLang); jsonErr == nil {
-					primaryLanguage = mdLang.PrimaryLanguage
+			_, metadataPayload, metadataSource := resolveLiveKitJobBootstrapContext(job)
+			if strings.TrimSpace(metadataPayload) != "" {
+				if md, err := parseRoomMetadataBootstrap(metadataPayload); err == nil {
+					primaryLanguage = strings.TrimSpace(md.Metadata.PrimaryLanguage)
+				} else {
+					logger.WarnCF("livekit", "Failed to parse metadata for primary language", map[string]any{
+						"error":           err.Error(),
+						"metadata_source": metadataSource,
+					})
 				}
 			}
 
@@ -583,4 +622,23 @@ func summarizeDBURL(raw string) (host, user string) {
 		user = "unknown"
 	}
 	return host, user
+}
+
+func resolveLiveKitJobBootstrapContext(job *livekitproto.Job) (roomName, metadata, source string) {
+	if job == nil {
+		return "", "", "none"
+	}
+
+	if job.Room != nil {
+		roomName = strings.TrimSpace(job.Room.Name)
+		if roomMetadata := strings.TrimSpace(job.Room.Metadata); roomMetadata != "" {
+			return roomName, roomMetadata, "room_metadata"
+		}
+	}
+
+	if dispatchMetadata := strings.TrimSpace(job.Metadata); dispatchMetadata != "" {
+		return roomName, dispatchMetadata, "job_metadata"
+	}
+
+	return roomName, "", "none"
 }

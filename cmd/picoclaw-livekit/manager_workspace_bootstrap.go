@@ -61,6 +61,70 @@ type managerWorkspaceEntity struct {
 	Type string `json:"type"`
 }
 
+type managerPromptConfig struct {
+	AgentName    string `json:"agentName"`
+	SystemPrompt string `json:"systemPrompt"`
+}
+
+func fetchManagerPromptConfig(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	deviceMAC string,
+) (managerPromptConfig, error) {
+	var out managerPromptConfig
+	deviceMAC = strings.TrimSpace(deviceMAC)
+	if deviceMAC == "" {
+		return out, fmt.Errorf("device MAC is empty")
+	}
+
+	baseURL := managerAPIBaseURL(cfg)
+	if baseURL == "" {
+		baseURL = "http://localhost:8002/toy"
+	}
+
+	endpoint := strings.TrimRight(baseURL, "/") +
+		"/agent/prompt/" + url.PathEscape(deviceMAC)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return out, err
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return out, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return out, fmt.Errorf("manager prompt status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var wrapper struct {
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return out, fmt.Errorf("decode manager prompt response: %w", err)
+	}
+	if wrapper.Code != 0 {
+		return out, fmt.Errorf("manager prompt api code=%d msg=%s", wrapper.Code, wrapper.Msg)
+	}
+	if len(wrapper.Data) == 0 {
+		return out, nil
+	}
+	if err := json.Unmarshal(wrapper.Data, &out); err != nil {
+		return out, fmt.Errorf("decode manager prompt data: %w", err)
+	}
+	return out, nil
+}
+
 func fetchManagerWorkspaceBootstrap(
 	ctx context.Context,
 	cfg config.LiveKitServiceManagerAPIConfig,

@@ -86,3 +86,40 @@ func TestFetchManagerWorkspaceBootstrapUsesServiceKeyAndMapsHydrationOptions(t *
 		}
 	}
 }
+
+func TestFetchManagerPromptConfigUsesPublicPromptEndpoint(t *testing.T) {
+	var gotPath string
+	var gotServiceKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotServiceKey = r.Header.Get("X-Service-Key")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]any{
+				"agentName":    "Cheeko",
+				"systemPrompt": "Use DB prompt always.",
+			},
+		})
+	}))
+	defer server.Close()
+
+	prompt, err := fetchManagerPromptConfig(context.Background(), config.LiveKitServiceManagerAPIConfig{
+		BaseURL: server.URL + "/toy",
+	}, "28:56:2F:07:CC:DC")
+	if err != nil {
+		t.Fatalf("fetchManagerPromptConfig returned error: %v", err)
+	}
+	if gotPath != "/toy/agent/prompt/28:56:2F:07:CC:DC" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotServiceKey != "" {
+		t.Fatalf("X-Service-Key should be empty, got %q", gotServiceKey)
+	}
+	if prompt.AgentName != "Cheeko" {
+		t.Fatalf("AgentName = %q, want Cheeko", prompt.AgentName)
+	}
+	if prompt.SystemPrompt != "Use DB prompt always." {
+		t.Fatalf("SystemPrompt = %q", prompt.SystemPrompt)
+	}
+}
