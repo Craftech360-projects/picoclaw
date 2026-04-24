@@ -30,8 +30,14 @@ services:
     # Uncomment to access host network; leave commented unless needed.
     #extra_hosts:
     #  - "host.docker.internal:host-gateway"
+    environment:
+      - PICOCLAW_LIVEKIT_SKILLS=weather,agent-browser
     volumes:
       - ./data:/root/.picoclaw
+      # Optional production override: mount the same read-only skill bundle into
+      # every worker instance. If omitted, the image-bundled /opt/picoclaw/skills
+      # directory is used.
+      # - /srv/picoclaw/skills:/opt/picoclaw/skills:ro
 
   # ─────────────────────────────────────────────
   # PicoClaw Launcher (Web Console + Gateway)

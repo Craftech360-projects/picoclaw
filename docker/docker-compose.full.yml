@@ -30,6 +30,8 @@ services:
     restart: unless-stopped
     profiles:
       - gateway
+    environment:
+      - PICOCLAW_LIVEKIT_SKILLS=weather,agent-browser
     volumes:
       # Configuration file
       - ../config/config.json:/root/.picoclaw/config.json:ro
@@ -37,6 +39,10 @@ services:
       - picoclaw-workspace:/root/.picoclaw/workspace
       # NPM cache for faster MCP server installs
       - picoclaw-npm-cache:/root/.npm
+      # Optional production override: mount the same read-only skill bundle into
+      # every worker instance. If omitted, the image-bundled /opt/picoclaw/skills
+      # directory is used.
+      # - /srv/picoclaw/skills:/opt/picoclaw/skills:ro
     command: ["gateway"]
 
 volumes:
