@@ -37,8 +37,16 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
 
+# Bundle default skills outside the mutable workspace so mounted workspace
+# volumes cannot hide the release-provided skill set.
+COPY workspace/skills/ /opt/picoclaw/skills/
+COPY docker/entrypoint.sh /usr/local/bin/picoclaw-entrypoint
+RUN chmod +x /usr/local/bin/picoclaw-entrypoint
+
+ENV PICOCLAW_SKILLS_SOURCE=/opt/picoclaw/skills
+
 # Create picoclaw home directory
 RUN /usr/local/bin/picoclaw onboard
 
-ENTRYPOINT ["picoclaw"]
+ENTRYPOINT ["picoclaw-entrypoint"]
 CMD ["gateway"]

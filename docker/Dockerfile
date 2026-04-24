@@ -29,6 +29,14 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
 
+# Bundle default skills outside the mutable workspace so mounted workspace
+# volumes cannot hide the release-provided skill set.
+COPY workspace/skills/ /opt/picoclaw/skills/
+COPY docker/entrypoint.sh /usr/local/bin/picoclaw-entrypoint
+RUN chmod +x /usr/local/bin/picoclaw-entrypoint
+
+ENV PICOCLAW_SKILLS_SOURCE=/opt/picoclaw/skills
+
 # Create non-root user and group
 RUN addgroup -g 1000 picoclaw && \
     adduser -D -u 1000 -G picoclaw picoclaw
@@ -39,5 +47,5 @@ USER picoclaw
 # Run onboard to create initial directories and config
 RUN /usr/local/bin/picoclaw onboard
 
-ENTRYPOINT ["picoclaw"]
+ENTRYPOINT ["picoclaw-entrypoint"]
 CMD ["gateway"]

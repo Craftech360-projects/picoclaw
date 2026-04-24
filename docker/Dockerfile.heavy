@@ -48,6 +48,14 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
 
+# Bundle default skills outside the mutable workspace so mounted workspace
+# volumes cannot hide the release-provided skill set.
+COPY workspace/skills/ /opt/picoclaw/skills/
+COPY docker/entrypoint.sh /usr/local/bin/picoclaw-entrypoint
+RUN chmod +x /usr/local/bin/picoclaw-entrypoint
+
+ENV PICOCLAW_SKILLS_SOURCE=/opt/picoclaw/skills
+
 # Reuse existing node user (UID/GID 1000) — rename to picoclaw
 RUN deluser node 2>/dev/null; delgroup node 2>/dev/null; \
     addgroup -g 1000 picoclaw 2>/dev/null; \
@@ -63,5 +71,5 @@ COPY --chown=picoclaw:picoclaw workspace/ /home/picoclaw/.picoclaw/workspace/
 
 VOLUME /home/picoclaw/.picoclaw/workspace
 
-ENTRYPOINT ["picoclaw"]
+ENTRYPOINT ["picoclaw-entrypoint"]
 CMD ["gateway"]
