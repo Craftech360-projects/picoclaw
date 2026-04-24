@@ -14,11 +14,12 @@ import (
 )
 
 type liveKitWorkspaceHydrationOptions struct {
-	IdentityContent  string
-	UserContent      string
-	MemoryContent    string
-	SkillsSourceDir  string
-	SkillsSourceDirs []string
+	IdentityContent       string
+	UserContent           string
+	MemoryContent         string
+	SessionContextContent string
+	SkillsSourceDir       string
+	SkillsSourceDirs      []string
 }
 
 type liveKitWorkspaceHydrationResult struct {
@@ -115,6 +116,17 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 		result.MemoryWritten = true
 	default:
 		if err := writeFileIfMissing(memoryPath, "# Memory\n\nNo durable memory has been hydrated yet.\n"); err != nil {
+			return result, err
+		}
+	}
+
+	sessionContextContent := strings.TrimSpace(opts.SessionContextContent)
+	if sessionContextContent != "" {
+		if err := os.WriteFile(
+			filepath.Join(workspace, "sessions", "manager_recent_voice_context.md"),
+			[]byte(ensureTrailingNewline(sessionContextContent)),
+			0o600,
+		); err != nil {
 			return result, err
 		}
 	}

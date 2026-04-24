@@ -41,6 +41,9 @@ type managerWorkspaceBootstrap struct {
 		Relations []managerWorkspaceRelation `json:"relations"`
 		Entities  []managerWorkspaceEntity   `json:"entities"`
 	} `json:"memories"`
+	RecentMessages   []managerWorkspaceRecentMessage  `json:"recentMessages"`
+	RecentSessions   []managerWorkspaceRecentSession  `json:"recentSessions"`
+	SessionSummaries []managerWorkspaceSessionSummary `json:"sessionSummaries"`
 }
 
 type managerWorkspaceMemory struct {
@@ -59,6 +62,32 @@ type managerWorkspaceRelation struct {
 type managerWorkspaceEntity struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
+}
+
+type managerWorkspaceRecentMessage struct {
+	SessionID string `json:"sessionId"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type managerWorkspaceRecentSession struct {
+	SessionID    string `json:"sessionId"`
+	Status       string `json:"status"`
+	StartedAt    string `json:"startedAt"`
+	EndedAt      string `json:"endedAt"`
+	MessageCount int    `json:"messageCount"`
+}
+
+type managerWorkspaceSessionSummary struct {
+	SessionID          string `json:"sessionId"`
+	Summary            string `json:"summary"`
+	Model              string `json:"model"`
+	SourceMessageCount int    `json:"sourceMessageCount"`
+	UpdatedAt          string `json:"updatedAt"`
+	StartedAt          string `json:"startedAt"`
+	EndedAt            string `json:"endedAt"`
+	Status             string `json:"status"`
 }
 
 type managerPromptConfig struct {
@@ -199,15 +228,43 @@ func buildLiveKitWorkspaceHydrationOptionsFromManager(
 	bootstrap managerWorkspaceBootstrap,
 ) liveKitWorkspaceHydrationOptions {
 	opts := liveKitWorkspaceHydrationOptions{
-		IdentityContent: formatManagerIdentityContent(bootstrap),
-		UserContent:     formatManagerUserContent(bootstrap),
-		MemoryContent:   formatManagerMemoryContent(bootstrap),
+		IdentityContent:       formatManagerIdentityContent(bootstrap),
+		UserContent:           formatManagerUserContent(bootstrap),
+		MemoryContent:         formatManagerMemoryContent(bootstrap),
+		SessionContextContent: formatManagerSessionContextContent(bootstrap),
 	}
 	if strings.TrimSpace(baseWorkspace) != "" {
 		opts.SkillsSourceDir = filepath.Join(baseWorkspace, "skills")
 		opts.SkillsSourceDirs = liveKitSkillSourceDirs(baseWorkspace)
 	}
 	return opts
+}
+
+func mergeManagerHydrationOptions(
+	current liveKitWorkspaceHydrationOptions,
+	manager managerWorkspaceBootstrap,
+	baseWorkspace string,
+) liveKitWorkspaceHydrationOptions {
+	managerOpts := buildLiveKitWorkspaceHydrationOptionsFromManager(baseWorkspace, manager)
+	if strings.TrimSpace(current.IdentityContent) == "" {
+		current.IdentityContent = managerOpts.IdentityContent
+	}
+	if strings.TrimSpace(current.UserContent) == "" {
+		current.UserContent = managerOpts.UserContent
+	}
+	if strings.TrimSpace(managerOpts.MemoryContent) != "" {
+		current.MemoryContent = managerOpts.MemoryContent
+	}
+	if strings.TrimSpace(managerOpts.SessionContextContent) != "" {
+		current.SessionContextContent = managerOpts.SessionContextContent
+	}
+	if len(current.SkillsSourceDirs) == 0 {
+		current.SkillsSourceDirs = managerOpts.SkillsSourceDirs
+	}
+	if strings.TrimSpace(current.SkillsSourceDir) == "" {
+		current.SkillsSourceDir = managerOpts.SkillsSourceDir
+	}
+	return current
 }
 
 func formatManagerIdentityContent(bootstrap managerWorkspaceBootstrap) string {
@@ -263,21 +320,51 @@ func formatManagerUserContent(bootstrap managerWorkspaceBootstrap) string {
 }
 
 func formatManagerMemoryContent(bootstrap managerWorkspaceBootstrap) string {
+	const maxStableMemoryItems = 30
+
 	var sb strings.Builder
+	stableLines := make([]string, 0, maxStableMemoryItems)
+	seenStable := map[string]struct{}{}
+	addStableLines := func(lines []string) {
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			key := strings.ToLower(strings.TrimPrefix(line, "- "))
+			if _, ok := seenStable[key]; ok {
+				continue
+			}
+			seenStable[key] = struct{}{}
+			stableLines = append(stableLines, line)
+			if len(stableLines) >= maxStableMemoryItems {
+				return
+			}
+		}
+	}
+
 	if summary := strings.TrimSpace(bootstrap.Agent.SummaryMemory); summary != "" {
-		sb.WriteString("- ")
-		sb.WriteString(summary)
-		sb.WriteString("\n")
+		addStableLines(cleanManagerMemoryLines(summary))
 	}
 	for _, memory := range bootstrap.Memories.Memories {
+		if strings.EqualFold(strings.TrimSpace(memory.MemoryType), "episode") {
+			continue
+		}
 		content := firstNonEmpty(memory.Memory, memory.Content)
 		if content == "" {
 			continue
 		}
-		sb.WriteString("- ")
-		sb.WriteString(content)
-		sb.WriteString("\n")
+		addStableLines(cleanManagerMemoryLines(content))
 	}
+	if len(stableLines) > 0 {
+		sb.WriteString("# Memory\n\n## Stable Memory\n\n")
+		for _, line := range stableLines {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+	}
+
+	relationLines := make([]string, 0, len(bootstrap.Memories.Relations)+len(bootstrap.Memories.Entities))
 	for _, relation := range bootstrap.Memories.Relations {
 		source := strings.TrimSpace(relation.Source)
 		rel := strings.TrimSpace(relation.Relation)
@@ -285,29 +372,234 @@ func formatManagerMemoryContent(bootstrap managerWorkspaceBootstrap) string {
 		if source == "" || rel == "" || target == "" {
 			continue
 		}
-		sb.WriteString("- ")
-		sb.WriteString(source)
-		sb.WriteString(" ")
-		sb.WriteString(rel)
-		sb.WriteString(" ")
-		sb.WriteString(target)
-		sb.WriteString("\n")
+		relationLines = append(relationLines, "- "+source+" "+rel+" "+target)
 	}
 	for _, entity := range bootstrap.Memories.Entities {
 		name := strings.TrimSpace(entity.Name)
 		if name == "" {
 			continue
 		}
-		sb.WriteString("- ")
-		sb.WriteString(name)
+		line := "- " + name
 		if entityType := strings.TrimSpace(entity.Type); entityType != "" {
-			sb.WriteString(" (")
-			sb.WriteString(entityType)
-			sb.WriteString(")")
+			line += " (" + entityType + ")"
 		}
+		relationLines = append(relationLines, line)
+	}
+	if len(relationLines) > 0 {
+		if sb.Len() == 0 {
+			sb.WriteString("# Memory\n\n")
+		} else {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("## Memory Graph\n\n")
+		for _, line := range relationLines {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+	}
+	writeManagerSessionSummaries(&sb, bootstrap.SessionSummaries)
+	writeManagerRecentSessions(&sb, bootstrap.RecentSessions)
+	return strings.TrimSpace(sb.String())
+}
+
+func cleanManagerMemoryLines(value string) []string {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	seen := map[string]struct{}{}
+	skipRawBlock := false
+	for _, rawLine := range lines {
+		trimmed := strings.TrimSpace(rawLine)
+		line := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+		if trimmed == "" {
+			if skipRawBlock {
+				continue
+			}
+			continue
+		}
+		if isManagerMemoryBlockLabel(line) {
+			skipRawBlock = true
+			continue
+		}
+		if skipRawBlock {
+			if isManagerMemoryNoiseLine(line) || !strings.HasPrefix(trimmed, "-") {
+				continue
+			}
+			skipRawBlock = false
+		}
+		if isManagerMemoryNoiseLine(line) {
+			continue
+		}
+		key := strings.ToLower(line)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, "- "+line)
+	}
+	return out
+}
+
+func isManagerMemoryBlockLabel(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "- ")))
+	return lower == "session summary:" || lower == "transcript excerpt:"
+}
+
+func isManagerMemoryNoiseLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "- ")))
+	return lower == "overall memory:" ||
+		lower == "session summary:" ||
+		lower == "transcript excerpt:" ||
+		strings.HasPrefix(lower, "last session highlights:") ||
+		strings.HasPrefix(lower, "good follow-up topics:") ||
+		strings.HasPrefix(lower, "user:") ||
+		strings.HasPrefix(lower, "assistant:") ||
+		strings.HasPrefix(lower, "system:") ||
+		strings.HasPrefix(lower, "tool:") ||
+		strings.Contains(lower, "[system event]") ||
+		strings.Contains(lower, "successfully connected to the room") ||
+		strings.Contains(lower, "you must end this conversation now")
+}
+
+func writeManagerSessionSummaries(sb *strings.Builder, summaries []managerWorkspaceSessionSummary) {
+	wroteHeader := false
+	for _, item := range summaries {
+		summary := strings.TrimSpace(item.Summary)
+		if summary == "" {
+			continue
+		}
+		if !wroteHeader {
+			if sb.Len() == 0 {
+				sb.WriteString("# Memory\n\n")
+			} else {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("## Recent Session Summaries\n\n")
+			wroteHeader = true
+		}
+		sb.WriteString("- ")
+		sb.WriteString(formatManagerSessionDate(item.StartedAt))
+		if status := strings.TrimSpace(item.Status); status != "" {
+			sb.WriteString(", ")
+			sb.WriteString(status)
+		}
+		if item.SourceMessageCount > 0 {
+			fmt.Fprintf(sb, ", %d messages", item.SourceMessageCount)
+		}
+		if sessionID := strings.TrimSpace(item.SessionID); sessionID != "" {
+			sb.WriteString(", session ")
+			sb.WriteString(sessionID)
+		}
+		sb.WriteString(": ")
+		sb.WriteString(summary)
 		sb.WriteString("\n")
 	}
+}
+
+func writeManagerRecentSessions(sb *strings.Builder, sessions []managerWorkspaceRecentSession) {
+	wroteHeader := false
+	for _, session := range sessions {
+		sessionID := strings.TrimSpace(session.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		if !wroteHeader {
+			if sb.Len() == 0 {
+				sb.WriteString("# Memory\n\n")
+			} else {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("## Recent Sessions\n\n")
+			wroteHeader = true
+		}
+		sb.WriteString("- ")
+		sb.WriteString(formatManagerSessionDate(session.StartedAt))
+		if status := strings.TrimSpace(session.Status); status != "" {
+			sb.WriteString(", ")
+			sb.WriteString(status)
+		}
+		if endedAt := strings.TrimSpace(session.EndedAt); endedAt != "" {
+			sb.WriteString(", ended ")
+			sb.WriteString(formatManagerSessionDate(endedAt))
+		}
+		if session.MessageCount > 0 {
+			fmt.Fprintf(sb, ", %d messages", session.MessageCount)
+		}
+		sb.WriteString(", session ")
+		sb.WriteString(sessionID)
+		sb.WriteString("\n")
+	}
+}
+
+func formatManagerSessionDate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown date"
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	return value
+}
+
+func formatManagerSessionContextContent(bootstrap managerWorkspaceBootstrap) string {
+	const maxRecentMessages = 50
+	const maxRecentContextBytes = 16 * 1024
+
+	var sb strings.Builder
+	written := 0
+	for _, msg := range bootstrap.RecentMessages {
+		if written >= maxRecentMessages {
+			break
+		}
+		if !includeRecentVoiceMessage(msg) {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if written == 0 {
+			sb.WriteString("# Recent Voice Messages\n\n")
+		}
+		var line strings.Builder
+		line.WriteString("- ")
+		if createdAt := strings.TrimSpace(msg.CreatedAt); createdAt != "" {
+			line.WriteString(createdAt)
+			line.WriteString(" ")
+		}
+		if sessionID := strings.TrimSpace(msg.SessionID); sessionID != "" {
+			line.WriteString("[")
+			line.WriteString(sessionID)
+			line.WriteString("] ")
+		}
+		role := strings.TrimSpace(msg.Role)
+		if role == "" {
+			role = "unknown"
+		}
+		line.WriteString(role)
+		line.WriteString(": ")
+		line.WriteString(content)
+		line.WriteString("\n")
+		if sb.Len()+line.Len() > maxRecentContextBytes {
+			break
+		}
+		sb.WriteString(line.String())
+		written++
+	}
 	return strings.TrimSpace(sb.String())
+}
+
+func includeRecentVoiceMessage(msg managerWorkspaceRecentMessage) bool {
+	role := strings.ToLower(strings.TrimSpace(msg.Role))
+	if role != "user" && role != "assistant" {
+		return false
+	}
+	content := strings.TrimSpace(msg.Content)
+	if content == "" {
+		return false
+	}
+	lower := strings.ToLower(content)
+	return !strings.Contains(lower, "[system event]") &&
+		!strings.Contains(lower, "successfully connected to the room") &&
+		!strings.Contains(lower, "you must end this conversation now") &&
+		!strings.Contains(lower, "shutdown")
 }
 
 func writeMarkdownField(sb *strings.Builder, label, value string) {

@@ -47,3 +47,41 @@ func TestHydrateWorkspaceArtifactsWritesSafeRelativeFiles(t *testing.T) {
 		t.Fatalf("escape artifact should not be written, stat err=%v", err)
 	}
 }
+
+func TestHydrateWorkspaceArtifactsSkipsGeneratedMemoryContextFiles(t *testing.T) {
+	workspace := t.TempDir()
+	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
+	contextPath := filepath.Join(workspace, "sessions", "manager_recent_voice_context.md")
+	if err := os.MkdirAll(filepath.Dir(memoryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll memory: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(contextPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll sessions: %v", err)
+	}
+	if err := os.WriteFile(memoryPath, []byte("fresh manager memory"), 0o600); err != nil {
+		t.Fatalf("WriteFile memory: %v", err)
+	}
+	if err := os.WriteFile(contextPath, []byte("fresh recent context"), 0o600); err != nil {
+		t.Fatalf("WriteFile context: %v", err)
+	}
+
+	store := fakeHydrationArtifactStore{artifacts: []picokit.WorkspaceArtifact{
+		{RelativePath: "memory/MEMORY.md", Content: "stale artifact memory", ContentType: "text/plain"},
+		{RelativePath: "sessions/manager_recent_voice_context.md", Content: "stale artifact context", ContentType: "text/plain"},
+		{RelativePath: "flower_song.txt", Content: "petals", ContentType: "text/plain"},
+	}}
+
+	written, err := hydrateWorkspaceArtifacts(context.Background(), store, workspace, 10)
+	if err != nil {
+		t.Fatalf("hydrateWorkspaceArtifacts returned error: %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("written = %d, want 1", written)
+	}
+	if data, err := os.ReadFile(memoryPath); err != nil || string(data) != "fresh manager memory" {
+		t.Fatalf("memory file = %q, err=%v", string(data), err)
+	}
+	if data, err := os.ReadFile(contextPath); err != nil || string(data) != "fresh recent context" {
+		t.Fatalf("context file = %q, err=%v", string(data), err)
+	}
+}

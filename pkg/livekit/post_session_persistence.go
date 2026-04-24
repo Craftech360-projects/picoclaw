@@ -64,15 +64,6 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 
 	summary, summaryMessageCount := rs.finalizeAndPersistSessionSummary(bridge)
 
-	endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := rs.sendSessionEnd(endCtx, len(messages)); err != nil {
-		logger.WarnCF("livekit", "Failed to mark manager session ended", map[string]any{
-			"room":  rs.roomName(),
-			"error": err.Error(),
-		})
-	}
-	endCancel()
-
 	if summary != "" {
 		summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := rs.sendSessionSummary(summaryCtx, summary, summaryMessageCount); err != nil {
@@ -89,18 +80,26 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 			"room":     rs.roomName(),
 			"messages": len(messages),
 		})
-		return
+	} else {
+		chatCtx, chatCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := rs.sendChatHistory(chatCtx, messages); err != nil {
+			logger.WarnCF("livekit", "Failed to persist chat history", map[string]any{
+				"room":     rs.roomName(),
+				"error":    err.Error(),
+				"messages": len(messages),
+			})
+		}
+		chatCancel()
 	}
 
-	chatCtx, chatCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if err := rs.sendChatHistory(chatCtx, messages); err != nil {
-		logger.WarnCF("livekit", "Failed to persist chat history", map[string]any{
-			"room":     rs.roomName(),
-			"error":    err.Error(),
-			"messages": len(messages),
+	endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := rs.sendSessionEnd(endCtx, len(messages)); err != nil {
+		logger.WarnCF("livekit", "Failed to mark manager session ended", map[string]any{
+			"room":  rs.roomName(),
+			"error": err.Error(),
 		})
 	}
-	chatCancel()
+	endCancel()
 }
 
 func (rs *RoomSession) sendUsageSummary(ctx context.Context, usage UsageSnapshot) error {

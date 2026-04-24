@@ -121,6 +121,36 @@ func TestHydrateLiveKitWorkspaceSkeletonDoesNotOverwriteMemoryWithEmptyPlacehold
 	}
 }
 
+func TestHydrateLiveKitWorkspaceWritesManagerSessionContext(t *testing.T) {
+	workspace := t.TempDir()
+
+	_, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		SessionContextContent: "# Recent Voice Messages\n\n- user: hello from yesterday",
+	})
+	if err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+
+	path := filepath.Join(workspace, "sessions", "manager_recent_voice_context.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile session context error = %v", err)
+	}
+	if !strings.Contains(string(data), "hello from yesterday") {
+		t.Fatalf("session context file missing restored message: %q", string(data))
+	}
+	if !strings.HasSuffix(string(data), "\n") {
+		t.Fatalf("session context file should end with newline: %q", string(data))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat session context error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("session context mode = %v, want 0600", got)
+	}
+}
+
 func TestHydrateLiveKitWorkspaceSkeletonDoesNotOverwriteAgentWithEmptyIdentity(t *testing.T) {
 	workspace := t.TempDir()
 	agentPath := filepath.Join(workspace, "AGENT.md")

@@ -320,7 +320,7 @@ func main() {
 				})
 			}
 		}
-		if !managerPromptApplied && strings.TrimSpace(renderedIdentity) == "" && strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
+		if strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
 			managerBootstrap, err := fetchManagerWorkspaceBootstrap(
 				context.Background(),
 				lkCfg.ManagerAPI,
@@ -328,18 +328,23 @@ func main() {
 				managerAPIServiceKey(),
 			)
 			if err != nil {
-				logger.WarnCF("livekit", "Manager API workspace bootstrap fallback failed", map[string]any{
+				logger.WarnCF("livekit", "Manager API workspace bootstrap hydration failed", map[string]any{
 					"room":       roomName,
 					"device_mac": deviceMAC,
 					"error":      err.Error(),
 				})
 			} else {
-				hydrationOptions = buildLiveKitWorkspaceHydrationOptionsFromManager(baseWorkspace, managerBootstrap)
-				workspaceBootstrapSource = bootstrapSourceManagerAPIFallback
-				logger.InfoCF("livekit", "Using manager API workspace bootstrap fallback", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-					"agent_name": managerBootstrap.Agent.AgentName,
+				hydrationOptions = mergeManagerHydrationOptions(hydrationOptions, managerBootstrap, baseWorkspace)
+				if workspaceBootstrapSource != bootstrapSourceManagerDBPrompt {
+					workspaceBootstrapSource = bootstrapSourceManagerAPIFallback
+				}
+				logger.InfoCF("livekit", "Merged manager API memory into LiveKit workspace hydration", map[string]any{
+					"room":              roomName,
+					"device_mac":        deviceMAC,
+					"agent_name":        managerBootstrap.Agent.AgentName,
+					"recent_messages":   len(managerBootstrap.RecentMessages),
+					"session_summaries": len(managerBootstrap.SessionSummaries),
+					"recent_sessions":   len(managerBootstrap.RecentSessions),
 				})
 			}
 		} else if !managerPromptApplied && bootstrap.Source == bootstrapSourceRoomMetadata {

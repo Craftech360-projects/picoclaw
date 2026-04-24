@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	protocol "github.com/livekit/protocol/livekit"
+	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 func TestNormalizeMAC(t *testing.T) {
@@ -142,5 +144,87 @@ func TestSendSessionSummaryAndEnd(t *testing.T) {
 	}
 	if endPayload["messageCount"] != float64(4) {
 		t.Fatalf("end messageCount payload = %+v", endPayload)
+	}
+}
+
+type fakeSummaryProvider struct{}
+
+func (fakeSummaryProvider) Chat(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{Content: "Session summary from test."}, nil
+}
+
+func (fakeSummaryProvider) GetDefaultModel() string {
+	return "test-model"
+}
+
+func TestPersistPostSessionDataSavesSummaryAndChatHistoryBeforeSessionEnd(t *testing.T) {
+	var order []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/token-usage":
+			order = append(order, "usage")
+		case "/agent/device/aa:bb:cc:dd:ee:ff/sessions/session-1/summary":
+			order = append(order, "summary")
+		case "/agent/device/aa:bb:cc:dd:ee:ff/sessions/session-1/end":
+			order = append(order, "end")
+		case "/agent/chat-history/session":
+			order = append(order, "chat-history")
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Path != "/device/token-usage" && r.Header.Get("X-Service-Key") != "secret" {
+			t.Fatalf("X-Service-Key header = %q", r.Header.Get("X-Service-Key"))
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	sessionKey := "livekit:device:aabbccddeeff"
+	sessions := session.NewSessionManager("")
+	sessions.AddMessage(sessionKey, "user", "hello")
+	sessions.AddMessage(sessionKey, "assistant", "hi")
+
+	bridge := &AgentBridge{
+		provider: fakeSummaryProvider{},
+		sessions: sessions,
+		historyLog: []PersistedChatMessage{
+			{ChatType: chatTypeUser, Content: "hello", Timestamp: 1},
+			{ChatType: chatTypeAssistant, Content: "hi", Timestamp: 2},
+		},
+	}
+
+	rs := &RoomSession{
+		managerAPIURL:    server.URL,
+		managerAPISecret: "secret",
+		deviceMAC:        "aa:bb:cc:dd:ee:ff",
+		roomInfo:         &protocol.Room{Name: "session-1"},
+	}
+
+	rs.persistPostSessionData(bridge)
+
+	summaryIndex := -1
+	chatHistoryIndex := -1
+	endIndex := -1
+	for i, item := range order {
+		switch item {
+		case "summary":
+			summaryIndex = i
+		case "chat-history":
+			chatHistoryIndex = i
+		case "end":
+			endIndex = i
+		}
+	}
+	if summaryIndex == -1 || endIndex == -1 || summaryIndex > endIndex {
+		t.Fatalf("persistence order = %v, want summary before end", order)
+	}
+	if chatHistoryIndex == -1 || endIndex == -1 || chatHistoryIndex > endIndex {
+		t.Fatalf("persistence order = %v, want chat-history before end", order)
 	}
 }

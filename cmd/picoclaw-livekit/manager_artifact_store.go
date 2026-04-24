@@ -46,6 +46,12 @@ func hydrateWorkspaceArtifacts(ctx context.Context, store picokit.WorkspaceArtif
 		if strings.TrimSpace(artifact.ContentType) != "" && artifact.ContentType != "text/plain" {
 			continue
 		}
+		if isReservedHydrationArtifactPath(artifact.RelativePath) {
+			logger.DebugCF("livekit", "Skipping reserved workspace artifact during hydration", map[string]any{
+				"path": artifact.RelativePath,
+			})
+			continue
+		}
 		target, ok := safeWorkspaceArtifactPath(workspace, artifact.RelativePath)
 		if !ok {
 			logger.WarnCF("livekit", "Skipping unsafe workspace artifact path during hydration", map[string]any{
@@ -62,6 +68,17 @@ func hydrateWorkspaceArtifacts(ctx context.Context, store picokit.WorkspaceArtif
 		written++
 	}
 	return written, nil
+}
+
+func isReservedHydrationArtifactPath(relativePath string) bool {
+	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relativePath)))
+	normalized = strings.TrimPrefix(normalized, "./")
+	switch normalized {
+	case "memory/MEMORY.md", "sessions/manager_recent_voice_context.md":
+		return true
+	default:
+		return false
+	}
 }
 
 func safeWorkspaceArtifactPath(workspace, relativePath string) (string, bool) {
