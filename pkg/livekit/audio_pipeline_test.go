@@ -112,6 +112,47 @@ func TestRunInboundAllowsSameTextAfterNewVADSpeechStart(t *testing.T) {
 	}
 }
 
+func TestRunInboundMergesRepeatedFinalTranscriptChunks(t *testing.T) {
+	results := make(chan stt.TranscriptEvent, 4)
+	vadEvents := make(chan interface{}, 1)
+	stream := &fakeTranscriptionStream{results: results}
+	provider := &countingStreamingProvider{calls: make(chan string, 4)}
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, bridge, nil, vadEvents)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.RunInbound(ctx, stream)
+		close(done)
+	}()
+
+	results <- stt.TranscriptEvent{Text: "No, what about singing a song?", IsFinal: true}
+	results <- stt.TranscriptEvent{Text: "No, what about singing a song?", IsFinal: true, SpeechEnd: true}
+	expectProviderCall(t, provider.calls, "No, what about singing a song?")
+	close(results)
+
+	select {
+	case got := <-provider.calls:
+		t.Fatalf("unexpected duplicate agent call: %q", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunInbound did not exit after results channel closed")
+	}
+}
+
 func TestRunInboundDoesNotCancelTTSOnVADStartWithoutTranscript(t *testing.T) {
 	results := make(chan stt.TranscriptEvent)
 	vadEvents := make(chan interface{})
@@ -181,6 +222,53 @@ func TestRunInboundCancelsTTSWhenTranscriptArrivesAfterVADStart(t *testing.T) {
 	}
 	if !cancelled {
 		t.Fatal("TTS was not cancelled after transcript text arrived")
+	}
+}
+
+func TestRunInboundNewUtteranceCancelsPreviousTurn(t *testing.T) {
+	results := make(chan stt.TranscriptEvent, 8)
+	vadEvents := make(chan interface{}, 8)
+	provider := newBlockingStreamingProvider()
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, bridge, nil, vadEvents)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.RunInbound(ctx, &fakeTranscriptionStream{results: results})
+		close(done)
+	}()
+
+	vadEvents <- vad.VADEvent{SpeechEnd: true}
+	results <- stt.TranscriptEvent{Text: "first question", IsFinal: true, SpeechEnd: true}
+	expectProviderCall(t, provider.started, "first question")
+
+	vadEvents <- vad.VADEvent{SpeechEnd: true}
+	results <- stt.TranscriptEvent{Text: "second question", IsFinal: true, SpeechEnd: true}
+	expectProviderCall(t, provider.started, "second question")
+	expectProviderCall(t, provider.canceled, "first question")
+
+	close(provider.release)
+	close(results)
+
+	select {
+	case got := <-provider.started:
+		t.Fatalf("unexpected extra provider call after superseded turn: %q", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunInbound did not exit after results channel closed")
 	}
 }
 
@@ -311,6 +399,60 @@ func (p *countingStreamingProvider) ChatStream(
 }
 
 func (p *countingStreamingProvider) GetDefaultModel() string { return "test" }
+
+type blockingStreamingProvider struct {
+	started  chan string
+	canceled chan string
+	release  chan struct{}
+}
+
+func newBlockingStreamingProvider() *blockingStreamingProvider {
+	return &blockingStreamingProvider{
+		started:  make(chan string, 4),
+		canceled: make(chan string, 4),
+		release:  make(chan struct{}),
+	}
+}
+
+func (p *blockingStreamingProvider) Chat(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{Content: "ok"}, nil
+}
+
+func (p *blockingStreamingProvider) ChatStream(
+	ctx context.Context,
+	messages []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+	onChunk func(string),
+) (*providers.LLMResponse, error) {
+	userText := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			userText = messages[i].Content
+			p.started <- userText
+			break
+		}
+	}
+	select {
+	case <-ctx.Done():
+		p.canceled <- userText
+		return nil, ctx.Err()
+	case <-p.release:
+		if onChunk != nil {
+			onChunk("finished")
+		}
+		return &providers.LLMResponse{Content: "finished"}, nil
+	}
+}
+
+func (p *blockingStreamingProvider) GetDefaultModel() string { return "test" }
 
 type cancelingStreamingProvider struct {
 	calls int

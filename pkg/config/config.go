@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -875,6 +876,7 @@ type LiveKitServiceConfig struct {
 	TTS          LiveKitServiceTTSConfig        `json:"tts"`
 	STT          LiveKitServiceSTTConfig        `json:"stt"`
 	ManagerAPI   LiveKitServiceManagerAPIConfig `json:"manager_api,omitempty"`
+	Skills       []string                       `json:"skills,omitempty" env:"PICOCLAW_LIVEKIT_SKILLS"`
 	ToolFeedback map[string]string              `json:"tool_feedback,omitempty"`
 	HealthPort   int                            `json:"health_port,omitempty" env:"PICOCLAW_LIVEKIT_HEALTH_PORT"`
 	MaxSessions  int                            `json:"max_sessions,omitempty" env:"PICOCLAW_LIVEKIT_MAX_SESSIONS"`
@@ -1334,6 +1336,7 @@ func LoadConfig(path string) (*Config, error) {
 		logger.Errorf("failed to read config file: %v", err)
 		return nil, err
 	}
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 
 	// First, try to detect config version by reading the version field
 	var versionInfo struct {

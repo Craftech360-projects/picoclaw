@@ -19,9 +19,12 @@ Use the most reliable location match first. For Chinese city names or other non-
 
 ## wttr.in (best for direct city-name queries)
 
+On Windows PowerShell, use `curl.exe` instead of `curl` because `curl` is an alias for `Invoke-WebRequest`.
+
 Quick current conditions:
 ```bash
 curl -s "https://wttr.in/London?format=%l:+%c+%t+%h+%w"
+curl.exe -s "https://wttr.in/London?format=%l:+%c+%t+%h+%w"
 ```
 
 Chinese city example:

@@ -594,6 +594,50 @@ func TestWebTool_WebFetch_PrivateHostBlocked(t *testing.T) {
 	}
 }
 
+func TestWebTool_WebFetchRejectsSearchResultPages(t *testing.T) {
+	tool, err := NewWebFetchTool(50000, format, testFetchLimit)
+	if err != nil {
+		t.Fatalf("Failed to create web fetch tool: %v", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"url": "https://www.google.com/search?q=latest+ipl+team+data",
+	})
+
+	if !result.IsError {
+		t.Fatalf("expected search result page rejection, got success: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "web_search") {
+		t.Fatalf("expected web_search guidance, got %q", result.ForLLM)
+	}
+}
+
+func TestWebTool_DescriptionsSteerFreshDataWorkflow(t *testing.T) {
+	searchTool := &WebSearchTool{}
+	fetchTool := &WebFetchTool{}
+
+	for _, want := range []string{
+		"latest",
+		"time-sensitive",
+		"Do not answer from memory",
+		"fetch",
+	} {
+		if !strings.Contains(searchTool.Description(), want) {
+			t.Fatalf("web_search description missing %q: %s", want, searchTool.Description())
+		}
+	}
+
+	for _, want := range []string{
+		"source page",
+		"Do not use this on search result pages",
+		"web_search first",
+	} {
+		if !strings.Contains(fetchTool.Description(), want) {
+			t.Fatalf("web_fetch description missing %q: %s", want, fetchTool.Description())
+		}
+	}
+}
+
 func TestWebTool_WebFetch_PrivateHostAllowedByExactWhitelist(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

@@ -829,7 +829,7 @@ func (t *WebSearchTool) Name() string {
 }
 
 func (t *WebSearchTool) Description() string {
-	return "Search the web for current information. Returns titles, URLs, and snippets from search results."
+	return "Search the web for current, latest, or time-sensitive information. Returns titles, URLs, and snippets from search results. Do not answer from memory for current facts; use this first, then fetch a result URL with web_fetch when details are needed."
 }
 
 func (t *WebSearchTool) Parameters() map[string]any {
@@ -960,7 +960,7 @@ func (t *WebFetchTool) Name() string {
 }
 
 func (t *WebFetchTool) Description() string {
-	return "Fetch a URL and extract readable content (HTML to text). Use this to get weather info, news, articles, or any web content."
+	return "Fetch a direct source page and extract readable content (HTML to text). Use this after web_search first when verifying latest or time-sensitive facts. Do not use this on search result pages; fetch the real source page from the results instead."
 }
 
 func (t *WebFetchTool) Parameters() map[string]any {
@@ -998,6 +998,10 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 
 	if parsedURL.Host == "" {
 		return ErrorResult("missing domain in URL")
+	}
+
+	if isSearchResultPage(parsedURL) {
+		return ErrorResult("web_fetch cannot verify search result pages reliably. Use web_search first, then web_fetch a real source page URL from the results.")
 	}
 
 	// Lightweight pre-flight: block obvious localhost/literal-IP without DNS resolution.
@@ -1170,6 +1174,30 @@ func looksLikeHTML(body string) bool {
 
 	return strings.HasPrefix(body, "<!doctype") ||
 		strings.HasPrefix(lower, "<html")
+}
+
+func isSearchResultPage(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+
+	host := strings.ToLower(u.Hostname())
+	path := strings.ToLower(strings.TrimRight(u.EscapedPath(), "/"))
+
+	switch {
+	case host == "google.com" || strings.HasSuffix(host, ".google.com"):
+		return path == "/search" && u.Query().Has("q")
+	case host == "bing.com" || strings.HasSuffix(host, ".bing.com"):
+		return path == "/search" && u.Query().Has("q")
+	case host == "duckduckgo.com" || strings.HasSuffix(host, ".duckduckgo.com"):
+		return (path == "" || path == "/" || path == "/html") && u.Query().Has("q")
+	case host == "search.brave.com":
+		return path == "/search" && u.Query().Has("q")
+	case host == "yandex.com" || strings.HasSuffix(host, ".yandex.com"):
+		return path == "/search" && (u.Query().Has("text") || u.Query().Has("q"))
+	}
+
+	return false
 }
 
 func (t *WebFetchTool) extractText(htmlContent string) string {

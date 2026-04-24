@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
@@ -17,6 +18,9 @@ func TestEnsureLiveKitWorkspaceFileToolsAddsRequiredToolsWhenConfigDisablesThem(
 	cfg.Tools.WriteFile.Enabled = false
 	cfg.Tools.ListDir.Enabled = false
 	cfg.Tools.Exec.Enabled = false
+	cfg.Tools.Exec.AllowRemote = false
+	cfg.Tools.Web.Enabled = false
+	cfg.Tools.WebFetch.Enabled = false
 
 	instance := &agent.AgentInstance{
 		Workspace: t.TempDir(),
@@ -30,11 +34,45 @@ func TestEnsureLiveKitWorkspaceFileToolsAddsRequiredToolsWhenConfigDisablesThem(
 			t.Fatalf("%s should be registered for LiveKit workspace agents", name)
 		}
 	}
-	if _, ok := instance.Tools.Get("exec"); ok {
-		t.Fatal("exec should not be forced for LiveKit workspace agents")
+	if _, ok := instance.Tools.Get("exec"); !ok {
+		t.Fatal("exec should be registered for LiveKit active-skill agents")
 	}
-	if len(added) != 3 {
-		t.Fatalf("added len = %d, want 3", len(added))
+	if _, ok := instance.Tools.Get("web_fetch"); !ok {
+		t.Fatal("web_fetch should be registered for LiveKit active-skill agents")
+	}
+	if _, ok := instance.Tools.Get("web_search"); !ok {
+		t.Fatal("web_search should be registered for LiveKit active-skill agents")
+	}
+	if len(added) != 6 {
+		t.Fatalf("added len = %d, want 6", len(added))
+	}
+}
+
+func TestEnsureLiveKitWorkspaceFileToolsAllowsExecFromLiveKitChannel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Enabled = false
+	cfg.Tools.Exec.AllowRemote = false
+
+	instance := &agent.AgentInstance{
+		Workspace: t.TempDir(),
+		Tools:     tools.NewToolRegistry(),
+	}
+
+	ensureLiveKitWorkspaceFileTools(instance, &cfg.Agents.Defaults, cfg)
+
+	execTool, ok := instance.Tools.Get("exec")
+	if !ok {
+		t.Fatal("exec should be registered for LiveKit active-skill agents")
+	}
+	result := execTool.Execute(tools.WithToolContext(context.Background(), "livekit", "session-a"), map[string]any{
+		"action":  "run",
+		"command": "echo livekit-ok",
+	})
+	if result.IsError {
+		t.Fatalf("exec should be allowed from livekit channel, got: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "livekit-ok") {
+		t.Fatalf("exec output missing marker, got: %s", result.ForLLM)
 	}
 }
 

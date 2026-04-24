@@ -232,8 +232,9 @@ func main() {
 		preserveWorkspace := lifecycle.PreserveWorkspace
 
 		agentCfg := &config.AgentConfig{
-			ID:   workspaceIdentity,
-			Name: "LiveKit-" + workspaceIdentity,
+			ID:     workspaceIdentity,
+			Name:   "LiveKit-" + workspaceIdentity,
+			Skills: append([]string(nil), lkCfg.Skills...),
 		}
 
 		// 1. Calculate the workspace path for this job identity exactly like NewAgentInstance.
@@ -366,6 +367,21 @@ func main() {
 					"memory_written":     hydration.MemoryWritten,
 					"skills_copied":      hydration.SkillsCopied,
 				})
+				installedSkills, missingSkills := validateLiveKitActiveSkills(workspace, lkCfg.Skills)
+				logger.InfoCF("livekit", "Validated LiveKit active skills", map[string]any{
+					"room":             roomName,
+					"workspace":        workspace,
+					"active_skills":    lkCfg.Skills,
+					"installed_skills": installedSkills,
+					"missing_skills":   missingSkills,
+				})
+				if len(missingSkills) > 0 {
+					logger.WarnCF("livekit", "LiveKit active skills are missing from workspace", map[string]any{
+						"room":           roomName,
+						"workspace":      workspace,
+						"missing_skills": missingSkills,
+					})
+				}
 			}
 		}
 

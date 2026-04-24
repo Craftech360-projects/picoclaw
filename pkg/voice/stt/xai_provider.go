@@ -107,19 +107,20 @@ func (p *xaiProvider) OpenStream(ctx context.Context, opts StreamOptions) (Trans
 }
 
 type xaiStreamAdapter struct {
-	conn       *websocket.Conn
-	resultChan chan TranscriptEvent
-	closed     chan struct{}
-	closeOnce  sync.Once
-	mu         sync.Mutex
-	ctx        context.Context
-	apiKey     string
-	wsURL      string
-	speaking   bool
-	finalizing bool
-	reconnect  bool
-	pendingPCM []byte
-	finalParts []string
+	conn         *websocket.Conn
+	resultChan   chan TranscriptEvent
+	closed       chan struct{}
+	closeOnce    sync.Once
+	mu           sync.Mutex
+	ctx          context.Context
+	apiKey       string
+	wsURL        string
+	speaking     bool
+	finalizing   bool
+	reconnect    bool
+	pendingPCM   []byte
+	finalParts   []string
+	finalCovered bool
 }
 
 func (s *xaiStreamAdapter) SendAudio(pcm []byte) error {
@@ -240,7 +241,7 @@ func (s *xaiStreamAdapter) readLoop() {
 
 		case "transcript.partial":
 			if msg.IsFinal {
-				s.recordFinalPart(msg.Text)
+				s.recordFinalPart(msg.Text, msg.SpeechFinal)
 			}
 			evt := s.transcriptEvent(msg, msg.IsFinal, msg.SpeechFinal)
 			if evt.Text == "" && !evt.SpeechStart && !evt.SpeechEnd {
@@ -253,14 +254,21 @@ func (s *xaiStreamAdapter) readLoop() {
 			}
 
 		case "transcript.done":
+			skipDoneEvent := false
 			if strings.TrimSpace(msg.Text) == "" {
-				msg.Text = s.stitchedFinalText()
+				if s.finalCovered {
+					skipDoneEvent = true
+				} else {
+					msg.Text = s.stitchedFinalText()
+				}
 			}
-			evt := s.transcriptEvent(msg, true, true)
-			select {
-			case s.resultChan <- evt:
-			case <-s.closed:
-				return
+			if !skipDoneEvent {
+				evt := s.transcriptEvent(msg, true, true)
+				select {
+				case s.resultChan <- evt:
+				case <-s.closed:
+					return
+				}
 			}
 			s.clearFinalParts()
 			if err := s.flushPendingAfterDone(); err != nil {
@@ -284,15 +292,21 @@ func (s *xaiStreamAdapter) readLoop() {
 	}
 }
 
-func (s *xaiStreamAdapter) recordFinalPart(text string) {
+func (s *xaiStreamAdapter) recordFinalPart(text string, speechFinal bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
 	if len(s.finalParts) > 0 && s.finalParts[len(s.finalParts)-1] == text {
+		if speechFinal {
+			s.finalCovered = true
+		}
 		return
 	}
 	s.finalParts = append(s.finalParts, text)
+	if speechFinal {
+		s.finalCovered = true
+	}
 }
 
 func (s *xaiStreamAdapter) stitchedFinalText() string {
@@ -301,6 +315,7 @@ func (s *xaiStreamAdapter) stitchedFinalText() string {
 
 func (s *xaiStreamAdapter) clearFinalParts() {
 	s.finalParts = nil
+	s.finalCovered = false
 }
 
 func (s *xaiStreamAdapter) reconnectStream() error {

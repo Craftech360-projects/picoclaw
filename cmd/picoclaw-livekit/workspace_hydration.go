@@ -8,13 +8,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg"
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 type liveKitWorkspaceHydrationOptions struct {
-	IdentityContent string
-	UserContent     string
-	MemoryContent   string
-	SkillsSourceDir string
+	IdentityContent  string
+	UserContent      string
+	MemoryContent    string
+	SkillsSourceDir  string
+	SkillsSourceDirs []string
 }
 
 type liveKitWorkspaceHydrationResult struct {
@@ -32,6 +36,7 @@ func buildLiveKitWorkspaceHydrationOptions(
 	}
 	if strings.TrimSpace(baseWorkspace) != "" {
 		opts.SkillsSourceDir = filepath.Join(baseWorkspace, "skills")
+		opts.SkillsSourceDirs = liveKitSkillSourceDirs(baseWorkspace)
 	}
 
 	md := bootstrap.Metadata
@@ -114,13 +119,69 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 		}
 	}
 
-	copied, err := copyWorkspaceSkills(opts.SkillsSourceDir, filepath.Join(workspace, "skills"))
+	skillSources := opts.SkillsSourceDirs
+	if len(skillSources) == 0 && strings.TrimSpace(opts.SkillsSourceDir) != "" {
+		skillSources = []string{opts.SkillsSourceDir}
+	}
+	copied, err := copyWorkspaceSkillsFromSources(skillSources, filepath.Join(workspace, "skills"))
 	if err != nil {
 		return result, err
 	}
 	result.SkillsCopied = copied
 
 	return result, nil
+}
+
+func liveKitSkillSourceDirs(baseWorkspace string) []string {
+	sources := []string{}
+	if strings.TrimSpace(baseWorkspace) != "" {
+		sources = append(sources, filepath.Join(baseWorkspace, "skills"))
+	}
+
+	globalConfigDir := getLiveKitGlobalConfigDir()
+	if globalConfigDir != "" {
+		sources = append(sources, filepath.Join(globalConfigDir, "skills"))
+		sources = append(sources, filepath.Join(globalConfigDir, "picoclaw", "skills"))
+	}
+
+	if builtin := strings.TrimSpace(os.Getenv(config.EnvBuiltinSkills)); builtin != "" {
+		sources = append(sources, builtin)
+	} else if wd, err := os.Getwd(); err == nil {
+		sources = append(sources, filepath.Join(wd, "workspace", "skills"))
+		sources = append(sources, filepath.Join(wd, "skills"))
+	}
+
+	return cleanUniquePaths(sources)
+}
+
+func getLiveKitGlobalConfigDir() string {
+	if home := strings.TrimSpace(os.Getenv(config.EnvHome)); home != "" {
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, pkg.DefaultPicoClawHome)
+}
+
+func cleanUniquePaths(paths []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		key := strings.ToLower(clean)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
 }
 
 func writeFileIfMissing(path, content string) error {
@@ -204,6 +265,44 @@ func copyWorkspaceSkills(sourceDir, destinationDir string) (int, error) {
 		return 0, err
 	}
 	return len(copiedSkillDirs), nil
+}
+
+func copyWorkspaceSkillsFromSources(sourceDirs []string, destinationDir string) (int, error) {
+	if len(sourceDirs) == 0 || strings.TrimSpace(destinationDir) == "" {
+		return 0, nil
+	}
+
+	for i := len(sourceDirs) - 1; i >= 0; i-- {
+		if _, err := copyWorkspaceSkills(sourceDirs[i], destinationDir); err != nil {
+			return 0, err
+		}
+	}
+	return countWorkspaceSkills(destinationDir)
+}
+
+func countWorkspaceSkills(skillsDir string) (int, error) {
+	skillsDir = strings.TrimSpace(skillsDir)
+	if skillsDir == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(skillsDir, entry.Name(), "SKILL.md")); err == nil {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func copyFile(source, destination string, perm os.FileMode) error {
@@ -314,4 +413,27 @@ func formatRoomMetadataMemoryContent(md roomMetadata) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+func validateLiveKitActiveSkills(workspace string, activeSkills []string) (installed []string, missing []string) {
+	seen := map[string]struct{}{}
+	for _, skill := range activeSkills {
+		name := strings.TrimSpace(skill)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		skillPath := filepath.Join(workspace, "skills", name, "SKILL.md")
+		if _, err := os.Stat(skillPath); err == nil {
+			installed = append(installed, name)
+		} else {
+			missing = append(missing, name)
+		}
+	}
+	return installed, missing
 }

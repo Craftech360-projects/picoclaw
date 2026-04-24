@@ -205,6 +205,7 @@ func buildLiveKitWorkspaceHydrationOptionsFromManager(
 	}
 	if strings.TrimSpace(baseWorkspace) != "" {
 		opts.SkillsSourceDir = filepath.Join(baseWorkspace, "skills")
+		opts.SkillsSourceDirs = liveKitSkillSourceDirs(baseWorkspace)
 	}
 	return opts
 }

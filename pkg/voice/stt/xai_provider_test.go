@@ -303,7 +303,7 @@ func TestXAIStreamBuffersAudioUntilTranscriptDoneAfterFinalize(t *testing.T) {
 	}
 }
 
-func TestXAIStreamUsesFinalPartialsWhenTranscriptDoneTextIsEmpty(t *testing.T) {
+func TestXAIStreamDoesNotReplaySpeechFinalWhenTranscriptDoneTextIsEmpty(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	errCh := make(chan error, 2)
 
@@ -327,7 +327,7 @@ func TestXAIStreamUsesFinalPartialsWhenTranscriptDoneTextIsEmpty(t *testing.T) {
 			"type":         "transcript.partial",
 			"text":         "stitched final text",
 			"is_final":     true,
-			"speech_final": false,
+			"speech_final": true,
 			"duration":     0.8,
 		}); err != nil {
 			errCh <- err
@@ -365,17 +365,18 @@ func TestXAIStreamUsesFinalPartialsWhenTranscriptDoneTextIsEmpty(t *testing.T) {
 	}
 
 	partial := nextXAIEvent(t, stream.Results())
-	if partial.Text != "stitched final text" || !partial.IsFinal || partial.SpeechEnd {
-		t.Fatalf("partial event = %+v, want final chunk without speech end", partial)
+	if partial.Text != "stitched final text" || !partial.IsFinal || !partial.SpeechEnd {
+		t.Fatalf("partial event = %+v, want speech-final utterance", partial)
 	}
 
 	if err := stream.Finalize(); err != nil {
 		t.Fatalf("Finalize failed: %v", err)
 	}
 
-	done := nextXAIEvent(t, stream.Results())
-	if done.Text != "stitched final text" || !done.IsFinal || !done.SpeechEnd {
-		t.Fatalf("done event = %+v, want stitched final text with speech end", done)
+	select {
+	case done := <-stream.Results():
+		t.Fatalf("unexpected replayed transcript.done event after covered speech-final: %+v", done)
+	case <-time.After(150 * time.Millisecond):
 	}
 
 	select {

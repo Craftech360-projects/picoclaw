@@ -183,3 +183,60 @@ func TestBuildLiveKitWorkspaceHydrationOptionsUsesRoomMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestHydrateLiveKitWorkspaceSkeletonCopiesSkillsFromFallbackSources(t *testing.T) {
+	workspace := t.TempDir()
+	tmp := t.TempDir()
+	baseSkills := filepath.Join(tmp, "base", "skills")
+	globalSkills := filepath.Join(tmp, "global-skills")
+	builtinSkills := filepath.Join(tmp, "builtin-skills")
+
+	mustWriteFile(t, filepath.Join(globalSkills, "weather", "SKILL.md"), "# Weather\n\nglobal weather")
+	mustWriteFile(t, filepath.Join(builtinSkills, "agent-browser", "SKILL.md"), "# Browser\n\nbuiltin browser")
+	mustWriteFile(t, filepath.Join(builtinSkills, "weather", "SKILL.md"), "# Weather\n\nbuiltin weather")
+
+	result, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		SkillsSourceDirs: []string{baseSkills, globalSkills, builtinSkills},
+	})
+	if err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+	if result.SkillsCopied != 2 {
+		t.Fatalf("SkillsCopied = %d, want 2", result.SkillsCopied)
+	}
+
+	weather, err := os.ReadFile(filepath.Join(workspace, "skills", "weather", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(weather) error = %v", err)
+	}
+	if !strings.Contains(string(weather), "global weather") {
+		t.Fatalf("weather should prefer global over builtin, got %q", string(weather))
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "skills", "agent-browser", "SKILL.md")); err != nil {
+		t.Fatalf("expected fallback builtin skill: %v", err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateLiveKitActiveSkillsReportsMissingSkills(t *testing.T) {
+	workspace := t.TempDir()
+	mustWriteFile(t, filepath.Join(workspace, "skills", "weather", "SKILL.md"), "---\nname: weather\n---\n# Weather\n")
+
+	installed, missing := validateLiveKitActiveSkills(workspace, []string{"weather", "agent-browser", "weather"})
+
+	if got, want := strings.Join(installed, ","), "weather"; got != want {
+		t.Fatalf("installed = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(missing, ","), "agent-browser"; got != want {
+		t.Fatalf("missing = %q, want %q", got, want)
+	}
+}

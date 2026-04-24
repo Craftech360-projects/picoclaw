@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/livekit/media-sdk"
@@ -38,6 +39,30 @@ func sanitizeVoiceTextForTTS(text string) string {
 
 func normalizeUtteranceForDuplicateCheck(text string) string {
 	return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(text), " ")))
+}
+
+func mergeFinalTranscriptChunk(current, next string) string {
+	current = strings.TrimSpace(current)
+	next = strings.TrimSpace(next)
+	if next == "" {
+		return current
+	}
+	if current == "" {
+		return next
+	}
+
+	normalizedCurrent := normalizeUtteranceForDuplicateCheck(current)
+	normalizedNext := normalizeUtteranceForDuplicateCheck(next)
+	switch {
+	case normalizedNext == normalizedCurrent:
+		return current
+	case strings.HasPrefix(normalizedNext, normalizedCurrent):
+		return next
+	case strings.HasPrefix(normalizedCurrent, normalizedNext):
+		return current
+	default:
+		return current + " " + next
+	}
 }
 
 type speechChunkDeduper struct {
@@ -145,6 +170,60 @@ type AudioPipeline struct {
 	tts             tts.Provider
 	vadEvent        <-chan interface{}
 	primaryLanguage string // used for language-aware error fallback phrases
+	turns           voiceTurnController
+}
+
+type voiceTurnController struct {
+	mu     sync.Mutex
+	nextID uint64
+	active voiceTurn
+}
+
+type voiceTurn struct {
+	id     uint64
+	ctx    context.Context
+	cancel context.CancelFunc
+	reason string
+}
+
+func (c *voiceTurnController) Start(parent context.Context, reason string) voiceTurn {
+	if parent == nil {
+		parent = context.Background()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active.cancel != nil {
+		c.active.reason = reason
+		c.active.cancel()
+	}
+	c.nextID++
+	ctx, cancel := context.WithCancel(parent)
+	c.active = voiceTurn{id: c.nextID, ctx: ctx, cancel: cancel}
+	return c.active
+}
+
+func (c *voiceTurnController) Cancel(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active.cancel == nil {
+		return
+	}
+	c.active.reason = reason
+	c.active.cancel()
+}
+
+func (c *voiceTurnController) IsActive(turn voiceTurn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return turn.id != 0 && c.active.id == turn.id && c.active.cancel != nil
+}
+
+func (c *voiceTurnController) Finish(turn voiceTurn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if turn.id != 0 && c.active.id == turn.id {
+		c.active = voiceTurn{}
+	}
 }
 
 func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
@@ -201,6 +280,11 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 
 	// Build the chunk/done callbacks once; they close over splitter & firstChunkReceived.
 	onChunk := func(chunk string) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		if !firstChunkReceived {
 			firstChunkReceived = true
 			if ap.session != nil {
@@ -219,6 +303,11 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		}
 	}
 	onDoneCallback := func() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		// onDone is called when the LLM turn is finished (including async tools)
 		if fillerCancel != nil {
 			fillerCancel()
@@ -304,6 +393,20 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	return asyncPending, nil
 }
 
+func (ap *AudioPipeline) HandleUtteranceForTurn(turn voiceTurn, sessionKey string, text string) (bool, error) {
+	asyncPending, err := ap.HandleUtterance(turn.ctx, sessionKey, text, func() {
+		if !ap.turns.IsActive(turn) {
+			return
+		}
+		turn.cancel()
+		ap.turns.Finish(turn)
+	})
+	if !asyncPending {
+		ap.turns.Finish(turn)
+	}
+	return asyncPending, err
+}
+
 // TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
 // It bypasses the user speech wait loop and talks directly into the TTS pipeline.
 // retryFallbackPhrase returns a child-friendly "I glitched, say again" phrase
@@ -338,30 +441,41 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 	})
 
 	ap.session.PublishAgentState("listening", "thinking")
+	turn := ap.turns.Start(ctx, "greeting")
+	ap.setTTSCancel(turn.cancel)
 	firstChunkReceived := false
 	splitter := newSentenceSplitter()
 	speechDeduper := &speechChunkDeduper{}
 
 	go func() {
-		err := ap.bridge.GenerateGreeting(ctx, sessionKey, func(chunk string) {
+		err := ap.bridge.GenerateGreeting(turn.ctx, sessionKey, func(chunk string) {
+			if !ap.turns.IsActive(turn) {
+				return
+			}
 			if !firstChunkReceived {
 				firstChunkReceived = true
 				ap.session.PublishAgentState("thinking", "speaking")
 			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
-					ap.synthesizeDeduped(ctx, speechDeduper, sentence)
+					ap.synthesizeDeduped(turn.ctx, speechDeduper, sentence)
 				}
 			}
 		}, func() {
-			if remainder := splitter.Flush(); remainder != "" {
-				ap.synthesizeDeduped(ctx, speechDeduper, remainder)
+			if !ap.turns.IsActive(turn) {
+				return
 			}
-			ap.flushSilence(500)
+			if remainder := splitter.Flush(); remainder != "" {
+				ap.synthesizeDeduped(turn.ctx, speechDeduper, remainder)
+			}
+			ap.flushSilenceForContext(turn.ctx, 500)
 			ap.session.PublishAgentState("speaking", "listening")
+			turn.cancel()
+			ap.turns.Finish(turn)
 		})
 
 		if err != nil {
+			ap.turns.Finish(turn)
 			logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
 				"session": sessionKey,
 				"error":   err.Error(),
@@ -465,11 +579,11 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			return
 		}
 
-		ttsCtx, ttsCancel := context.WithCancel(context.Background())
-		ap.setTTSCancel(ttsCancel)
+		turn := ap.turns.Start(ctx, "new_user_utterance")
+		ap.setTTSCancel(turn.cancel)
 
 		go func() {
-			_, _ = ap.HandleUtterance(ttsCtx, sessionKey, text, ttsCancel)
+			_, _ = ap.HandleUtteranceForTurn(turn, sessionKey, text)
 		}()
 	}
 
@@ -538,13 +652,15 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 						"text":    evt.Text,
 					})
 					ap.cancelTTS("stt_transcript_after_vad")
+					ap.turns.Cancel("stt_transcript_after_vad")
 					pendingBargeIn = false
 				}
 			}
 
 			if evt.IsFinal && evt.Text != "" {
-				utterance.WriteString(evt.Text)
-				utterance.WriteString(" ")
+				merged := mergeFinalTranscriptChunk(utterance.String(), evt.Text)
+				utterance.Reset()
+				utterance.WriteString(merged)
 			}
 
 			if evt.SpeechEnd || (vadSpeechEnded && utterance.Len() > 0) {
@@ -613,8 +729,8 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		"session": sessionKey,
 	})
 
-	ttsCtx, ttsCancel := context.WithCancel(context.Background())
-	ap.setTTSCancel(ttsCancel)
+	turn := ap.turns.Start(context.Background(), "background_task_result")
+	ap.setTTSCancel(turn.cancel)
 
 	splitter := newSentenceSplitter()
 	speechDeduper := &speechChunkDeduper{}
@@ -625,7 +741,10 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		}
 		firstChunkReceived := false
 
-		err := ap.bridge.GenerateSpontaneousResponse(ttsCtx, sessionKey, evt, func(chunk string) {
+		err := ap.bridge.GenerateSpontaneousResponse(turn.ctx, sessionKey, evt, func(chunk string) {
+			if !ap.turns.IsActive(turn) {
+				return
+			}
 			if !firstChunkReceived {
 				firstChunkReceived = true
 				if ap.session != nil {
@@ -635,26 +754,31 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
-					ap.synthesizeDeduped(ttsCtx, speechDeduper, sentence)
+					ap.synthesizeDeduped(turn.ctx, speechDeduper, sentence)
 				}
 			}
 		}, func() {
-			if remainder := splitter.Flush(); remainder != "" {
-				ap.synthesizeDeduped(ttsCtx, speechDeduper, remainder)
+			if !ap.turns.IsActive(turn) {
+				return
 			}
-			ap.flushSilence(500) // trailing silence for spontaneous replies
+			if remainder := splitter.Flush(); remainder != "" {
+				ap.synthesizeDeduped(turn.ctx, speechDeduper, remainder)
+			}
+			ap.flushSilenceForContext(turn.ctx, 500) // trailing silence for spontaneous replies
 			if ap.session != nil {
 				ap.session.PublishAgentState("speaking", "listening")
 			}
-			ttsCancel()
+			turn.cancel()
+			ap.turns.Finish(turn)
 		})
 		if err != nil {
+			ap.turns.Finish(turn)
 			logger.ErrorCF("livekit", "Spontaneous response generation failed", map[string]any{
 				"error":   err.Error(),
 				"tool":    evt.ToolName,
 				"session": sessionKey,
 			})
-			ttsCancel()
+			turn.cancel()
 		}
 	}()
 }
@@ -902,6 +1026,15 @@ func sampleStats(samples media.PCM16Sample) (int16, int16, int) {
 
 // flushSilence pushes empty audio samples to ensure the end of speech is not cut off by network or device buffers.
 func (ap *AudioPipeline) flushSilence(durationMs int) {
+	ap.flushSilenceForContext(context.Background(), durationMs)
+}
+
+func (ap *AudioPipeline) flushSilenceForContext(ctx context.Context, durationMs int) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 	if ap.session == nil || ap.session.localTrack == nil {
 		return
 	}

@@ -376,8 +376,9 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 
 func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text, sessionKey string) []providers.Message {
 	var messages []providers.Message
+	activeSkills := ab.activeSkillNames()
 	if ab.contextBuilder != nil {
-		messages = ab.contextBuilder.BuildMessages(history, summary, text, nil, "livekit", sessionKey, "", "")
+		messages = ab.contextBuilder.BuildMessages(history, summary, text, nil, "livekit", sessionKey, "", "", activeSkills...)
 	} else {
 		messages = []providers.Message{}
 		if summary != "" {
@@ -405,7 +406,12 @@ CRITICAL RULES FOR VOICE:
 2. NEVER read out long content (songs, code, poems, lists, file contents) aloud. Instead, silently write it to a file using tools and tell the user where you saved it.
 3. NEVER use markdown formatting (**, *, #, backticks, bullet points). Speak in plain natural language.
 4. When using tools like write_file or spawn, do NOT narrate or preview the content. Just do it and briefly confirm.
-5. Avoid reading file paths character by character. Say "I saved it to your workspace" instead.`,
+5. Avoid reading file paths character by character. Say "I saved it to your workspace" instead.
+6. If an active skill shows shell commands or curl examples, call the exec tool directly with action=run. Do not write shell scripts unless the user explicitly asks you to create a script file.
+7. On Windows, use curl.exe instead of curl so PowerShell does not invoke its curl alias.
+8. For current or time-sensitive facts such as latest, today, yesterday, 2026 data, scores, schedules, rosters, rankings, weather, news, prices, or team data: do not answer from memory. Use web_search, web_fetch on a real source page, or exec against a reliable live endpoint.
+9. Do not use web_fetch on search result pages like Google search as evidence. Use web_search first, then fetch a real source page from the results.
+10. If tools fail, return blocked, or provide too little evidence, say you could not verify it instead of guessing.`,
 	}
 
 	// Insert voice directive right after the first system message (if any)
@@ -428,6 +434,28 @@ CRITICAL RULES FOR VOICE:
 	}
 
 	return messages
+}
+
+func (ab *AgentBridge) activeSkillNames() []string {
+	if ab == nil || ab.agentInstance == nil || len(ab.agentInstance.SkillsFilter) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(ab.agentInstance.SkillsFilter))
+	seen := map[string]struct{}{}
+	for _, name := range ab.agentInstance.SkillsFilter {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 func (ab *AgentBridge) toolDefs() []providers.ToolDefinition {

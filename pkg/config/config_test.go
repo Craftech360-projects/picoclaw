@@ -514,6 +514,19 @@ func TestLoadConfig_ToolFeedbackDefaultsFalseWhenUnset(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	data := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"version":1,"agents":{"defaults":{"workspace":"./workspace"}}}`)...)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if _, err := LoadConfig(configPath); err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+}
+
 func TestLoadConfig_WebPreferNativeDefaultsTrueWhenUnset(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
