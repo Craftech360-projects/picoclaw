@@ -165,12 +165,13 @@ func (s *sentenceSplitter) Flush() string {
 
 // AudioPipeline coordinates STT -> Agent -> TTS for one participant in a room.
 type AudioPipeline struct {
-	session         *RoomSession
-	bridge          *AgentBridge
-	tts             tts.Provider
-	vadEvent        <-chan interface{}
-	primaryLanguage string // used for language-aware error fallback phrases
-	turns           voiceTurnController
+	session              *RoomSession
+	bridge               *AgentBridge
+	tts                  tts.Provider
+	vadEvent             <-chan interface{}
+	primaryLanguage      string // used for language-aware error fallback phrases
+	turns                voiceTurnController
+	publishSpeechCreated func()
 }
 
 type voiceTurnController struct {
@@ -231,13 +232,19 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 	if session != nil {
 		lang = session.primaryLanguage
 	}
-	return &AudioPipeline{
+	ap := &AudioPipeline{
 		session:         session,
 		bridge:          bridge,
 		tts:             tts,
 		vadEvent:        vadEvent,
 		primaryLanguage: lang,
 	}
+	ap.publishSpeechCreated = func() {
+		if ap.session != nil {
+			_ = ap.session.PublishSpeechCreated("")
+		}
+	}
+	return ap
 }
 
 // HandleUtterance processes a complete user utterance: calls the agent and speaks the response.
@@ -289,7 +296,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 			firstChunkReceived = true
 			if ap.session != nil {
 				ap.session.PublishAgentState("thinking", "speaking")
-				ap.session.PublishSpeechCreated("")
+				ap.publishSpeechCreated()
 			}
 			if fillerCancel != nil {
 				fillerCancel()                       // Cancel filler if LLM starts responding quickly
@@ -455,6 +462,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			if !firstChunkReceived {
 				firstChunkReceived = true
 				ap.session.PublishAgentState("thinking", "speaking")
+				ap.publishSpeechCreated()
 			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
@@ -749,7 +757,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 				firstChunkReceived = true
 				if ap.session != nil {
 					ap.session.PublishAgentState("thinking", "speaking")
-					ap.session.PublishSpeechCreated("")
+					ap.publishSpeechCreated()
 				}
 			}
 			for _, r := range chunk {

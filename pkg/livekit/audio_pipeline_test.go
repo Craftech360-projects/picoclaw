@@ -299,6 +299,31 @@ func TestHandleUtteranceDoesNotRetryCanceledChatStream(t *testing.T) {
 	}
 }
 
+func TestTriggerGreetingPublishesSpeechCreatedOnFirstChunk(t *testing.T) {
+	provider := &countingStreamingProvider{calls: make(chan string, 4)}
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, bridge, nil, nil)
+	speechCreated := make(chan struct{}, 1)
+	pipeline.publishSpeechCreated = func() {
+		speechCreated <- struct{}{}
+	}
+
+	pipeline.TriggerGreeting(context.Background(), "livekit:device:a")
+
+	select {
+	case <-speechCreated:
+	case <-time.After(time.Second):
+		t.Fatal("greeting did not publish speech_created on first assistant chunk")
+	}
+}
+
 func TestCancelTTSRecordsBargeInReason(t *testing.T) {
 	cancelled := false
 	pipeline := NewAudioPipeline(&RoomSession{
