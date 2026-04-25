@@ -65,6 +65,10 @@ type usageState struct {
 	outputTextTokens            int
 }
 
+type MCPManager interface {
+	Close() error
+}
+
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
 	agentInstance      *agent.AgentInstance
@@ -80,6 +84,7 @@ type AgentBridge struct {
 	llmOptions         map[string]any
 	asyncEventChan     chan AsyncEvent // receives background task completions
 	workspaceArtifacts WorkspaceArtifactStore
+	mcpManager         MCPManager
 
 	// summarization config
 	summarizeMessageThreshold int
@@ -103,6 +108,7 @@ type AgentBridgeConfig struct {
 	LLMOptions         map[string]any
 	AsyncEventChan     chan AsyncEvent // optional channel for background task results
 	WorkspaceArtifacts WorkspaceArtifactStore
+	MCPManager         MCPManager
 	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
 	// Defaults to 20 if zero.
 	SummarizeMessageThreshold int
@@ -141,6 +147,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		llmOptions:                cfg.LLMOptions,
 		asyncEventChan:            asyncChan,
 		workspaceArtifacts:        cfg.WorkspaceArtifacts,
+		mcpManager:                cfg.MCPManager,
 		summarizeMessageThreshold: summarizeThreshold,
 		contextWindow:             ctxWindow,
 	}
@@ -157,6 +164,13 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 // Close gracefully releases the session memory store and conditionally cleans
 // the active workspace.
 func (ab *AgentBridge) Close() {
+	if ab.mcpManager != nil {
+		if err := ab.mcpManager.Close(); err != nil {
+			logger.WarnCF("livekit", "Failed to close MCP manager",
+				map[string]any{"error": err.Error()})
+		}
+		ab.mcpManager = nil
+	}
 	if ab.agentInstance != nil {
 		ab.agentInstance.Close()
 		// Default behavior is ephemeral cleanup unless persistence is requested.

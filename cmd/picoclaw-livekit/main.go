@@ -444,6 +444,16 @@ func main() {
 				"tools":              added,
 			})
 		}
+		mcpManager, err := agent.RegisterMCPToolsForInstances(
+			context.Background(),
+			cfg,
+			agentInstance.Workspace,
+			agentInstance,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing MCP tools for LiveKit agent: %v\n", err)
+			return nil
+		}
 
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
 			Config:             cfg,
@@ -453,8 +463,12 @@ func main() {
 			PreserveWorkspace:  preserveWorkspace,
 			MaxIterations:      cfg.Agents.Defaults.MaxToolIterations,
 			WorkspaceArtifacts: artifactStore,
+			MCPManager:         mcpManager,
 		})
 		if err != nil {
+			if mcpManager != nil {
+				_ = mcpManager.Close()
+			}
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
 			return nil
 		}

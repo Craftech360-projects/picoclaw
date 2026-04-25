@@ -8,6 +8,15 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 )
 
+type fakeBridgeCloser struct {
+	closed bool
+}
+
+func (f *fakeBridgeCloser) Close() error {
+	f.closed = true
+	return nil
+}
+
 func TestAgentBridgeCloseDeletesWorkspaceByDefault(t *testing.T) {
 	base := t.TempDir()
 	workspace := filepath.Join(base, "workspace-default")
@@ -44,5 +53,19 @@ func TestAgentBridgeClosePreservesWorkspaceWhenConfigured(t *testing.T) {
 
 	if _, err := os.Stat(workspace); err != nil {
 		t.Fatalf("workspace should be preserved, stat err = %v", err)
+	}
+}
+
+func TestAgentBridgeCloseClosesMCPManager(t *testing.T) {
+	closer := &fakeBridgeCloser{}
+
+	ab := &AgentBridge{
+		agentInstance: &agent.AgentInstance{},
+		mcpManager:    closer,
+	}
+	ab.Close()
+
+	if !closer.closed {
+		t.Fatal("expected AgentBridge.Close to close MCP manager")
 	}
 }
