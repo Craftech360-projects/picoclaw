@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"text/template"
+	"time"
 
 	"github.com/joho/godotenv"
 	livekitproto "github.com/livekit/protocol/livekit"
@@ -408,6 +409,15 @@ func main() {
 				})
 			}
 		}
+		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && agentInstance.Workspace != "" {
+			if err := downloadWorkspaceFiles(context.Background(), lkCfg.ManagerAPI, deviceMAC, agentInstance.Workspace); err != nil {
+				logger.WarnCF("livekit", "workspace-files download from manager failed", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+			}
+		}
 		if managerStore := buildManagerSessionStore(lkCfg, deviceMAC, persistentAgentID, roomName); managerStore != nil {
 			if agentInstance.Sessions != nil {
 				_ = agentInstance.Sessions.Close()
@@ -464,6 +474,20 @@ func main() {
 			MaxIterations:      cfg.Agents.Defaults.MaxToolIterations,
 			WorkspaceArtifacts: artifactStore,
 			MCPManager:         mcpManager,
+			OnClose: func() {
+				if strings.TrimSpace(deviceMAC) == "" || managerAPIBaseURL(lkCfg.ManagerAPI) == "" || workspace == "" {
+					return
+				}
+				uploadCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := uploadWorkspaceFiles(uploadCtx, lkCfg.ManagerAPI, deviceMAC, workspace); err != nil {
+					logger.WarnCF("livekit", "workspace-files upload to manager failed", map[string]any{
+						"room":       roomName,
+						"device_mac": deviceMAC,
+						"error":      err.Error(),
+					})
+				}
+			},
 		})
 		if err != nil {
 			if mcpManager != nil {

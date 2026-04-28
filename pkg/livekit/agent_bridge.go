@@ -76,6 +76,7 @@ type AgentBridge struct {
 	provider           providers.LLMProvider
 	streamProvider     providers.StreamingProvider
 	preserveWorkspace  bool
+	onClose            func()
 	modelID            string
 	sessions           session.SessionStore
 	tools              *tools.ToolRegistry
@@ -104,6 +105,7 @@ type AgentBridgeConfig struct {
 	ModelID            string
 	AgentInstance      *agent.AgentInstance
 	PreserveWorkspace  bool
+	OnClose            func()
 	MaxIterations      int
 	LLMOptions         map[string]any
 	AsyncEventChan     chan AsyncEvent // optional channel for background task results
@@ -140,6 +142,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		provider:                  cfg.Provider,
 		modelID:                   cfg.ModelID,
 		preserveWorkspace:         cfg.PreserveWorkspace,
+		onClose:                   cfg.OnClose,
 		sessions:                  cfg.AgentInstance.Sessions,
 		tools:                     cfg.AgentInstance.Tools,
 		contextBuilder:            cfg.AgentInstance.ContextBuilder,
@@ -173,6 +176,10 @@ func (ab *AgentBridge) Close() {
 	}
 	if ab.agentInstance != nil {
 		ab.agentInstance.Close()
+		// Run OnClose before workspace deletion so callbacks can still read files.
+		if ab.onClose != nil {
+			ab.onClose()
+		}
 		// Default behavior is ephemeral cleanup unless persistence is requested.
 		if !ab.preserveWorkspace && ab.agentInstance.Workspace != "" {
 			os.RemoveAll(ab.agentInstance.Workspace)
