@@ -275,10 +275,6 @@ func formatManagerIdentityContent(bootstrap managerWorkspaceBootstrap) string {
 		sb.WriteString(agentName)
 		sb.WriteString(".\n\n")
 	}
-	if systemPrompt := strings.TrimSpace(bootstrap.Agent.SystemPrompt); systemPrompt != "" {
-		sb.WriteString(systemPrompt)
-		sb.WriteString("\n\n")
-	}
 	if bootstrap.ChildProfile != nil && strings.TrimSpace(bootstrap.ChildProfile.Name) != "" {
 		sb.WriteString("## Active Child\n\n")
 		sb.WriteString("- Name: ")

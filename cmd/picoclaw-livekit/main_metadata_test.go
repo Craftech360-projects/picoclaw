@@ -48,3 +48,24 @@ func TestResolveLiveKitJobBootstrapContextFallsBackToJobMetadata(t *testing.T) {
 	}
 }
 
+func TestLooksLikeUnrenderedTemplate(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{name: "plain text", prompt: "Be kind and funny.", want: false},
+		{name: "jinja variable", prompt: "Hello {{ child_name }}", want: true},
+		{name: "jinja block", prompt: "{% if child_name %}Hi{% endif %}", want: true},
+		{name: "blank", prompt: "   ", want: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if got := looksLikeUnrenderedTemplate(tt.prompt); got != tt.want {
+				t.Fatalf("looksLikeUnrenderedTemplate(%q) = %v, want %v", tt.prompt, got, tt.want)
+			}
+		})
+	}
+}

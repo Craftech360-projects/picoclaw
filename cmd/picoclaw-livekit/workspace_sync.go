@@ -22,12 +22,21 @@ type workspaceFileEntry struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
+const workspaceAgentDisplayName = "AGENT.md"
+
 var workspaceDiskPaths = map[string]string{
-	"IDENTITY.md":  "IDENTITY.md",
-	"USER.md":      "USER.md",
-	"SOUL.md":      "SOUL.md",
-	"HEARTBEAT.md": "HEARTBEAT.md",
-	"MEMORY.md":    filepath.Join("memory", "MEMORY.md"),
+	workspaceAgentDisplayName: "AGENT.md",
+	"USER.md":                 "USER.md",
+	"SOUL.md":                 "SOUL.md",
+	"HEARTBEAT.md":            "HEARTBEAT.md",
+	"MEMORY.md":               filepath.Join("memory", "MEMORY.md"),
+}
+
+func workspaceDiskMode(diskPath string) os.FileMode {
+	if filepath.Clean(diskPath) == filepath.Join("memory", "MEMORY.md") {
+		return 0o600
+	}
+	return 0o644
 }
 
 func downloadWorkspaceFiles(
@@ -94,7 +103,8 @@ func downloadWorkspaceFiles(
 			})
 			continue
 		}
-		if err := os.WriteFile(target, []byte(entry.Content), 0o644); err != nil {
+		mode := workspaceDiskMode(diskPath)
+		if err := os.WriteFile(target, []byte(entry.Content), mode); err != nil {
 			logger.WarnCF("livekit", "workspace-files: failed to write file", map[string]any{
 				"path":  diskPath,
 				"error": err.Error(),
@@ -132,7 +142,6 @@ func uploadWorkspaceFiles(
 		}
 		payload[displayName] = string(data)
 	}
-
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err

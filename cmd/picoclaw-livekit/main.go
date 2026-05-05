@@ -291,36 +291,6 @@ func main() {
 			}
 		}
 		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, renderedIdentity)
-		managerPromptApplied := false
-		if strings.TrimSpace(deviceMAC) != "" {
-			managerPrompt, err := fetchManagerPromptConfig(
-				context.Background(),
-				lkCfg.ManagerAPI,
-				deviceMAC,
-			)
-			if err != nil {
-				logger.WarnCF("livekit", "Manager API system prompt fetch failed", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-					"error":      err.Error(),
-				})
-			} else if prompt := strings.TrimSpace(managerPrompt.SystemPrompt); prompt != "" {
-				hydrationOptions.IdentityContent = prompt
-				workspaceBootstrapSource = bootstrapSourceManagerDBPrompt
-				managerPromptApplied = true
-				logger.InfoCF("livekit", "Using manager API system prompt for LiveKit bootstrap", map[string]any{
-					"room":         roomName,
-					"device_mac":   deviceMAC,
-					"agent_name":   managerPrompt.AgentName,
-					"prompt_chars": len(prompt),
-				})
-			} else {
-				logger.WarnCF("livekit", "Manager API system prompt was empty", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-				})
-			}
-		}
 		if strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
 			managerBootstrap, err := fetchManagerWorkspaceBootstrap(
 				context.Background(),
@@ -336,9 +306,7 @@ func main() {
 				})
 			} else {
 				hydrationOptions = mergeManagerHydrationOptions(hydrationOptions, managerBootstrap, baseWorkspace)
-				if workspaceBootstrapSource != bootstrapSourceManagerDBPrompt {
-					workspaceBootstrapSource = bootstrapSourceManagerAPIFallback
-				}
+				workspaceBootstrapSource = bootstrapSourceManagerAPIFallback
 				logger.InfoCF("livekit", "Merged manager API memory into LiveKit workspace hydration", map[string]any{
 					"room":              roomName,
 					"device_mac":        deviceMAC,
@@ -348,7 +316,7 @@ func main() {
 					"recent_sessions":   len(managerBootstrap.RecentSessions),
 				})
 			}
-		} else if !managerPromptApplied && bootstrap.Source == bootstrapSourceRoomMetadata {
+		} else if bootstrap.Source == bootstrapSourceRoomMetadata {
 			workspaceBootstrapSource = bootstrap.Source
 		}
 		if workspace != "" {
@@ -390,6 +358,25 @@ func main() {
 				}
 			}
 		}
+		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
+			if err := downloadWorkspaceFiles(context.Background(), lkCfg.ManagerAPI, deviceMAC, workspace); err != nil {
+				logger.WarnCF("livekit", "workspace-files post-hydration download from manager failed", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+			} else if userContent := strings.TrimSpace(hydrationOptions.UserContent); userContent != "" {
+				userPath := filepath.Join(workspace, "USER.md")
+				if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
+					logger.WarnCF("livekit", "Failed to reapply USER.md from room metadata child profile", map[string]any{
+						"room":       roomName,
+						"device_mac": deviceMAC,
+						"path":       userPath,
+						"error":      err.Error(),
+					})
+				}
+			}
+		}
 
 		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
 		artifactStore := buildManagerArtifactStore(lkCfg, deviceMAC)
@@ -406,15 +393,6 @@ func main() {
 					"room":       roomName,
 					"device_mac": deviceMAC,
 					"count":      hydrated,
-				})
-			}
-		}
-		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && agentInstance.Workspace != "" {
-			if err := downloadWorkspaceFiles(context.Background(), lkCfg.ManagerAPI, deviceMAC, agentInstance.Workspace); err != nil {
-				logger.WarnCF("livekit", "workspace-files download from manager failed", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-					"error":      err.Error(),
 				})
 			}
 		}
@@ -634,6 +612,14 @@ func configureGoogleCredentials(cfg *config.Config, cfgPath string) {
 	logger.InfoCF("livekit", "Configured Google credentials file from config", map[string]any{
 		"path": credPath,
 	})
+}
+
+func looksLikeUnrenderedTemplate(prompt string) bool {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return false
+	}
+	return strings.Contains(prompt, "{{") || strings.Contains(prompt, "{%")
 }
 
 func buildSTTProvider(factory *stt.Factory) stt.Provider {

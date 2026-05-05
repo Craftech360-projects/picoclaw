@@ -92,7 +92,7 @@ func TestFetchManagerWorkspaceBootstrapUsesServiceKeyAndMapsHydrationOptions(t *
 
 	opts := buildLiveKitWorkspaceHydrationOptionsFromManager("C:\\base\\workspace", bootstrap)
 
-	for _, want := range []string{"Cheeko", "Be playful and kind", "Rahul", "Hindi"} {
+	for _, want := range []string{"Cheeko", "Rahul", "Hindi"} {
 		if !strings.Contains(opts.IdentityContent, want) {
 			t.Fatalf("IdentityContent missing %q: %q", want, opts.IdentityContent)
 		}

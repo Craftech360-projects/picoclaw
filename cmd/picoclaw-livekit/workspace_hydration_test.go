@@ -52,7 +52,6 @@ func TestHydrateLiveKitWorkspaceSkeletonCreatesPromptAdvertisedPaths(t *testing.
 
 	for _, rel := range []string{
 		"AGENT.md",
-		"IDENTITY.md",
 		"USER.md",
 		"SOUL.md",
 		"HEARTBEAT.md",
@@ -212,6 +211,110 @@ func TestBuildLiveKitWorkspaceHydrationOptionsUsesRoomMetadata(t *testing.T) {
 			t.Fatalf("MemoryContent missing %q: %q", want, opts.MemoryContent)
 		}
 	}
+}
+
+func TestBuildLiveKitWorkspaceHydrationOptionsBuildsIdentityFromChildProfileFallback(t *testing.T) {
+	baseWorkspace := filepath.Join(t.TempDir(), "workspace")
+	bootstrap := roomMetadataBootstrap{
+		Source: bootstrapSourceRoomMetadata,
+		Metadata: roomMetadata{
+			ChildProfile: roomMetadataChildProfile{
+				Name:      "Rahul",
+				Age:       6,
+				Gender:    "male",
+				Interests: "science, music",
+			},
+			PrimaryLanguage: "en",
+		},
+	}
+
+	opts := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, "")
+	for _, want := range []string{
+		"Active child profile for this session",
+		"Name: Rahul",
+		"Age: 6",
+		"Gender: male",
+		"Interests: science, music",
+		"Primary language: en",
+	} {
+		if !strings.Contains(opts.IdentityContent, want) {
+			t.Fatalf("IdentityContent missing %q: %q", want, opts.IdentityContent)
+		}
+	}
+}
+
+func TestHydrateLiveKitWorkspaceSkeletonRepairsBlankCoreFiles(t *testing.T) {
+	workspace := t.TempDir()
+	blankFiles := []string{
+		"AGENT.md",
+		"USER.md",
+		"SOUL.md",
+		"HEARTBEAT.md",
+		"memory/MEMORY.md",
+	}
+	for _, rel := range blankFiles {
+		path := filepath.Join(workspace, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", rel, err)
+		}
+		if err := os.WriteFile(path, []byte(" \n\t"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", rel, err)
+		}
+	}
+
+	_, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{})
+	if err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+
+	assertHasContent := func(rel string, contains string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", rel, err)
+		}
+		if !strings.Contains(string(data), contains) {
+			t.Fatalf("%s should contain %q, got %q", rel, contains, string(data))
+		}
+	}
+
+	assertHasContent("AGENT.md", "No room identity has been hydrated")
+	assertHasContent("USER.md", "No user profile override has been hydrated")
+	assertHasContent("SOUL.md", "Use the active LiveKit room identity")
+	assertHasContent("HEARTBEAT.md", "LiveKit workspace hydrated")
+	assertHasContent("memory/MEMORY.md", "No durable memory has been hydrated yet")
+}
+
+func TestHydrateLiveKitWorkspaceSkeletonSeedsCoreFilesFromTemplateSources(t *testing.T) {
+	workspace := t.TempDir()
+	templateWorkspace := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(templateWorkspace, "AGENT.md"), "# Agent\n\nTemplate agent.\n")
+	mustWriteFile(t, filepath.Join(templateWorkspace, "SOUL.md"), "# Soul\n\nTemplate soul.\n")
+	mustWriteFile(t, filepath.Join(templateWorkspace, "USER.md"), "# User\n\nTemplate user.\n")
+	mustWriteFile(t, filepath.Join(templateWorkspace, "memory", "MEMORY.md"), "# Memory\n\nTemplate memory.\n")
+
+	if _, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs: []string{templateWorkspace},
+	}); err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+
+	assertFileEquals := func(rel, want string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", rel, err)
+		}
+		if got := string(data); got != want {
+			t.Fatalf("%s = %q, want %q", rel, got, want)
+		}
+	}
+
+	assertFileEquals("AGENT.md", "# Agent\n\nTemplate agent.\n")
+	assertFileEquals("SOUL.md", "# Soul\n\nTemplate soul.\n")
+	assertFileEquals("USER.md", "# User\n\nTemplate user.\n")
+	assertFileEquals("memory/MEMORY.md", "# Memory\n\nTemplate memory.\n")
 }
 
 func TestHydrateLiveKitWorkspaceSkeletonCopiesSkillsFromFallbackSources(t *testing.T) {
