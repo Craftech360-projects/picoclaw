@@ -500,12 +500,18 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	}
 	var utterance strings.Builder
 	var vadSpeechEnded bool
+	var speechActive bool
 	var latestTranscript string
 	var finalizeTimer *time.Timer
 	var finalizeTimerC <-chan time.Time
+	var segmentTimer *time.Timer
+	var segmentTimerC <-chan time.Time
 	var lastFlushedText string
 	var lastFlushedAt time.Time
 	var pendingBargeIn bool
+	var hardCapFinalizePending bool
+
+	const sttSegmentHardCap = 25 * time.Second
 
 	// Get the async event channel from the bridge (may be nil)
 	var asyncEvents <-chan AsyncEvent
@@ -526,6 +532,39 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		}
 		finalizeTimer = nil
 		finalizeTimerC = nil
+	}
+
+	stopSegmentTimer := func() {
+		if segmentTimer == nil {
+			segmentTimerC = nil
+			return
+		}
+		if !segmentTimer.Stop() {
+			select {
+			case <-segmentTimer.C:
+			default:
+			}
+		}
+		segmentTimer = nil
+		segmentTimerC = nil
+	}
+
+	startSegmentTimer := func() {
+		if sttSegmentHardCap <= 0 {
+			return
+		}
+		if segmentTimer == nil {
+			segmentTimer = time.NewTimer(sttSegmentHardCap)
+		} else {
+			if !segmentTimer.Stop() {
+				select {
+				case <-segmentTimer.C:
+				default:
+				}
+			}
+			segmentTimer.Reset(sttSegmentHardCap)
+		}
+		segmentTimerC = segmentTimer.C
 	}
 
 	startFinalizeTimer := func() {
@@ -552,8 +591,11 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		utterance.Reset()
 		latestTranscript = ""
 		vadSpeechEnded = false
+		speechActive = false
+		hardCapFinalizePending = false
 		pendingBargeIn = false
 		stopFinalizeTimer()
+		stopSegmentTimer()
 
 		if ap.session != nil && ap.session.participant != nil {
 			ap.session.participant.speaking.Store(false)
@@ -599,6 +641,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		select {
 		case <-ctx.Done():
 			stopFinalizeTimer()
+			stopSegmentTimer()
 			return
 
 		case vadEvt, ok := <-ap.vadEvent:
@@ -625,11 +668,17 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 					pendingBargeIn = true
 					stopFinalizeTimer()
 					vadSpeechEnded = false
+					speechActive = true
+					hardCapFinalizePending = false
+					startSegmentTimer()
 					lastFlushedText = ""
 				}
 
 				if evt.SpeechEnd {
 					vadSpeechEnded = true
+					speechActive = false
+					hardCapFinalizePending = false
+					stopSegmentTimer()
 					logger.DebugCF("livekit", "VAD Speech end, finalizing STT stream", map[string]any{
 						"session":     ap.sessionKey(),
 						"probability": evt.Probability,
@@ -671,6 +720,14 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				utterance.WriteString(merged)
 			}
 
+			if evt.SpeechEnd && hardCapFinalizePending && speechActive && !vadSpeechEnded {
+				// Hard-cap finalize yields provider-level speech end, but user is still
+				// speaking. Keep collecting transcript and rotate to the next segment.
+				hardCapFinalizePending = false
+				startSegmentTimer()
+				continue
+			}
+
 			if evt.SpeechEnd || (vadSpeechEnded && utterance.Len() > 0) {
 				trigger := "stt_speech_end"
 				if vadSpeechEnded && !evt.SpeechEnd {
@@ -690,6 +747,26 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				if ap.session != nil && ap.session.participant != nil {
 					ap.session.participant.speaking.Store(false)
 				}
+			}
+
+		case <-segmentTimerC:
+			segmentTimer = nil
+			segmentTimerC = nil
+			if !speechActive || vadSpeechEnded {
+				continue
+			}
+			logger.WarnCF("livekit", "STT hard-cap reached, finalizing rolling segment", map[string]any{
+				"session":  ap.sessionKey(),
+				"cap_secs": int(sttSegmentHardCap.Seconds()),
+			})
+			hardCapFinalizePending = true
+			if err := sttStream.Finalize(); err != nil {
+				hardCapFinalizePending = false
+				logger.ErrorCF("livekit", "Failed to finalize STT stream on hard-cap", map[string]any{
+					"session": ap.sessionKey(),
+					"error":   err.Error(),
+				})
+				startSegmentTimer()
 			}
 
 		case asyncEvt, ok := <-asyncEvents:
