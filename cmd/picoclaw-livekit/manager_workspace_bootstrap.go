@@ -310,7 +310,11 @@ func formatManagerUserContent(bootstrap managerWorkspaceBootstrap) string {
 		writeMarkdownField(&sb, "Interests", strings.Join(cleanStrings(child.Interests), ", "))
 	}
 	writeMarkdownField(&sb, "Language", child.Language)
-	writeMarkdownField(&sb, "Timezone", child.Timezone)
+	timezone := strings.TrimSpace(child.Timezone)
+	if timezone == "" {
+		timezone = "Asia/Kolkata"
+	}
+	writeMarkdownField(&sb, "Timezone", timezone)
 	writeMarkdownField(&sb, "Birth date", child.BirthDate)
 	return strings.TrimSpace(sb.String())
 }

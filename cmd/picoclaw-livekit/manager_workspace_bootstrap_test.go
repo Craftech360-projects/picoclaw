@@ -195,6 +195,32 @@ func TestMergeManagerHydrationOptionsPreservesDBPromptAndAddsMemory(t *testing.T
 	}
 }
 
+func TestFormatManagerUserContentDefaultsTimezoneToIST(t *testing.T) {
+	bootstrap := managerWorkspaceBootstrap{}
+	bootstrap.ChildProfile = &struct {
+		Name        string   `json:"name"`
+		Nickname    string   `json:"nickname"`
+		Gender      string   `json:"gender"`
+		Grade       string   `json:"grade"`
+		School      string   `json:"school"`
+		Interests   []string `json:"interests"`
+		Language    string   `json:"language"`
+		Timezone    string   `json:"timezone"`
+		BirthDate   string   `json:"birthDate"`
+		Preferences any      `json:"preferences"`
+	}{
+		Name:      "Aarav",
+		Language:  "en",
+		Interests: []string{"space"},
+		Timezone:  "",
+	}
+
+	got := formatManagerUserContent(bootstrap)
+	if !strings.Contains(got, "Timezone: Asia/Kolkata") {
+		t.Fatalf("expected IST fallback timezone, got: %q", got)
+	}
+}
+
 func TestFormatManagerMemoryContentKeepsMemoryCurated(t *testing.T) {
 	bootstrap := managerWorkspaceBootstrap{}
 	bootstrap.Agent.SummaryMemory = "Overall memory:\n- Rahul is the child using this device.\n- Last session highlights: noisy old session note.\nSession summary:\nBad raw text\nTranscript excerpt:\nUser: [System Event] connected"

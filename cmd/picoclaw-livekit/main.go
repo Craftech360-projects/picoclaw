@@ -242,6 +242,7 @@ func main() {
 		// This ensures we drop the personalized prompt precisely where this room identity reads it.
 		var workspace string
 		var baseWorkspace string
+		workspaceFirstTime := false
 		if cfg.Agents.Defaults.Workspace != "" {
 			home := os.Getenv(config.EnvHome)
 			userHome, _ := os.UserHomeDir()
@@ -254,6 +255,9 @@ func main() {
 			}
 			id := routing.NormalizeAgentID(agentCfg.ID)
 			workspace = filepath.Join(baseWorkspace, "..", "workspace-"+id)
+			if _, statErr := os.Stat(workspace); os.IsNotExist(statErr) {
+				workspaceFirstTime = true
+			}
 		}
 
 		// 2. Fetch and decode room metadata payload from MQTT gateway.
@@ -367,13 +371,44 @@ func main() {
 				})
 			} else if userContent := strings.TrimSpace(hydrationOptions.UserContent); userContent != "" {
 				userPath := filepath.Join(workspace, "USER.md")
-				if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
-					logger.WarnCF("livekit", "Failed to reapply USER.md from room metadata child profile", map[string]any{
-						"room":       roomName,
-						"device_mac": deviceMAC,
-						"path":       userPath,
-						"error":      err.Error(),
-					})
+				if shouldWrite, reason := shouldRefreshUserFromMetadata(userPath, workspaceFirstTime); shouldWrite {
+					if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
+						logger.WarnCF("livekit", "Failed to reapply USER.md from room metadata child profile", map[string]any{
+							"room":       roomName,
+							"device_mac": deviceMAC,
+							"path":       userPath,
+							"error":      err.Error(),
+						})
+					} else {
+						logger.InfoCF("livekit", "Reapplied USER.md from room metadata child profile", map[string]any{
+							"room":       roomName,
+							"device_mac": deviceMAC,
+							"path":       userPath,
+							"reason":     reason,
+						})
+					}
+				} else {
+					desiredTimezone := extractTimezoneFromUserMarkdown(userContent)
+					if desiredTimezone == "" {
+						desiredTimezone = "Asia/Kolkata"
+					}
+					if changed, syncReason, err := syncUserTimezoneInFile(userPath, desiredTimezone); err != nil {
+						logger.WarnCF("livekit", "Failed to sync USER.md timezone from child profile metadata", map[string]any{
+							"room":       roomName,
+							"device_mac": deviceMAC,
+							"path":       userPath,
+							"timezone":   desiredTimezone,
+							"error":      err.Error(),
+						})
+					} else if changed {
+						logger.InfoCF("livekit", "Synchronized USER.md timezone from child profile metadata", map[string]any{
+							"room":       roomName,
+							"device_mac": deviceMAC,
+							"path":       userPath,
+							"timezone":   desiredTimezone,
+							"reason":     syncReason,
+						})
+					}
 				}
 			}
 		}
@@ -432,9 +467,10 @@ func main() {
 				"tools":              added,
 			})
 		}
+		mcpCfg := scopedMCPConfigForWorkspace(cfg, agentInstance.Workspace)
 		mcpManager, err := agent.RegisterMCPToolsForInstances(
 			context.Background(),
-			cfg,
+			mcpCfg,
 			agentInstance.Workspace,
 			agentInstance,
 		)

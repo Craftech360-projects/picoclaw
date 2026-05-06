@@ -135,6 +135,49 @@ func TestShellTool_WorkingDir(t *testing.T) {
 	}
 }
 
+func TestShellTool_TimezoneFromUserMarkdown(t *testing.T) {
+	workspace := t.TempDir()
+	userContent := "# User\n\n- Name: Rahul\n- Timezone: Asia/Kolkata\n"
+	if err := os.WriteFile(filepath.Join(workspace, "USER.md"), []byte(userContent), 0o644); err != nil {
+		t.Fatalf("failed to write USER.md: %v", err)
+	}
+
+	tool, err := NewExecTool(workspace, false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":  "run",
+		"command": "printf '%s' \"$TZ\"",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "Asia/Kolkata") {
+		t.Fatalf("expected TZ from USER.md, got: %q", result.ForLLM)
+	}
+}
+
+func TestShellTool_TimezoneFallbackIST(t *testing.T) {
+	workspace := t.TempDir()
+	tool, err := NewExecTool(workspace, false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":  "run",
+		"command": "printf '%s' \"$TZ\"",
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "Asia/Kolkata") {
+		t.Fatalf("expected fallback TZ Asia/Kolkata, got: %q", result.ForLLM)
+	}
+}
+
 // TestShellTool_DangerousCommand verifies safety guard blocks dangerous commands
 func TestShellTool_DangerousCommand(t *testing.T) {
 	tool, err := NewExecTool("", false)

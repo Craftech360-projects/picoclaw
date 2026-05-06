@@ -371,6 +371,7 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	cmd.Env = t.commandEnv(cwd)
 
 	prepareCommandForTermination(cmd)
 
@@ -481,6 +482,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	cmd.Env = t.commandEnv(cwd)
 
 	prepareCommandForTermination(cmd)
 
@@ -645,6 +647,62 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 		ForUser: fmt.Sprintf("Session %s started", sessionID),
 		IsError: false,
 	}
+}
+
+func (t *ExecTool) commandEnv(cwd string) []string {
+	env := os.Environ()
+	timezone := t.resolveCommandTimezone(cwd)
+	if timezone == "" {
+		return env
+	}
+	return upsertEnvVar(env, "TZ", timezone)
+}
+
+func (t *ExecTool) resolveCommandTimezone(cwd string) string {
+	paths := make([]string, 0, 2)
+	if cwd != "" {
+		paths = append(paths, filepath.Join(cwd, "USER.md"))
+	}
+	if t.workingDir != "" && t.workingDir != cwd {
+		paths = append(paths, filepath.Join(t.workingDir, "USER.md"))
+	}
+	for _, p := range paths {
+		if tz := timezoneFromUserMarkdownFile(p); tz != "" {
+			return tz
+		}
+	}
+	// LiveKit device workspaces default to IST when metadata has no timezone.
+	return "Asia/Kolkata"
+}
+
+func timezoneFromUserMarkdownFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "- timezone:") || strings.HasPrefix(lower, "timezone:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
+}
+
+func upsertEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 func (t *ExecTool) executeList() *ToolResult {

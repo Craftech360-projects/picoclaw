@@ -109,7 +109,7 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 
 	userContent := strings.TrimSpace(opts.UserContent)
 	if userContent != "" {
-		if err := os.WriteFile(filepath.Join(workspace, "USER.md"), []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
+		if err := writeFileIfMissingOrBlank(filepath.Join(workspace, "USER.md"), ensureTrailingNewline(userContent), 0o644); err != nil {
 			return result, err
 		}
 	} else {
@@ -479,6 +479,13 @@ func formatRoomMetadataIdentityContent(md roomMetadata) string {
 		sb.WriteString(language)
 		sb.WriteString("\n")
 	}
+	timezone := strings.TrimSpace(md.ChildProfile.Timezone)
+	if timezone == "" {
+		timezone = "Asia/Kolkata"
+	}
+	sb.WriteString("- Timezone: ")
+	sb.WriteString(timezone)
+	sb.WriteString("\n")
 	return strings.TrimSpace(sb.String())
 }
 
@@ -510,6 +517,13 @@ func formatRoomMetadataUserContent(md roomMetadata) string {
 		sb.WriteString(language)
 		sb.WriteString("\n")
 	}
+	timezone := strings.TrimSpace(md.ChildProfile.Timezone)
+	if timezone == "" {
+		timezone = "Asia/Kolkata"
+	}
+	sb.WriteString("- Timezone: ")
+	sb.WriteString(timezone)
+	sb.WriteString("\n")
 	if notes := strings.TrimSpace(md.AdditionalNotes); notes != "" {
 		sb.WriteString("\n## Additional Notes\n\n")
 		sb.WriteString(notes)
@@ -521,6 +535,120 @@ func formatRoomMetadataUserContent(md roomMetadata) string {
 		return ""
 	}
 	return content
+}
+
+func userProfileHasChildDetails(content string) bool {
+	content = strings.ToLower(content)
+	for _, marker := range []string{
+		"- name:",
+		"- age:",
+		"- gender:",
+		"- interests:",
+		"## additional notes",
+	} {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldRefreshUserFromMetadata(userPath string, firstTimeWorkspace bool) (bool, string) {
+	if firstTimeWorkspace {
+		return true, "first_time_workspace"
+	}
+
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, "missing_user_md"
+		}
+		return false, "read_error"
+	}
+
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return true, "blank_user_md"
+	}
+	if strings.Contains(trimmed, "No user profile override has been hydrated") {
+		return true, "placeholder_user_md"
+	}
+	if !userProfileHasChildDetails(trimmed) {
+		return true, "missing_child_profile_fields"
+	}
+
+	return false, "existing_user_profile"
+}
+
+func extractTimezoneFromUserMarkdown(content string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "- timezone:") {
+			idx := strings.Index(trimmed, ":")
+			if idx == -1 {
+				return ""
+			}
+			return strings.TrimSpace(trimmed[idx+1:])
+		}
+	}
+	return ""
+}
+
+func upsertUserTimezoneInUserMarkdown(content, desiredTimezone string) (updated string, changed bool, reason string) {
+	desiredTimezone = strings.TrimSpace(desiredTimezone)
+	if desiredTimezone == "" {
+		return content, false, "timezone_empty"
+	}
+
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	additionalNotesIdx := -1
+	for i, line := range lines {
+		if strings.EqualFold(strings.TrimSpace(line), "## Additional Notes") {
+			additionalNotesIdx = i
+			break
+		}
+	}
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "- timezone:") {
+			current := extractTimezoneFromUserMarkdown(trimmed)
+			if strings.EqualFold(current, desiredTimezone) {
+				return content, false, "timezone_unchanged"
+			}
+			lines[i] = "- Timezone: " + desiredTimezone
+			return strings.Join(lines, "\n"), true, "timezone_changed"
+		}
+	}
+
+	insertAt := len(lines)
+	if additionalNotesIdx >= 0 {
+		insertAt = additionalNotesIdx
+	}
+	newLine := "- Timezone: " + desiredTimezone
+	lines = append(lines[:insertAt], append([]string{newLine}, lines[insertAt:]...)...)
+	return strings.Join(lines, "\n"), true, "timezone_missing"
+}
+
+func syncUserTimezoneInFile(userPath, desiredTimezone string) (bool, string, error) {
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, "user_md_missing", nil
+		}
+		return false, "read_error", err
+	}
+	updated, changed, reason := upsertUserTimezoneInUserMarkdown(string(data), desiredTimezone)
+	if !changed {
+		return false, reason, nil
+	}
+	if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(updated)), 0o644); err != nil {
+		return false, "write_error", err
+	}
+	return true, reason, nil
 }
 
 func formatRoomMetadataMemoryContent(md roomMetadata) string {

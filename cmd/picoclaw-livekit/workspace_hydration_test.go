@@ -201,7 +201,7 @@ func TestBuildLiveKitWorkspaceHydrationOptionsUsesRoomMetadata(t *testing.T) {
 	if !strings.Contains(opts.IdentityContent, "Dynamic identity") {
 		t.Fatalf("IdentityContent = %q", opts.IdentityContent)
 	}
-	for _, want := range []string{"Rahul", "Age: 10", "Interests: flowers", "Primary language: Hindi", "Prefers short songs"} {
+	for _, want := range []string{"Rahul", "Age: 10", "Interests: flowers", "Primary language: Hindi", "Timezone: Asia/Kolkata", "Prefers short songs"} {
 		if !strings.Contains(opts.UserContent, want) {
 			t.Fatalf("UserContent missing %q: %q", want, opts.UserContent)
 		}
@@ -236,6 +236,7 @@ func TestBuildLiveKitWorkspaceHydrationOptionsBuildsIdentityFromChildProfileFall
 		"Gender: male",
 		"Interests: science, music",
 		"Primary language: en",
+		"Timezone: Asia/Kolkata",
 	} {
 		if !strings.Contains(opts.IdentityContent, want) {
 			t.Fatalf("IdentityContent missing %q: %q", want, opts.IdentityContent)
@@ -371,5 +372,115 @@ func TestValidateLiveKitActiveSkillsReportsMissingSkills(t *testing.T) {
 	}
 	if got, want := strings.Join(missing, ","), "agent-browser"; got != want {
 		t.Fatalf("missing = %q, want %q", got, want)
+	}
+}
+
+func TestUserProfileHasChildDetails(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name: "rich profile has name",
+			content: `# User
+
+- Name: Rahul
+- Primary language: en
+`,
+			want: true,
+		},
+		{
+			name: "language only is sparse",
+			content: `# User
+
+- Primary language: en
+`,
+			want: false,
+		},
+		{
+			name: "additional notes counts as details",
+			content: `# User
+
+## Additional Notes
+
+Prefers short stories.
+`,
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := userProfileHasChildDetails(tc.content); got != tc.want {
+				t.Fatalf("userProfileHasChildDetails() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldRefreshUserFromMetadata(t *testing.T) {
+	tmp := t.TempDir()
+	userPath := filepath.Join(tmp, "USER.md")
+
+	if should, reason := shouldRefreshUserFromMetadata(userPath, true); !should || reason != "first_time_workspace" {
+		t.Fatalf("first time = (%v, %q), want (true, first_time_workspace)", should, reason)
+	}
+
+	if should, reason := shouldRefreshUserFromMetadata(userPath, false); !should || reason != "missing_user_md" {
+		t.Fatalf("missing file = (%v, %q), want (true, missing_user_md)", should, reason)
+	}
+
+	if err := os.WriteFile(userPath, []byte("# User\n\n- Primary language: en\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile sparse USER.md error = %v", err)
+	}
+	if should, reason := shouldRefreshUserFromMetadata(userPath, false); !should || reason != "missing_child_profile_fields" {
+		t.Fatalf("sparse file = (%v, %q), want (true, missing_child_profile_fields)", should, reason)
+	}
+
+	if err := os.WriteFile(userPath, []byte("# User\n\n- Name: Rahul\n- Primary language: en\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile rich-but-no-timezone USER.md error = %v", err)
+	}
+	if should, reason := shouldRefreshUserFromMetadata(userPath, false); should || reason != "existing_user_profile" {
+		t.Fatalf("rich but no timezone = (%v, %q), want (false, existing_user_profile)", should, reason)
+	}
+
+	if err := os.WriteFile(userPath, []byte("# User\n\n- Name: Rahul\n- Primary language: en\n- Timezone: Asia/Kolkata\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile rich USER.md error = %v", err)
+	}
+	if should, reason := shouldRefreshUserFromMetadata(userPath, false); should || reason != "existing_user_profile" {
+		t.Fatalf("rich file = (%v, %q), want (false, existing_user_profile)", should, reason)
+	}
+}
+
+func TestUpsertUserTimezoneInUserMarkdown(t *testing.T) {
+	content := "# User\n\n- Name: Rahul\n- Primary language: en\n\n## Additional Notes\n\nhello\n"
+	updated, changed, reason := upsertUserTimezoneInUserMarkdown(content, "Asia/Kolkata")
+	if !changed || reason != "timezone_missing" {
+		t.Fatalf("missing timezone => changed=%v reason=%q", changed, reason)
+	}
+	if !strings.Contains(updated, "- Timezone: Asia/Kolkata") {
+		t.Fatalf("expected timezone line, got %q", updated)
+	}
+	if !strings.Contains(updated, "## Additional Notes") {
+		t.Fatalf("expected additional notes retained, got %q", updated)
+	}
+
+	changedInput := "# User\n\n- Name: Rahul\n- Timezone: America/New_York\n"
+	updated, changed, reason = upsertUserTimezoneInUserMarkdown(changedInput, "Asia/Kolkata")
+	if !changed || reason != "timezone_changed" {
+		t.Fatalf("changed timezone => changed=%v reason=%q", changed, reason)
+	}
+	if !strings.Contains(updated, "- Timezone: Asia/Kolkata") {
+		t.Fatalf("expected timezone updated, got %q", updated)
+	}
+
+	unchangedInput := "# User\n\n- Name: Rahul\n- Timezone: Asia/Kolkata\n"
+	updated, changed, reason = upsertUserTimezoneInUserMarkdown(unchangedInput, "Asia/Kolkata")
+	if changed || reason != "timezone_unchanged" {
+		t.Fatalf("unchanged timezone => changed=%v reason=%q", changed, reason)
+	}
+	if updated != unchangedInput {
+		t.Fatalf("expected unchanged content, got %q", updated)
 	}
 }

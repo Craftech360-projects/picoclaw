@@ -34,6 +34,7 @@ type roomMetadataChildProfile struct {
 	Age       int    `json:"age"`
 	Gender    string `json:"gender"`
 	Interests string `json:"interests"`
+	Timezone  string `json:"timezone"`
 }
 
 type roomMetadataRelation struct {
@@ -143,6 +144,17 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	if metadata.AdditionalNotes == "" {
 		metadata.AdditionalNotes = normalizeString(mustGetMapValue(childProfile, "additional_notes", "additionalNotes"))
 	}
+	if strings.TrimSpace(metadata.ChildProfile.Timezone) == "" {
+		metadata.ChildProfile.Timezone = normalizeString(mustGetMapValue(
+			payload,
+			"timezone",
+			"time_zone",
+			"timeZone",
+		))
+	}
+	if strings.TrimSpace(metadata.ChildProfile.Timezone) == "" {
+		metadata.ChildProfile.Timezone = "Asia/Kolkata"
+	}
 
 	return metadata
 }
@@ -153,6 +165,12 @@ func normalizeChildProfile(payload map[string]any) roomMetadataChildProfile {
 		Age:       normalizeInt(mustGetMapValue(payload, "age")),
 		Gender:    normalizeString(mustGetMapValue(payload, "gender")),
 		Interests: normalizeInterests(mustGetMapValue(payload, "interests")),
+		Timezone: normalizeString(mustGetMapValue(
+			payload,
+			"timezone",
+			"time_zone",
+			"timeZone",
+		)),
 	}
 }
 
