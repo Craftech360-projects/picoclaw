@@ -554,13 +554,12 @@ func userProfileHasChildDetails(content string) bool {
 }
 
 func shouldRefreshUserFromMetadata(userPath string, firstTimeWorkspace bool) (bool, string) {
-	if firstTimeWorkspace {
-		return true, "first_time_workspace"
-	}
-
 	data, err := os.ReadFile(userPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if firstTimeWorkspace {
+				return true, "first_time_workspace"
+			}
 			return true, "missing_user_md"
 		}
 		return false, "read_error"
@@ -572,6 +571,12 @@ func shouldRefreshUserFromMetadata(userPath string, firstTimeWorkspace bool) (bo
 	}
 	if strings.Contains(trimmed, "No user profile override has been hydrated") {
 		return true, "placeholder_user_md"
+	}
+	// If USER.md already exists on disk (typically restored from manager DB),
+	// treat it as authoritative on first-time ephemeral workspace boot and avoid
+	// overwriting with room metadata.
+	if firstTimeWorkspace {
+		return false, "existing_user_md_first_time"
 	}
 	if !userProfileHasChildDetails(trimmed) {
 		return true, "missing_child_profile_fields"

@@ -437,6 +437,9 @@ func TestShouldRefreshUserFromMetadata(t *testing.T) {
 	if should, reason := shouldRefreshUserFromMetadata(userPath, false); !should || reason != "missing_child_profile_fields" {
 		t.Fatalf("sparse file = (%v, %q), want (true, missing_child_profile_fields)", should, reason)
 	}
+	if should, reason := shouldRefreshUserFromMetadata(userPath, true); should || reason != "existing_user_md_first_time" {
+		t.Fatalf("first time existing file = (%v, %q), want (false, existing_user_md_first_time)", should, reason)
+	}
 
 	if err := os.WriteFile(userPath, []byte("# User\n\n- Name: Rahul\n- Primary language: en\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile rich-but-no-timezone USER.md error = %v", err)
