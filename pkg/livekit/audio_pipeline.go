@@ -435,6 +435,23 @@ func (ap *AudioPipeline) retryFallbackPhrase() string {
 	}
 }
 
+func (ap *AudioPipeline) greetingFallbackPhrase() string {
+	switch strings.ToLower(ap.primaryLanguage) {
+	case "hindi":
+		return "Namaste! Main Cheeko hoon, tumhara dost. Chalo maze karte hain!"
+	case "kannada":
+		return "Namaskara! Nanu Cheeko, ninna snehita. Banni, fun madona!"
+	case "malayalam":
+		return "Namaskaram! Njan Cheeko anu, ninte suhruth. Namukku fun cheyyam!"
+	case "tamil":
+		return "Vanakkam! Naan Cheeko, un friend. Va, fun pannalaam!"
+	case "telugu":
+		return "Namaskaram! Nenu Cheeko, nee friend ni. Raa, fun cheddam!"
+	default:
+		return "Hi! I am Cheeko, your fun friend. Ready for an awesome chat?"
+	}
+}
+
 // TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
 // It bypasses the user speech wait loop and talks directly into the TTS pipeline.
 
@@ -484,10 +501,31 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 
 		if err != nil {
 			ap.turns.Finish(turn)
-			logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
-				"session": sessionKey,
-				"error":   err.Error(),
-			})
+			// When the greeting LLM call is rate-limited, speak a local fallback
+			// greeting so the child is not greeted with silence.
+			if !firstChunkReceived && ctx.Err() == nil {
+				if ap.session != nil {
+					ap.session.PublishAgentState("listening", "speaking")
+				}
+				ap.publishSpeechCreated()
+				ap.synthesizeAndPlay(ctx, ap.greetingFallbackPhrase())
+				ap.flushSilenceForContext(ctx, 300)
+				if ap.session != nil {
+					ap.session.PublishAgentState("speaking", "listening")
+				}
+			}
+			lowerErr := strings.ToLower(err.Error())
+			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate-limit") || strings.Contains(lowerErr, "rate limit") {
+				logger.WarnCF("livekit", "Dynamic greeting rate-limited; used fallback greeting", map[string]any{
+					"session": sessionKey,
+					"error":   err.Error(),
+				})
+			} else {
+				logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
+					"session": sessionKey,
+					"error":   err.Error(),
+				})
+			}
 		}
 	}()
 }

@@ -500,12 +500,47 @@ func formatCurrentSenderLine(senderID, senderDisplayName string) string {
 	}
 }
 
+const defaultPromptTimezone = "Asia/Kolkata"
+
+func (cb *ContextBuilder) resolvePromptTimezone() string {
+	userPath := filepath.Join(cb.workspace, "USER.md")
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		return defaultPromptTimezone
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "- timezone:") || strings.HasPrefix(lower, "timezone:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			tz := strings.TrimSpace(parts[1])
+			if tz == "" {
+				return defaultPromptTimezone
+			}
+			if _, err := time.LoadLocation(tz); err != nil {
+				return defaultPromptTimezone
+			}
+			return tz
+		}
+	}
+	return defaultPromptTimezone
+}
+
 func (cb *ContextBuilder) buildDynamicContext(channel, chatID, senderID, senderDisplayName string) string {
-	now := time.Now().Format("2006-01-02 15:04 (Monday)")
+	timezone := cb.resolvePromptTimezone()
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		timezone = defaultPromptTimezone
+		loc, _ = time.LoadLocation(defaultPromptTimezone)
+	}
+	now := time.Now().In(loc).Format("2006-01-02 15:04 (Monday) MST")
 	rt := fmt.Sprintf("%s %s, Go %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "## Current Time\n%s\n\n## Runtime\n%s", now, rt)
+	fmt.Fprintf(&sb, "## Current Time\n%s (Timezone: %s)\n\n## Runtime\n%s", now, timezone, rt)
 
 	if channel != "" && chatID != "" {
 		fmt.Fprintf(&sb, "\n\n## Current Session\nChannel: %s\nChat ID: %s", channel, chatID)

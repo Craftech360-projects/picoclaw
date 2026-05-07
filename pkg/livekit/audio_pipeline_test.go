@@ -324,6 +324,34 @@ func TestTriggerGreetingPublishesSpeechCreatedOnFirstChunk(t *testing.T) {
 	}
 }
 
+func TestTriggerGreetingPublishesSpeechCreatedOnRateLimitFallback(t *testing.T) {
+	provider := &rateLimitedStreamingProvider{}
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, bridge, nil, nil)
+	speechCreated := make(chan struct{}, 1)
+	pipeline.publishSpeechCreated = func() {
+		select {
+		case speechCreated <- struct{}{}:
+		default:
+		}
+	}
+
+	pipeline.TriggerGreeting(context.Background(), "livekit:device:a")
+
+	select {
+	case <-speechCreated:
+	case <-time.After(time.Second):
+		t.Fatal("rate-limited greeting did not publish speech_created fallback")
+	}
+}
+
 func TestCancelTTSRecordsBargeInReason(t *testing.T) {
 	cancelled := false
 	pipeline := NewAudioPipeline(&RoomSession{
@@ -507,6 +535,31 @@ func (p *cancelingStreamingProvider) ChatStream(
 }
 
 func (p *cancelingStreamingProvider) GetDefaultModel() string { return "test" }
+
+type rateLimitedStreamingProvider struct{}
+
+func (p *rateLimitedStreamingProvider) Chat(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+) (*providers.LLMResponse, error) {
+	return nil, errors.New("API request failed: status 429 rate limited")
+}
+
+func (p *rateLimitedStreamingProvider) ChatStream(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+	func(string),
+) (*providers.LLMResponse, error) {
+	return nil, errors.New("API request failed: status 429 rate limited")
+}
+
+func (p *rateLimitedStreamingProvider) GetDefaultModel() string { return "test" }
 
 func expectProviderCall(t *testing.T, calls <-chan string, want string) {
 	t.Helper()

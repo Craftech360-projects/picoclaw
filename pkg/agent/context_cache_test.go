@@ -188,6 +188,43 @@ func TestBuildMessages_CurrentSenderDynamicContext(t *testing.T) {
 	}
 }
 
+func TestBuildMessages_CurrentTimeUsesUserTimezoneOrFallback(t *testing.T) {
+	tests := []struct {
+		name         string
+		userTimezone string
+		wantTimezone string
+	}{
+		{
+			name:         "uses timezone from USER.md",
+			userTimezone: "Asia/Kolkata",
+			wantTimezone: "Asia/Kolkata",
+		},
+		{
+			name:         "falls back when USER.md timezone is invalid",
+			userTimezone: "Invalid/Timezone",
+			wantTimezone: "Asia/Kolkata",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := setupWorkspace(t, map[string]string{
+				"IDENTITY.md": "# Identity\nTest agent.",
+				"USER.md":     "# User\n\n- Name: Test\n- Timezone: " + tt.userTimezone + "\n",
+			})
+			defer os.RemoveAll(tmpDir)
+
+			cb := NewContextBuilder(tmpDir)
+			msgs := cb.BuildMessages(nil, "", "hello", nil, "discord", "chat1", "", "")
+			sys := msgs[0].Content
+
+			if !strings.Contains(sys, "Timezone: "+tt.wantTimezone) {
+				t.Fatalf("expected system prompt timezone %q, got:\n%s", tt.wantTimezone, sys)
+			}
+		})
+	}
+}
+
 // TestMtimeAutoInvalidation verifies that the cache detects source file changes
 // via mtime without requiring explicit InvalidateCache().
 // Fix: original implementation had no auto-invalidation — edits to bootstrap files,
