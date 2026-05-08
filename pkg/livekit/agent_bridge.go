@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,18 @@ type UsageSnapshot struct {
 	TotalTokens                 int
 }
 
+// SessionQualityReport is an aggregate quality summary for one voice session.
+type SessionQualityReport struct {
+	FallbackCount            int     `json:"fallback_count"`
+	InterruptionCount        int     `json:"interruption_count"`
+	InterruptionRecovered    int     `json:"interruption_recovered"`
+	InterruptionRecoveryRate float64 `json:"interruption_recovery_rate"`
+	ErrorCount               int     `json:"error_count"`
+	RetryCount               int     `json:"retry_count"`
+	MedianTTFTMs             int64   `json:"median_ttft_ms"`
+	AvgTTFTMs                int64   `json:"avg_ttft_ms"`
+}
+
 type usageState struct {
 	sessionStart                time.Time
 	messageCount                int
@@ -78,28 +91,39 @@ type usageState struct {
 	outputTextTokens            int
 }
 
+type qualityState struct {
+	fallbackCount         int
+	interruptionCount     int
+	interruptionRecovered int
+	interruptionPending   bool
+	errorCount            int
+	retryCount            int
+	ttftSamplesMS         []int64
+}
+
 type MCPManager interface {
 	Close() error
 }
 
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
-	agentInstance      *agent.AgentInstance
-	cfg                *config.Config
-	provider           providers.LLMProvider
-	streamProvider     providers.StreamingProvider
-	preserveWorkspace  bool
-	onClose            func()
-	modelID            string
-	sessions           session.SessionStore
-	tools              *tools.ToolRegistry
-	contextBuilder     *agent.ContextBuilder
-	maxIterations      int
-	llmOptions         map[string]any
-	asyncEventChan     chan AsyncEvent // receives background task completions
-	runtimeEventChan   chan RuntimeEvent
-	workspaceArtifacts WorkspaceArtifactStore
-	mcpManager         MCPManager
+	agentInstance       *agent.AgentInstance
+	cfg                 *config.Config
+	provider            providers.LLMProvider
+	streamProvider      providers.StreamingProvider
+	preserveWorkspace   bool
+	onClose             func()
+	modelID             string
+	sessions            session.SessionStore
+	tools               *tools.ToolRegistry
+	contextBuilder      *agent.ContextBuilder
+	maxIterations       int
+	llmOptions          map[string]any
+	proactiveLLMOptions map[string]any
+	asyncEventChan      chan AsyncEvent // receives background task completions
+	runtimeEventChan    chan RuntimeEvent
+	workspaceArtifacts  WorkspaceArtifactStore
+	mcpManager          MCPManager
 
 	// summarization config
 	summarizeMessageThreshold int
@@ -110,6 +134,10 @@ type AgentBridge struct {
 	usage      usageState
 	historyMu  sync.Mutex
 	historyLog []PersistedChatMessage
+	qualityMu  sync.Mutex
+	quality    qualityState
+	traceMu    sync.Mutex
+	traceLog   []RuntimeEvent
 }
 
 // AgentBridgeConfig defines shared resources for creating bridges.
@@ -167,6 +195,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		contextBuilder:            cfg.AgentInstance.ContextBuilder,
 		maxIterations:             cfg.MaxIterations,
 		llmOptions:                cfg.LLMOptions,
+		proactiveLLMOptions:       buildProactiveLLMOptions(cfg.LLMOptions),
 		asyncEventChan:            asyncChan,
 		runtimeEventChan:          runtimeChan,
 		workspaceArtifacts:        cfg.WorkspaceArtifacts,
@@ -235,11 +264,68 @@ func (ab *AgentBridge) EmitRuntimeEvent(evt RuntimeEvent) bool {
 	if evt.TimestampMS == 0 {
 		evt.TimestampMS = time.Now().UnixMilli()
 	}
+	ab.recordRuntimeQuality(evt)
+	ab.recordTraceEvent(evt)
 	select {
 	case ab.runtimeEventChan <- evt:
 		return true
 	default:
 		return false
+	}
+}
+
+func (ab *AgentBridge) recordTraceEvent(evt RuntimeEvent) {
+	if ab == nil {
+		return
+	}
+	ab.traceMu.Lock()
+	defer ab.traceMu.Unlock()
+	ab.traceLog = append(ab.traceLog, evt)
+	const maxTraceEvents = 4000
+	if len(ab.traceLog) > maxTraceEvents {
+		ab.traceLog = append([]RuntimeEvent(nil), ab.traceLog[len(ab.traceLog)-maxTraceEvents:]...)
+	}
+}
+
+func (ab *AgentBridge) recordRuntimeQuality(evt RuntimeEvent) {
+	if ab == nil {
+		return
+	}
+	ab.qualityMu.Lock()
+	defer ab.qualityMu.Unlock()
+
+	switch evt.Kind {
+	case "fallback_used":
+		ab.quality.fallbackCount++
+	case "retry_scheduled":
+		ab.quality.retryCount++
+	case "turn_error":
+		ab.quality.errorCount++
+		if ab.quality.interruptionPending {
+			ab.quality.interruptionPending = false
+		}
+	case "interruption":
+		ab.quality.interruptionCount++
+		ab.quality.interruptionPending = true
+	case "turn_end":
+		if ab.quality.interruptionPending && evt.Cause == "assistant_response_complete" {
+			ab.quality.interruptionRecovered++
+			ab.quality.interruptionPending = false
+		}
+	case "latency_marker":
+		if evt.Cause != "llm_first_token" || evt.Metadata == nil {
+			return
+		}
+		if raw, ok := evt.Metadata["elapsed_ms"]; ok {
+			switch v := raw.(type) {
+			case int64:
+				ab.quality.ttftSamplesMS = append(ab.quality.ttftSamplesMS, v)
+			case int:
+				ab.quality.ttftSamplesMS = append(ab.quality.ttftSamplesMS, int64(v))
+			case float64:
+				ab.quality.ttftSamplesMS = append(ab.quality.ttftSamplesMS, int64(v))
+			}
+		}
 	}
 }
 
@@ -352,6 +438,10 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 }
 
 func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, messages []providers.Message, cb func(chunk string), onDone func()) (bool, error) {
+	return ab.runIterationWithProfile(ctx, sessionKey, messages, cb, onDone, "conversation")
+}
+
+func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey string, messages []providers.Message, cb func(chunk string), onDone func(), profile string) (bool, error) {
 	// The maximum iterations check is still handled by passing state recursively, but since
 	// we spawn goroutines for tools and exit immediately, we shouldn't use a for loop for the async path.
 	// We'll process exactly ONE LLM response per call to `runIteration`.
@@ -359,12 +449,14 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 
 	logger.DebugCF("livekit", "AgentBridge iteration", map[string]any{
 		"session": sessionKey,
+		"profile": profile,
 	})
 	ab.EmitRuntimeEvent(RuntimeEvent{
 		Kind:       "turn_start",
 		SessionKey: sessionKey,
 		Metadata: map[string]any{
 			"message_count": len(messages),
+			"profile":       profile,
 		},
 	})
 	select {
@@ -383,7 +475,7 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 
 	toolDefs := ab.toolDefs()
 	callStarted := time.Now()
-	resp, err := ab.callLLM(ctx, messages, toolDefs, cb)
+	resp, err := ab.callLLM(ctx, messages, toolDefs, ab.optionsForProfile(profile), cb)
 	if err != nil {
 		ab.EmitRuntimeEvent(RuntimeEvent{
 			Kind:       "turn_error",
@@ -500,7 +592,7 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 		// trigger the next iteration after tools complete
 		// IMPORTANT: We use the asyncCtx (the original cancelable turn context) for the next iteration
 		// so that if the user starts speaking, the next iteration's LLM call is cancelled.
-		_, err := ab.runIteration(asyncCtx, asyncSessionKey, asyncMessages, asyncCb, asyncOnDone)
+		_, err := ab.runIterationWithProfile(asyncCtx, asyncSessionKey, asyncMessages, asyncCb, asyncOnDone, profile)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			ab.EmitRuntimeEvent(RuntimeEvent{
 				Kind:       "turn_error",
@@ -614,11 +706,12 @@ func (ab *AgentBridge) callLLM(
 	ctx context.Context,
 	messages []providers.Message,
 	toolDefs []providers.ToolDefinition,
+	llmOptions map[string]any,
 	cb func(chunk string),
 ) (*providers.LLMResponse, error) {
 	if ab.streamProvider != nil {
 		lastLen := 0
-		resp, err := ab.streamProvider.ChatStream(ctx, messages, toolDefs, ab.modelID, ab.llmOptions, func(acc string) {
+		resp, err := ab.streamProvider.ChatStream(ctx, messages, toolDefs, ab.modelID, llmOptions, func(acc string) {
 			if cb == nil {
 				return
 			}
@@ -637,7 +730,7 @@ func (ab *AgentBridge) callLLM(
 		return resp, nil
 	}
 
-	resp, err := ab.provider.Chat(ctx, messages, toolDefs, ab.modelID, ab.llmOptions)
+	resp, err := ab.provider.Chat(ctx, messages, toolDefs, ab.modelID, llmOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -645,6 +738,35 @@ func (ab *AgentBridge) callLLM(
 		cb(resp.Content)
 	}
 	return resp, nil
+}
+
+func (ab *AgentBridge) optionsForProfile(profile string) map[string]any {
+	if strings.EqualFold(profile, "proactive") {
+		return ab.proactiveLLMOptions
+	}
+	return ab.llmOptions
+}
+
+func cloneOptions(src map[string]any) map[string]any {
+	if src == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func buildProactiveLLMOptions(base map[string]any) map[string]any {
+	out := cloneOptions(base)
+	if _, ok := out["max_tokens"]; !ok {
+		out["max_tokens"] = 220
+	}
+	if _, ok := out["temperature"]; !ok {
+		out["temperature"] = 0.4
+	}
+	return out
 }
 
 func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc providers.ToolCall) *tools.ToolResult {
@@ -748,7 +870,7 @@ func (ab *AgentBridge) GenerateSpontaneousResponse(ctx context.Context, sessionK
 	messages := ab.buildMessages(history, summary, "", sessionKey)
 
 	// Call LLM to generate the announcement
-	_, err := ab.runIteration(ctx, sessionKey, messages, cb, onDone)
+	_, err := ab.runIterationWithProfile(ctx, sessionKey, messages, cb, onDone, "proactive")
 	return err
 }
 
@@ -779,7 +901,7 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 	}
 	messages := ab.buildMessages(history, summary, "", sessionKey)
 
-	_, err := ab.runIteration(ctx, sessionKey, messages, cb, onDone)
+	_, err := ab.runIterationWithProfile(ctx, sessionKey, messages, cb, onDone, "proactive")
 	return err
 }
 
@@ -983,5 +1105,54 @@ func (ab *AgentBridge) TranscriptSnapshot() []PersistedChatMessage {
 
 	out := make([]PersistedChatMessage, len(ab.historyLog))
 	copy(out, ab.historyLog)
+	return out
+}
+
+// SessionQualitySnapshot returns aggregate runtime quality metrics.
+func (ab *AgentBridge) SessionQualitySnapshot() SessionQualityReport {
+	ab.qualityMu.Lock()
+	defer ab.qualityMu.Unlock()
+
+	report := SessionQualityReport{
+		FallbackCount:         ab.quality.fallbackCount,
+		InterruptionCount:     ab.quality.interruptionCount,
+		InterruptionRecovered: ab.quality.interruptionRecovered,
+		ErrorCount:            ab.quality.errorCount,
+		RetryCount:            ab.quality.retryCount,
+	}
+
+	if report.InterruptionCount > 0 {
+		report.InterruptionRecoveryRate = float64(report.InterruptionRecovered) / float64(report.InterruptionCount)
+	}
+
+	if len(ab.quality.ttftSamplesMS) == 0 {
+		return report
+	}
+
+	samples := make([]int64, len(ab.quality.ttftSamplesMS))
+	copy(samples, ab.quality.ttftSamplesMS)
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+
+	var total int64
+	for _, v := range samples {
+		total += v
+	}
+	report.AvgTTFTMs = total / int64(len(samples))
+
+	mid := len(samples) / 2
+	if len(samples)%2 == 0 {
+		report.MedianTTFTMs = (samples[mid-1] + samples[mid]) / 2
+	} else {
+		report.MedianTTFTMs = samples[mid]
+	}
+	return report
+}
+
+// SessionTraceSnapshot returns a defensive copy of runtime event trace data.
+func (ab *AgentBridge) SessionTraceSnapshot() []RuntimeEvent {
+	ab.traceMu.Lock()
+	defer ab.traceMu.Unlock()
+	out := make([]RuntimeEvent, len(ab.traceLog))
+	copy(out, ab.traceLog)
 	return out
 }

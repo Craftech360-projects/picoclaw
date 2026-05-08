@@ -313,6 +313,7 @@ func (ap *AudioPipeline) logTurnLatency(meta *turnLatencyMeta, marker string, du
 		fields[k] = v
 	}
 	logger.InfoCF("livekit", "Turn latency marker", fields)
+	ap.emitRuntimeEvent("latency_marker", meta.Session, marker, "", fields)
 }
 
 func (ap *AudioPipeline) finalizeTurnLatency(meta *turnLatencyMeta, reason string) {

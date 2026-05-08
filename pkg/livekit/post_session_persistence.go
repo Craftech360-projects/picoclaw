@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -37,6 +39,7 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 	}
 
 	usage := bridge.UsageSnapshot()
+	quality := bridge.SessionQualitySnapshot()
 	messages := bridge.TranscriptSnapshot()
 	if usage.TotalTokens == 0 && len(messages) == 0 {
 		logger.DebugCF("livekit", "Skipping post-session persistence: no usage and no transcript", map[string]any{
@@ -50,6 +53,17 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		"device_mac": rs.deviceMAC,
 		"messages":   len(messages),
 		"tokens":     usage.TotalTokens,
+	})
+	logger.InfoCF("livekit", "Session quality summary", map[string]any{
+		"room":                       rs.roomName(),
+		"fallback_count":             quality.FallbackCount,
+		"interruption_count":         quality.InterruptionCount,
+		"interruption_recovered":     quality.InterruptionRecovered,
+		"interruption_recovery_rate": roundTo3(quality.InterruptionRecoveryRate),
+		"error_count":                quality.ErrorCount,
+		"retry_count":                quality.RetryCount,
+		"median_ttft_ms":             quality.MedianTTFTMs,
+		"avg_ttft_ms":                quality.AvgTTFTMs,
 	})
 
 	usageCtx, usageCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -100,6 +114,68 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		})
 	}
 	endCancel()
+
+	rs.exportSessionTraceBundle(bridge, usage, quality)
+}
+
+func (rs *RoomSession) exportSessionTraceBundle(bridge *AgentBridge, usage UsageSnapshot, quality SessionQualityReport) {
+	if rs == nil || bridge == nil || bridge.agentInstance == nil {
+		return
+	}
+	workspace := strings.TrimSpace(bridge.agentInstance.Workspace)
+	if workspace == "" {
+		return
+	}
+	traceDir := filepath.Join(workspace, "trace")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		logger.WarnCF("livekit", "Failed to create trace directory", map[string]any{
+			"room":  rs.roomName(),
+			"error": err.Error(),
+		})
+		return
+	}
+
+	trace := map[string]any{
+		"generated_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"session_id":   rs.roomName(),
+		"device_mac":   rs.deviceMAC,
+		"usage":        usage,
+		"quality":      quality,
+		"events":       bridge.SessionTraceSnapshot(),
+	}
+
+	data, err := json.MarshalIndent(trace, "", "  ")
+	if err != nil {
+		logger.WarnCF("livekit", "Failed to marshal session trace bundle", map[string]any{
+			"room":  rs.roomName(),
+			"error": err.Error(),
+		})
+		return
+	}
+
+	tracePath := filepath.Join(traceDir, "session-trace-"+safeTraceSuffix(rs.roomName())+".json")
+	if err := os.WriteFile(tracePath, data, 0o600); err != nil {
+		logger.WarnCF("livekit", "Failed to write session trace bundle", map[string]any{
+			"room":  rs.roomName(),
+			"error": err.Error(),
+		})
+		return
+	}
+
+	logger.InfoCF("livekit", "Session trace bundle exported", map[string]any{
+		"room":       rs.roomName(),
+		"trace_path": tracePath,
+		"events":     len(bridge.SessionTraceSnapshot()),
+	})
+}
+
+func safeTraceSuffix(in string) string {
+	s := strings.TrimSpace(in)
+	if s == "" {
+		return fmt.Sprintf("%d", time.Now().UnixMilli())
+	}
+	replacer := strings.NewReplacer(":", "_", "/", "_", "\\", "_", " ", "_")
+	return replacer.Replace(s)
 }
 
 func (rs *RoomSession) sendUsageSummary(ctx context.Context, usage UsageSnapshot) error {
