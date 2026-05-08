@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -236,28 +235,9 @@ func (ab *AgentBridge) Close() {
 		}
 		// Default behavior is ephemeral cleanup unless persistence is requested.
 		if !ab.preserveWorkspace && ab.agentInstance.Workspace != "" {
-			if hasPendingWorkspaceOutbox(ab.agentInstance.Workspace) {
-				logger.WarnCF("livekit", "Skipping workspace cleanup due to pending sync outbox", map[string]any{
-					"workspace": ab.agentInstance.Workspace,
-				})
-			} else {
-				os.RemoveAll(ab.agentInstance.Workspace)
-			}
+			os.RemoveAll(ab.agentInstance.Workspace)
 		}
 	}
-}
-
-func hasPendingWorkspaceOutbox(workspace string) bool {
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		return false
-	}
-	outboxDir := filepath.Join(workspace, ".picoclaw", "sync-outbox")
-	entries, err := os.ReadDir(outboxDir)
-	if err != nil {
-		return false
-	}
-	return len(entries) > 0
 }
 
 // AsyncEvents returns the channel that receives background task completion events.

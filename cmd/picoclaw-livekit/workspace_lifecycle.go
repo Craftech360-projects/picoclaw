@@ -27,10 +27,10 @@ func resolveLiveKitWorkspaceLifecycle(
 	switch {
 	case deviceMAC != "":
 		workspaceIdentity = "device-" + strings.ReplaceAll(deviceMAC, ":", "")
-		preserveWorkspace = true
+		preserveWorkspace = false
 	case strings.TrimSpace(agentID) != "":
 		workspaceIdentity = "agent-" + routing.NormalizeAgentID(agentID)
-		preserveWorkspace = true
+		preserveWorkspace = false
 	}
 	if workspaceIdentity == "" {
 		workspaceIdentity = "main"
