@@ -141,3 +141,42 @@ func TestReplayWorkspaceSyncOutboxRemovesQueuedPayloadOnSuccess(t *testing.T) {
 		t.Fatalf("expected empty outbox, got %d entries", len(outbox))
 	}
 }
+
+func TestReplayWorkspaceSyncOutboxDiscardsLegacyBinaryPayloadOn400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/workspace-sync") {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":400,"msg":"skills/foo.mp3 contains unsupported binary null bytes"}`))
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	cfg := config.LiveKitServiceManagerAPIConfig{
+		BaseURL: server.URL,
+		WorkspaceSync: config.LiveKitWorkspaceSyncConfig{
+			Enabled: true,
+		},
+	}
+
+	payload := []byte(`{"baseRevision":"1","newRevision":"2","files":[{"relativePath":"skills/foo.mp3","content":"bad"}]}`)
+	if err := queueWorkspaceSyncOutbox(workspace, payload, "unit-test"); err != nil {
+		t.Fatalf("queueWorkspaceSyncOutbox: %v", err)
+	}
+
+	replayed, err := replayWorkspaceSyncOutbox(context.Background(), cfg, "3c:0f:02:d3:6a:e8", workspace)
+	if err != nil {
+		t.Fatalf("replayWorkspaceSyncOutbox: %v", err)
+	}
+	if replayed != 0 {
+		t.Fatalf("replayed = %d, want 0", replayed)
+	}
+	outbox, err := listWorkspaceSyncOutbox(workspace)
+	if err != nil {
+		t.Fatalf("listWorkspaceSyncOutbox: %v", err)
+	}
+	if len(outbox) != 0 {
+		t.Fatalf("expected empty outbox after discard, got %d entries", len(outbox))
+	}
+}

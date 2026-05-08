@@ -677,6 +677,17 @@ func replayWorkspaceSyncOutbox(
 			})
 			continue
 		}
+		if status == http.StatusBadRequest &&
+			strings.Contains(strings.ToLower(string(body)), "unsupported binary null bytes") {
+			// Legacy outbox payload captured before binary/NUL filtering was introduced.
+			// Discard it and continue so newer clean snapshots can sync successfully.
+			_ = os.Remove(file)
+			logger.WarnCF("livekit", "workspace-sync outbox payload discarded due to binary/NUL validation", map[string]any{
+				"device_mac": deviceMAC,
+				"file":       filepath.Base(file),
+			})
+			continue
+		}
 		if status < 200 || status >= 300 {
 			return replayed, fmt.Errorf("workspace-sync outbox replay status=%d body=%s", status, strings.TrimSpace(string(body)))
 		}
