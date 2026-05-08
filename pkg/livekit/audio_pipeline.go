@@ -209,6 +209,24 @@ type voiceTurn struct {
 	reason string
 }
 
+type turnLatencyMetaKey struct{}
+
+type turnLatencyMeta struct {
+	mu sync.Mutex
+
+	TurnID    uint64
+	Session   string
+	Path      string
+	Trigger   string
+	STTStart  time.Time
+	LLMStart  time.Time
+	LLMFirst  time.Time
+	LLMFinal  time.Time
+	TTSFirst  time.Time
+	TTSFinal  time.Time
+	Completed bool
+}
+
 func (c *voiceTurnController) Start(parent context.Context, reason string) voiceTurn {
 	if parent == nil {
 		parent = context.Background()
@@ -249,6 +267,80 @@ func (c *voiceTurnController) Finish(turn voiceTurn) {
 	}
 }
 
+func (c *voiceTurnController) CurrentID() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active.id
+}
+
+func (ap *AudioPipeline) attachTurnLatencyMeta(turn voiceTurn, meta *turnLatencyMeta) voiceTurn {
+	if turn.ctx == nil || meta == nil {
+		return turn
+	}
+	turn.ctx = context.WithValue(turn.ctx, turnLatencyMetaKey{}, meta)
+	return turn
+}
+
+func latencyMetaFromContext(ctx context.Context) *turnLatencyMeta {
+	if ctx == nil {
+		return nil
+	}
+	meta, _ := ctx.Value(turnLatencyMetaKey{}).(*turnLatencyMeta)
+	return meta
+}
+
+func (ap *AudioPipeline) logTurnLatency(meta *turnLatencyMeta, marker string, duration time.Duration, extra map[string]any) {
+	if meta == nil {
+		return
+	}
+	fields := map[string]any{
+		"turn_id":      meta.TurnID,
+		"session":      meta.Session,
+		"path":         meta.Path,
+		"trigger":      meta.Trigger,
+		"marker":       marker,
+		"elapsed_ms":   duration.Milliseconds(),
+		"timestamp_ms": time.Now().UnixMilli(),
+	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	logger.InfoCF("livekit", "Turn latency marker", fields)
+}
+
+func (ap *AudioPipeline) finalizeTurnLatency(meta *turnLatencyMeta, reason string) {
+	if meta == nil {
+		return
+	}
+	meta.mu.Lock()
+	defer meta.mu.Unlock()
+	if meta.Completed {
+		return
+	}
+	meta.Completed = true
+	base := meta.LLMStart
+	if !meta.STTStart.IsZero() {
+		base = meta.STTStart
+	}
+	if !base.IsZero() {
+		ap.logTurnLatency(meta, "turn_total_e2e", time.Since(base), map[string]any{"finalize_reason": reason})
+	}
+}
+
+func (ap *AudioPipeline) emitRuntimeEvent(kind, sessionKey, cause, errText string, meta map[string]any) {
+	if ap == nil || ap.bridge == nil {
+		return
+	}
+	evt := RuntimeEvent{
+		Kind:       kind,
+		SessionKey: sessionKey,
+		Cause:      cause,
+		Error:      errText,
+		Metadata:   meta,
+	}
+	_ = ap.bridge.EmitRuntimeEvent(evt)
+}
+
 func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
 	var lang string
 	if session != nil {
@@ -287,6 +379,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	splitter := newSentenceSplitter()
 	speechDeduper := &speechChunkDeduper{}
 	firstChunkReceived := false
+	latencyMeta := latencyMetaFromContext(ctx)
 	var fillerCtx context.Context
 	var fillerCancel context.CancelFunc
 
@@ -316,6 +409,9 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		}
 		if !firstChunkReceived {
 			firstChunkReceived = true
+			if latencyMeta != nil {
+				ap.logTurnLatency(latencyMeta, "llm_first_token", time.Since(latencyMeta.LLMStart), nil)
+			}
 			if ap.session != nil {
 				ap.session.PublishAgentState("thinking", "speaking")
 				ap.publishSpeechCreated()
@@ -344,6 +440,9 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		if remainder := splitter.Flush(); remainder != "" {
 			ap.synthesizeDeduped(ctx, speechDeduper, remainder)
 		}
+		if latencyMeta != nil {
+			ap.logTurnLatency(latencyMeta, "llm_final_token", time.Since(latencyMeta.LLMStart), nil)
+		}
 		ap.flushSilence(500) // add 500ms silence so device buffer doesn't clip the final word
 		if ap.session != nil {
 			ap.session.PublishAgentState("speaking", "listening")
@@ -370,6 +469,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 			if interruptedErr == nil {
 				interruptedErr = err
 			}
+			ap.emitRuntimeEvent("interruption", sessionKey, "chatstream_context_canceled", interruptedErr.Error(), nil)
 			logger.InfoCF("livekit", "ChatStream interrupted by canceled turn context", map[string]any{
 				"session":       sessionKey,
 				"cancel_reason": ap.currentTTSCancelReason(),
@@ -382,6 +482,10 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 			"max":     maxRetries,
 			"error":   err.Error(),
 			"session": sessionKey,
+		})
+		ap.emitRuntimeEvent("retry_scheduled", sessionKey, "chatstream_error", err.Error(), map[string]any{
+			"attempt": attempt + 1,
+			"max":     maxRetries,
 		})
 		if attempt < maxRetries-1 {
 			select {
@@ -400,6 +504,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 	if err != nil {
 		// All retries exhausted — play a language-aware friendly fallback and clean up.
 		fallback := ap.retryFallbackPhrase()
+		ap.emitRuntimeEvent("fallback_used", sessionKey, "chatstream_retries_exhausted", err.Error(), nil)
 		logger.ErrorCF("livekit", "All ChatStream retries failed — playing fallback", map[string]any{
 			"session": sessionKey,
 			"error":   err.Error(),
@@ -427,10 +532,15 @@ func (ap *AudioPipeline) HandleUtteranceForTurn(turn voiceTurn, sessionKey strin
 		if !ap.turns.IsActive(turn) {
 			return
 		}
+		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "turn_done_callback")
 		turn.cancel()
 		ap.turns.Finish(turn)
 	})
+	if err != nil && isContextCanceled(turn.ctx, err) {
+		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "turn_canceled")
+	}
 	if !asyncPending {
+		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "turn_sync_complete")
 		ap.turns.Finish(turn)
 	}
 	return asyncPending, err
@@ -500,6 +610,13 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 	}
 	if dynamicGreetingRateLimited() {
 		turn := ap.turns.Start(ctx, "greeting_rate_limited_fallback")
+		turn = ap.attachTurnLatencyMeta(turn, &turnLatencyMeta{
+			TurnID:   turn.id,
+			Session:  sessionKey,
+			Path:     "greeting",
+			Trigger:  "cooldown_fallback",
+			LLMStart: time.Now(),
+		})
 		ap.setTTSCancel(turn.cancel)
 		ap.session.PublishAgentState("listening", "speaking")
 		ap.publishSpeechCreated()
@@ -510,6 +627,8 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 		}
 		turn.cancel()
 		ap.turns.Finish(turn)
+		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "cooldown_fallback_complete")
+		ap.emitRuntimeEvent("fallback_used", sessionKey, "greeting_cooldown_active", "", nil)
 		logger.InfoCF("livekit", "Skipped dynamic greeting due to active rate-limit cooldown", map[string]any{
 			"session": sessionKey,
 		})
@@ -522,6 +641,13 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 
 	ap.session.PublishAgentState("listening", "thinking")
 	turn := ap.turns.Start(ctx, "greeting")
+	turn = ap.attachTurnLatencyMeta(turn, &turnLatencyMeta{
+		TurnID:   turn.id,
+		Session:  sessionKey,
+		Path:     "greeting",
+		Trigger:  "dynamic",
+		LLMStart: time.Now(),
+	})
 	ap.setTTSCancel(turn.cancel)
 	firstChunkReceived := false
 	splitter := newSentenceSplitter()
@@ -534,6 +660,9 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			}
 			if !firstChunkReceived {
 				firstChunkReceived = true
+				if meta := latencyMetaFromContext(turn.ctx); meta != nil {
+					ap.logTurnLatency(meta, "llm_first_token", time.Since(meta.LLMStart), nil)
+				}
 				ap.session.PublishAgentState("thinking", "speaking")
 				ap.publishSpeechCreated()
 			}
@@ -549,10 +678,14 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			if remainder := splitter.Flush(); remainder != "" {
 				ap.synthesizeDeduped(turn.ctx, speechDeduper, remainder)
 			}
+			if meta := latencyMetaFromContext(turn.ctx); meta != nil {
+				ap.logTurnLatency(meta, "llm_final_token", time.Since(meta.LLMStart), nil)
+			}
 			ap.flushSilenceForContext(turn.ctx, 500)
 			ap.session.PublishAgentState("speaking", "listening")
 			turn.cancel()
 			ap.turns.Finish(turn)
+			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "greeting_complete")
 		})
 
 		if err != nil {
@@ -572,8 +705,10 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			}
 			turn.cancel()
 			ap.turns.Finish(turn)
+			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "greeting_error")
 			if isRateLimitError(err) {
 				markDynamicGreetingRateLimited(2 * time.Minute)
+				ap.emitRuntimeEvent("fallback_used", sessionKey, "greeting_rate_limited", err.Error(), nil)
 				logger.WarnCF("livekit", "Dynamic greeting rate-limited; used fallback greeting", map[string]any{
 					"session": sessionKey,
 					"error":   err.Error(),
@@ -582,6 +717,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 				// Non-429 provider failures can still storm proactive turns; apply a
 				// shorter cooldown while preserving local fallback speech behavior.
 				markDynamicGreetingRateLimited(30 * time.Second)
+				ap.emitRuntimeEvent("fallback_used", sessionKey, "greeting_provider_unavailable", err.Error(), nil)
 				logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
 					"session": sessionKey,
 					"error":   err.Error(),
@@ -607,6 +743,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var segmentTimerC <-chan time.Time
 	var lastFlushedText string
 	var lastFlushedAt time.Time
+	var sttSpeechStartAt time.Time
+	var sttFirstPartialAt time.Time
+	var sttFirstFinalAt time.Time
 	var pendingBargeIn bool
 	var hardCapFinalizePending bool
 
@@ -703,6 +842,12 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		if text == "" {
 			return
 		}
+		speechStartSnapshot := sttSpeechStartAt
+		firstPartialSnapshot := sttFirstPartialAt
+		firstFinalSnapshot := sttFirstFinalAt
+		sttSpeechStartAt = time.Time{}
+		sttFirstPartialAt = time.Time{}
+		sttFirstFinalAt = time.Time{}
 		normalizedText := normalizeUtteranceForDuplicateCheck(text)
 		if normalizedText != "" &&
 			normalizedText == lastFlushedText &&
@@ -729,6 +874,21 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		}
 
 		turn := ap.turns.Start(ctx, "new_user_utterance")
+		latencyMeta := &turnLatencyMeta{
+			TurnID:   turn.id,
+			Session:  sessionKey,
+			Path:     "user_turn",
+			Trigger:  trigger,
+			STTStart: speechStartSnapshot,
+			LLMStart: time.Now(),
+		}
+		turn = ap.attachTurnLatencyMeta(turn, latencyMeta)
+		if !speechStartSnapshot.IsZero() && !firstPartialSnapshot.IsZero() {
+			ap.logTurnLatency(latencyMeta, "stt_first_partial", firstPartialSnapshot.Sub(speechStartSnapshot), nil)
+		}
+		if !speechStartSnapshot.IsZero() && !firstFinalSnapshot.IsZero() {
+			ap.logTurnLatency(latencyMeta, "stt_first_final", firstFinalSnapshot.Sub(speechStartSnapshot), nil)
+		}
 		ap.setTTSCancel(turn.cancel)
 
 		go func() {
@@ -750,6 +910,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			}
 			if evt, ok := vadEvt.(vad.VADEvent); ok {
 				if evt.SpeechStart {
+					sttSpeechStartAt = time.Now()
+					sttFirstPartialAt = time.Time{}
+					sttFirstFinalAt = time.Time{}
 					if vadSpeechEnded && (utterance.Len() > 0 || strings.TrimSpace(latestTranscript) != "") {
 						flushBufferedUtterance("next_vad_start")
 					}
@@ -802,6 +965,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 
 			if evt.Text != "" {
 				latestTranscript = evt.Text
+				if sttFirstPartialAt.IsZero() {
+					sttFirstPartialAt = time.Now()
+				}
 				if pendingBargeIn {
 					logger.InfoCF("livekit", "Transcript confirmed user speech; interrupting active agent audio if present", map[string]any{
 						"session": ap.sessionKey(),
@@ -814,6 +980,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			}
 
 			if evt.IsFinal && evt.Text != "" {
+				if sttFirstFinalAt.IsZero() {
+					sttFirstFinalAt = time.Now()
+				}
 				merged := mergeFinalTranscriptChunk(utterance.String(), evt.Text)
 				utterance.Reset()
 				utterance.WriteString(merged)
@@ -916,6 +1085,13 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			return
 		}
 		turn := ap.turns.Start(context.Background(), "background_cron_announcement")
+		turn = ap.attachTurnLatencyMeta(turn, &turnLatencyMeta{
+			TurnID:   turn.id,
+			Session:  sessionKey,
+			Path:     "background_cron",
+			Trigger:  "cron_direct_announcement",
+			LLMStart: time.Now(),
+		})
 		ap.setTTSCancel(turn.cancel)
 		if ap.session != nil {
 			ap.session.PublishAgentState("listening", "speaking")
@@ -928,6 +1104,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		}
 		turn.cancel()
 		ap.turns.Finish(turn)
+		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_cron_complete")
 		return
 	}
 
@@ -938,6 +1115,13 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 
 	if dynamicGreetingRateLimited() {
 		turn := ap.turns.Start(context.Background(), "background_task_cooldown_fallback")
+		turn = ap.attachTurnLatencyMeta(turn, &turnLatencyMeta{
+			TurnID:   turn.id,
+			Session:  sessionKey,
+			Path:     "background_task",
+			Trigger:  "cooldown_fallback",
+			LLMStart: time.Now(),
+		})
 		ap.setTTSCancel(turn.cancel)
 		if ap.session != nil {
 			ap.session.PublishAgentState("listening", "speaking")
@@ -950,6 +1134,10 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		}
 		turn.cancel()
 		ap.turns.Finish(turn)
+		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_cooldown_fallback_complete")
+		ap.emitRuntimeEvent("fallback_used", sessionKey, "background_cooldown_active", "", map[string]any{
+			"tool": evt.ToolName,
+		})
 		logger.InfoCF("livekit", "Skipped dynamic spontaneous response due to active rate-limit cooldown", map[string]any{
 			"tool":    evt.ToolName,
 			"session": sessionKey,
@@ -958,6 +1146,13 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 	}
 
 	turn := ap.turns.Start(context.Background(), "background_task_result")
+	turn = ap.attachTurnLatencyMeta(turn, &turnLatencyMeta{
+		TurnID:   turn.id,
+		Session:  sessionKey,
+		Path:     "background_task",
+		Trigger:  evt.ToolName,
+		LLMStart: time.Now(),
+	})
 	ap.setTTSCancel(turn.cancel)
 
 	splitter := newSentenceSplitter()
@@ -975,6 +1170,9 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			}
 			if !firstChunkReceived {
 				firstChunkReceived = true
+				if meta := latencyMetaFromContext(turn.ctx); meta != nil {
+					ap.logTurnLatency(meta, "llm_first_token", time.Since(meta.LLMStart), nil)
+				}
 				if ap.session != nil {
 					ap.session.PublishAgentState("thinking", "speaking")
 					ap.publishSpeechCreated()
@@ -992,12 +1190,16 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			if remainder := splitter.Flush(); remainder != "" {
 				ap.synthesizeDeduped(turn.ctx, speechDeduper, remainder)
 			}
+			if meta := latencyMetaFromContext(turn.ctx); meta != nil {
+				ap.logTurnLatency(meta, "llm_final_token", time.Since(meta.LLMStart), nil)
+			}
 			ap.flushSilenceForContext(turn.ctx, 500) // trailing silence for spontaneous replies
 			if ap.session != nil {
 				ap.session.PublishAgentState("speaking", "listening")
 			}
 			turn.cancel()
 			ap.turns.Finish(turn)
+			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_task_complete")
 		})
 		if err != nil {
 			shouldFallback := !firstChunkReceived && turn.ctx.Err() == nil && ap.turns.IsActive(turn)
@@ -1014,6 +1216,9 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			}
 			if isRateLimitError(err) {
 				markDynamicGreetingRateLimited(2 * time.Minute)
+				ap.emitRuntimeEvent("fallback_used", sessionKey, "background_rate_limited", err.Error(), map[string]any{
+					"tool": evt.ToolName,
+				})
 				logger.WarnCF("livekit", "Spontaneous response rate-limited; used fallback announcement", map[string]any{
 					"error":   err.Error(),
 					"tool":    evt.ToolName,
@@ -1021,6 +1226,9 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 				})
 			} else {
 				markDynamicGreetingRateLimited(30 * time.Second)
+				ap.emitRuntimeEvent("fallback_used", sessionKey, "background_provider_unavailable", err.Error(), map[string]any{
+					"tool": evt.ToolName,
+				})
 				logger.ErrorCF("livekit", "Spontaneous response generation failed; used fallback announcement", map[string]any{
 					"error":   err.Error(),
 					"tool":    evt.ToolName,
@@ -1029,6 +1237,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			}
 			turn.cancel()
 			ap.turns.Finish(turn)
+			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_task_error")
 			logger.DebugCF("livekit", "Spontaneous response turn finalized after error", map[string]any{
 				"error":   err.Error(),
 				"tool":    evt.ToolName,
@@ -1072,6 +1281,7 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 		"session":   ap.sessionKey(),
 		"track_sid": ap.localTrackSID(),
 	})
+	latencyMeta := latencyMetaFromContext(ctx)
 
 	started := time.Now()
 	wroteAudio := false
@@ -1094,6 +1304,23 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 
 		chunk, err := stream.Read()
 		if err == io.EOF {
+			if latencyMeta != nil {
+				latencyMeta.mu.Lock()
+				if latencyMeta.TTSFinal.IsZero() {
+					latencyMeta.TTSFinal = time.Now()
+					llmBase := latencyMeta.LLMStart
+					sttBase := latencyMeta.STTStart
+					latencyMeta.mu.Unlock()
+					if !llmBase.IsZero() {
+						ap.logTurnLatency(latencyMeta, "tts_final_audio", time.Since(llmBase), nil)
+					}
+					if !sttBase.IsZero() {
+						ap.logTurnLatency(latencyMeta, "tts_final_audio_from_stt_start", time.Since(sttBase), nil)
+					}
+				} else {
+					latencyMeta.mu.Unlock()
+				}
+			}
 			logger.DebugCF("livekit", "Audio stream complete", map[string]any{
 				"session":         ap.sessionKey(),
 				"track_sid":       ap.localTrackSID(),
@@ -1142,6 +1369,23 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 		samplesWritten += len(samples)
 		if !wroteAudio {
 			wroteAudio = true
+			if latencyMeta != nil {
+				latencyMeta.mu.Lock()
+				if latencyMeta.TTSFirst.IsZero() {
+					latencyMeta.TTSFirst = time.Now()
+					llmBase := latencyMeta.LLMStart
+					sttBase := latencyMeta.STTStart
+					latencyMeta.mu.Unlock()
+					if !llmBase.IsZero() {
+						ap.logTurnLatency(latencyMeta, "tts_first_audio", time.Since(llmBase), nil)
+					}
+					if !sttBase.IsZero() {
+						ap.logTurnLatency(latencyMeta, "tts_first_audio_from_stt_start", time.Since(sttBase), nil)
+					}
+				} else {
+					latencyMeta.mu.Unlock()
+				}
+			}
 			minSample, maxSample, avgAbs := sampleStats(samples)
 			logger.DebugCF("livekit", "TTS audio written", map[string]any{
 				"session":      ap.sessionKey(),
@@ -1184,6 +1428,9 @@ func (ap *AudioPipeline) cancelTTS(reason string) {
 
 	if hadActiveTTS {
 		ap.session.PublishAgentState("speaking", "listening")
+		ap.emitRuntimeEvent("interruption", ap.sessionKey(), reason, "", map[string]any{
+			"had_active_tts": hadActiveTTS,
+		})
 	}
 
 	logger.DebugCF("livekit", "TTS cancel/clear queue", map[string]any{

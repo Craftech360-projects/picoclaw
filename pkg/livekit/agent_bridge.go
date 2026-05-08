@@ -26,6 +26,19 @@ type AsyncEvent struct {
 	Result     *tools.ToolResult
 }
 
+// RuntimeEvent is a lightweight structured observability event for LiveKit
+// runtime lifecycle tracking.
+type RuntimeEvent struct {
+	Kind        string         `json:"kind"`
+	TimestampMS int64          `json:"timestamp_ms"`
+	SessionKey  string         `json:"session_key,omitempty"`
+	ToolName    string         `json:"tool_name,omitempty"`
+	Attempt     int            `json:"attempt,omitempty"`
+	Cause       string         `json:"cause,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
 const (
 	chatTypeUser      = 1
 	chatTypeAssistant = 2
@@ -84,6 +97,7 @@ type AgentBridge struct {
 	maxIterations      int
 	llmOptions         map[string]any
 	asyncEventChan     chan AsyncEvent // receives background task completions
+	runtimeEventChan   chan RuntimeEvent
 	workspaceArtifacts WorkspaceArtifactStore
 	mcpManager         MCPManager
 
@@ -109,6 +123,7 @@ type AgentBridgeConfig struct {
 	MaxIterations      int
 	LLMOptions         map[string]any
 	AsyncEventChan     chan AsyncEvent // optional channel for background task results
+	RuntimeEventChan   chan RuntimeEvent
 	WorkspaceArtifacts WorkspaceArtifactStore
 	MCPManager         MCPManager
 	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
@@ -127,6 +142,10 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 	asyncChan := cfg.AsyncEventChan
 	if asyncChan == nil {
 		asyncChan = make(chan AsyncEvent, 16)
+	}
+	runtimeChan := cfg.RuntimeEventChan
+	if runtimeChan == nil {
+		runtimeChan = make(chan RuntimeEvent, 128)
 	}
 	summarizeThreshold := cfg.SummarizeMessageThreshold
 	if summarizeThreshold <= 0 {
@@ -149,6 +168,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		maxIterations:             cfg.MaxIterations,
 		llmOptions:                cfg.LLMOptions,
 		asyncEventChan:            asyncChan,
+		runtimeEventChan:          runtimeChan,
 		workspaceArtifacts:        cfg.WorkspaceArtifacts,
 		mcpManager:                cfg.MCPManager,
 		summarizeMessageThreshold: summarizeThreshold,
@@ -167,6 +187,10 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 // Close gracefully releases the session memory store and conditionally cleans
 // the active workspace.
 func (ab *AgentBridge) Close() {
+	if ab.runtimeEventChan != nil {
+		close(ab.runtimeEventChan)
+		ab.runtimeEventChan = nil
+	}
 	if ab.mcpManager != nil {
 		if err := ab.mcpManager.Close(); err != nil {
 			logger.WarnCF("livekit", "Failed to close MCP manager",
@@ -195,6 +219,30 @@ func (ab *AgentBridge) AsyncEvents() <-chan AsyncEvent {
 	return ab.asyncEventChan
 }
 
+// RuntimeEvents returns the channel that carries structured runtime events.
+func (ab *AgentBridge) RuntimeEvents() <-chan RuntimeEvent {
+	if ab == nil {
+		return nil
+	}
+	return ab.runtimeEventChan
+}
+
+// EmitRuntimeEvent publishes a runtime event in a non-blocking way.
+func (ab *AgentBridge) EmitRuntimeEvent(evt RuntimeEvent) bool {
+	if ab == nil || ab.runtimeEventChan == nil {
+		return false
+	}
+	if evt.TimestampMS == 0 {
+		evt.TimestampMS = time.Now().UnixMilli()
+	}
+	select {
+	case ab.runtimeEventChan <- evt:
+		return true
+	default:
+		return false
+	}
+}
+
 // EnqueueAsyncEvent publishes a background event to the bridge async queue.
 // Returns false when the bridge is nil, the queue is unavailable, or the queue is full.
 func (ab *AgentBridge) EnqueueAsyncEvent(evt AsyncEvent) bool {
@@ -203,8 +251,19 @@ func (ab *AgentBridge) EnqueueAsyncEvent(evt AsyncEvent) bool {
 	}
 	select {
 	case ab.asyncEventChan <- evt:
+		ab.EmitRuntimeEvent(RuntimeEvent{
+			Kind:       "background_event_enqueued",
+			SessionKey: evt.SessionKey,
+			ToolName:   evt.ToolName,
+		})
 		return true
 	default:
+		ab.EmitRuntimeEvent(RuntimeEvent{
+			Kind:       "background_event_dropped",
+			SessionKey: evt.SessionKey,
+			ToolName:   evt.ToolName,
+			Cause:      "queue_full",
+		})
 		return false
 	}
 }
@@ -301,8 +360,20 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 	logger.DebugCF("livekit", "AgentBridge iteration", map[string]any{
 		"session": sessionKey,
 	})
+	ab.EmitRuntimeEvent(RuntimeEvent{
+		Kind:       "turn_start",
+		SessionKey: sessionKey,
+		Metadata: map[string]any{
+			"message_count": len(messages),
+		},
+	})
 	select {
 	case <-ctx.Done():
+		ab.EmitRuntimeEvent(RuntimeEvent{
+			Kind:       "turn_end",
+			SessionKey: sessionKey,
+			Cause:      "context_canceled",
+		})
 		if onDone != nil {
 			onDone()
 		}
@@ -314,6 +385,12 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 	callStarted := time.Now()
 	resp, err := ab.callLLM(ctx, messages, toolDefs, cb)
 	if err != nil {
+		ab.EmitRuntimeEvent(RuntimeEvent{
+			Kind:       "turn_error",
+			SessionKey: sessionKey,
+			Error:      err.Error(),
+			Cause:      "llm_call_failed",
+		})
 		if onDone != nil {
 			onDone()
 		}
@@ -358,12 +435,24 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 		if onDone != nil {
 			onDone()
 		}
+		ab.EmitRuntimeEvent(RuntimeEvent{
+			Kind:       "turn_end",
+			SessionKey: sessionKey,
+			Cause:      "assistant_response_complete",
+		})
 		return false, nil
 	}
 
 	logger.InfoCF("livekit", "Tool calls requested", map[string]any{
 		"count":   len(normalized),
 		"session": sessionKey,
+	})
+	ab.EmitRuntimeEvent(RuntimeEvent{
+		Kind:       "tool_calls_requested",
+		SessionKey: sessionKey,
+		Metadata: map[string]any{
+			"count": len(normalized),
+		},
 	})
 
 	// Notify UI of the tool call action
@@ -381,7 +470,22 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 		// Ideally we should use a bounded context tied to the overall room session.
 		toolCtx := context.Background()
 		for _, tc := range asyncCalls {
+			ab.EmitRuntimeEvent(RuntimeEvent{
+				Kind:       "tool_call_start",
+				SessionKey: asyncSessionKey,
+				ToolName:   tc.Name,
+			})
 			result := ab.executeTool(toolCtx, asyncSessionKey, tc)
+			evt := RuntimeEvent{
+				Kind:       "tool_call_end",
+				SessionKey: asyncSessionKey,
+				ToolName:   tc.Name,
+			}
+			if result != nil && result.IsError {
+				evt.Error = result.ForLLM
+				evt.Cause = "tool_error"
+			}
+			ab.EmitRuntimeEvent(evt)
 			toolMsg := providers.Message{
 				Role:       "tool",
 				Content:    result.ContentForLLM(),
@@ -398,6 +502,12 @@ func (ab *AgentBridge) runIteration(ctx context.Context, sessionKey string, mess
 		// so that if the user starts speaking, the next iteration's LLM call is cancelled.
 		_, err := ab.runIteration(asyncCtx, asyncSessionKey, asyncMessages, asyncCb, asyncOnDone)
 		if err != nil && !errors.Is(err, context.Canceled) {
+			ab.EmitRuntimeEvent(RuntimeEvent{
+				Kind:       "turn_error",
+				SessionKey: asyncSessionKey,
+				Cause:      "async_iteration_failed",
+				Error:      err.Error(),
+			})
 			logger.ErrorCF("livekit", "Async tool iteration failed", map[string]any{
 				"error":   err.Error(),
 				"session": asyncSessionKey,
