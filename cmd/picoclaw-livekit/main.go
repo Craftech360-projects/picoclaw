@@ -558,13 +558,25 @@ func main() {
 				}
 				cronTool.SetExecutor(cronExecutor)
 				output := strings.TrimSpace(cronTool.ExecuteJob(context.Background(), job))
-				if output == "" || strings.EqualFold(output, "ok") {
+
+				// In LiveKit sessions, deliver=true reminders can legitimately return "ok"
+				// after publishing to MessageBus. Ensure they are still spoken in-room.
+				announcement := output
+				if announcement == "" || strings.EqualFold(announcement, "ok") {
+					if job.Payload.Deliver {
+						if reminder := strings.TrimSpace(job.Payload.Message); reminder != "" {
+							announcement = reminder
+						}
+					}
+				}
+
+				if announcement == "" || strings.EqualFold(announcement, "ok") {
 					return output, nil
 				}
 				queued := bridge.EnqueueAsyncEvent(livekit.AsyncEvent{
 					SessionKey: cronSessionKey,
 					ToolName:   "cron",
-					Result:     tools.SilentResult(output),
+					Result:     tools.SilentResult(announcement),
 				})
 				if !queued {
 					logger.WarnCF("livekit", "Cron result async queue is full; dropping announcement", map[string]any{
