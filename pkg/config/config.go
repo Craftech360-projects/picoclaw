@@ -870,12 +870,24 @@ type LiveKitServiceManagerAPIConfig struct {
 	RecentLimit         int    `json:"recent_limit,omitempty"          env:"PICOCLAW_LIVEKIT_MANAGER_RECENT_LIMIT"`
 }
 
+// LiveKitServiceRuntimeConfig exposes runtime voice controls for the standalone
+// LiveKit service so deployments can tune behavior without code changes.
+type LiveKitServiceRuntimeConfig struct {
+	GreetingMode               string  `json:"greeting_mode,omitempty"                   env:"PICOCLAW_LIVEKIT_RUNTIME_GREETING_MODE"`        // dynamic|fallback|disabled
+	AsyncAnnounceMode          string  `json:"async_announce_mode,omitempty"              env:"PICOCLAW_LIVEKIT_RUNTIME_ASYNC_ANNOUNCE_MODE"` // immediate|queue|silent_append
+	VADThreshold               float64 `json:"vad_threshold,omitempty"                    env:"PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD"`       // 0..1
+	VADEndpointMS              int     `json:"vad_endpoint_ms,omitempty"                  env:"PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS"`
+	RateLimitCooldownSeconds   int     `json:"rate_limit_cooldown_seconds,omitempty"      env:"PICOCLAW_LIVEKIT_RUNTIME_RATE_LIMIT_COOLDOWN_SECONDS"`
+	ProviderFailureCooldownSec int     `json:"provider_failure_cooldown_seconds,omitempty" env:"PICOCLAW_LIVEKIT_RUNTIME_PROVIDER_FAILURE_COOLDOWN_SECONDS"`
+}
+
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.
 type LiveKitServiceConfig struct {
 	ServerURL    string                         `json:"server_url" env:"PICOCLAW_LIVEKIT_SERVER_URL"`
 	TTS          LiveKitServiceTTSConfig        `json:"tts"`
 	STT          LiveKitServiceSTTConfig        `json:"stt"`
 	ManagerAPI   LiveKitServiceManagerAPIConfig `json:"manager_api,omitempty"`
+	Runtime      LiveKitServiceRuntimeConfig    `json:"runtime,omitempty"`
 	Skills       []string                       `json:"skills,omitempty" env:"PICOCLAW_LIVEKIT_SKILLS"`
 	ToolFeedback map[string]string              `json:"tool_feedback,omitempty"`
 	HealthPort   int                            `json:"health_port,omitempty" env:"PICOCLAW_LIVEKIT_HEALTH_PORT"`

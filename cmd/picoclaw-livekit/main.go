@@ -76,6 +76,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: livekit_service.server_url is required")
 		os.Exit(1)
 	}
+	normalizeLiveKitRuntimeConfig(&lkCfg.Runtime)
+	logger.InfoCF("livekit", "LiveKit runtime policy", map[string]any{
+		"greeting_mode":                     lkCfg.Runtime.GreetingMode,
+		"async_announce_mode":               lkCfg.Runtime.AsyncAnnounceMode,
+		"vad_threshold":                     lkCfg.Runtime.VADThreshold,
+		"vad_endpoint_ms":                   lkCfg.Runtime.VADEndpointMS,
+		"rate_limit_cooldown_seconds":       lkCfg.Runtime.RateLimitCooldownSeconds,
+		"provider_failure_cooldown_seconds": lkCfg.Runtime.ProviderFailureCooldownSec,
+	})
 
 	// Initialize STT factory with PostgreSQL
 	sttDBSource := ""
@@ -639,6 +648,7 @@ func main() {
 				SampleRate:      ttsSampleRate,
 				FillerWords:     lkCfg.TTS.FillerWords,
 				PrimaryLanguage: primaryLanguage,
+				Runtime:         lkCfg.Runtime,
 			})
 		},
 	}
@@ -678,6 +688,65 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
+}
+
+func normalizeLiveKitRuntimeConfig(rt *config.LiveKitServiceRuntimeConfig) {
+	if rt == nil {
+		return
+	}
+
+	greetingMode := strings.ToLower(strings.TrimSpace(rt.GreetingMode))
+	switch greetingMode {
+	case "", "dynamic":
+		rt.GreetingMode = "dynamic"
+	case "fallback", "disabled":
+		rt.GreetingMode = greetingMode
+	default:
+		logger.WarnCF("livekit", "Invalid runtime greeting mode, defaulting to dynamic", map[string]any{
+			"value": rt.GreetingMode,
+		})
+		rt.GreetingMode = "dynamic"
+	}
+
+	asyncMode := strings.ToLower(strings.TrimSpace(rt.AsyncAnnounceMode))
+	switch asyncMode {
+	case "", "immediate":
+		rt.AsyncAnnounceMode = "immediate"
+	case "queue", "silent_append":
+		rt.AsyncAnnounceMode = asyncMode
+	default:
+		logger.WarnCF("livekit", "Invalid async announce mode, defaulting to immediate", map[string]any{
+			"value": rt.AsyncAnnounceMode,
+		})
+		rt.AsyncAnnounceMode = "immediate"
+	}
+
+	if rt.VADThreshold <= 0 || rt.VADThreshold > 1 {
+		if rt.VADThreshold != 0 {
+			logger.WarnCF("livekit", "Invalid VAD threshold, defaulting to 0.7", map[string]any{
+				"value": rt.VADThreshold,
+			})
+		}
+		rt.VADThreshold = 0.7
+	}
+	if rt.VADEndpointMS <= 0 {
+		rt.VADEndpointMS = 1000
+	}
+	if rt.VADEndpointMS < 200 {
+		logger.WarnCF("livekit", "VAD endpoint too low; clamped to 200ms", map[string]any{"value": rt.VADEndpointMS})
+		rt.VADEndpointMS = 200
+	}
+	if rt.VADEndpointMS > 5000 {
+		logger.WarnCF("livekit", "VAD endpoint too high; clamped to 5000ms", map[string]any{"value": rt.VADEndpointMS})
+		rt.VADEndpointMS = 5000
+	}
+
+	if rt.RateLimitCooldownSeconds <= 0 {
+		rt.RateLimitCooldownSeconds = 120
+	}
+	if rt.ProviderFailureCooldownSec <= 0 {
+		rt.ProviderFailureCooldownSec = 30
+	}
 }
 
 func configureGoogleCredentials(cfg *config.Config, cfgPath string) {

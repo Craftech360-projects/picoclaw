@@ -21,6 +21,7 @@ import (
 	lkmedia "github.com/livekit/server-sdk-go/v2/pkg/media"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
@@ -51,6 +52,7 @@ type RoomSession struct {
 	sampleRate       int
 	fillerWords      []string
 	primaryLanguage  string // from room metadata, used for language-aware fallbacks
+	runtime          config.LiveKitServiceRuntimeConfig
 	managerAPIURL    string
 	managerAPISecret string
 	deviceMAC        string
@@ -88,6 +90,7 @@ type RoomSessionConfig struct {
 	SampleRate      int
 	FillerWords     []string
 	PrimaryLanguage string // e.g. "Hindi", "English" — from room metadata
+	Runtime         config.LiveKitServiceRuntimeConfig
 }
 
 // NewRoomSession creates a new room session for a job.
@@ -120,6 +123,7 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		sampleRate:       cfg.SampleRate,
 		fillerWords:      cfg.FillerWords,
 		primaryLanguage:  cfg.PrimaryLanguage,
+		runtime:          cfg.Runtime,
 		managerAPIURL:    managerAPIURL,
 		managerAPISecret: managerAPISecret,
 		deviceMAC:        deviceMAC,
@@ -472,8 +476,14 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	var vadPipe *vad.VADPipeline
 	var vadEventChan chan vad.VADEvent
-	vadThreshold := envFloat("PICOCLAW_VAD_THRESHOLD", 0.7)
-	vadEndpointMS := envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
+	vadThreshold := float32(rs.runtime.VADThreshold)
+	if vadThreshold <= 0 {
+		vadThreshold = envFloat("PICOCLAW_VAD_THRESHOLD", 0.7)
+	}
+	vadEndpointMS := rs.runtime.VADEndpointMS
+	if vadEndpointMS <= 0 {
+		vadEndpointMS = envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
+	}
 	engine, err := vad.NewTenVAD(256, vadThreshold)
 	if err == nil {
 		vadPipe = vad.NewVADPipeline(engine, vadThreshold, vadEndpointMS)
@@ -522,7 +532,16 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	// Fire proactive LLM greeting precisely when the deepgram and VAD systems
 	// are confirmed fully open and actively listening to the subscribed track.
-	go pipeline.TriggerGreeting(rs.ctx, pipeline.sessionKey())
+	switch strings.ToLower(strings.TrimSpace(rs.runtime.GreetingMode)) {
+	case "disabled":
+		logger.InfoCF("livekit", "Greeting disabled by runtime policy", map[string]any{
+			"room": rs.roomInfo.Name,
+		})
+	case "fallback":
+		go pipeline.TriggerGreetingFallbackOnly(rs.ctx, pipeline.sessionKey(), "runtime_policy")
+	default:
+		go pipeline.TriggerGreeting(rs.ctx, pipeline.sessionKey())
+	}
 }
 
 func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant) {

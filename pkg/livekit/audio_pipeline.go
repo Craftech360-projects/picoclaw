@@ -192,8 +192,15 @@ type AudioPipeline struct {
 	tts                  tts.Provider
 	vadEvent             <-chan interface{}
 	primaryLanguage      string // used for language-aware error fallback phrases
+	greetingMode         string
+	asyncAnnounceMode    string
+	rateLimitCooldown    time.Duration
+	failureCooldown      time.Duration
 	turns                voiceTurnController
 	publishSpeechCreated func()
+	queueMu              sync.Mutex
+	queuedAnnouncements  []AsyncEvent
+	queueDraining        bool
 }
 
 type voiceTurnController struct {
@@ -341,17 +348,111 @@ func (ap *AudioPipeline) emitRuntimeEvent(kind, sessionKey, cause, errText strin
 	_ = ap.bridge.EmitRuntimeEvent(evt)
 }
 
+func (ap *AudioPipeline) enqueueAnnouncement(evt AsyncEvent) {
+	ap.queueMu.Lock()
+	ap.queuedAnnouncements = append(ap.queuedAnnouncements, evt)
+	qLen := len(ap.queuedAnnouncements)
+	ap.queueMu.Unlock()
+	ap.emitRuntimeEvent("background_event_queued", evt.SessionKey, "runtime_policy", "", map[string]any{
+		"tool":       evt.ToolName,
+		"queue_size": qLen,
+	})
+}
+
+func (ap *AudioPipeline) dequeueAnnouncement() (AsyncEvent, bool) {
+	ap.queueMu.Lock()
+	defer ap.queueMu.Unlock()
+	if len(ap.queuedAnnouncements) == 0 {
+		return AsyncEvent{}, false
+	}
+	evt := ap.queuedAnnouncements[0]
+	ap.queuedAnnouncements = ap.queuedAnnouncements[1:]
+	return evt, true
+}
+
+func (ap *AudioPipeline) shouldQueueAnnouncementsNow() bool {
+	if ap == nil || ap.session == nil || ap.session.participant == nil {
+		return false
+	}
+	if ap.session.participant.speaking.Load() {
+		return true
+	}
+	if ap.turns.CurrentID() != 0 {
+		return true
+	}
+	return false
+}
+
+func (ap *AudioPipeline) maybeDrainQueuedAnnouncements() {
+	if ap == nil || !strings.EqualFold(ap.asyncAnnounceMode, "queue") {
+		return
+	}
+	if ap.shouldQueueAnnouncementsNow() {
+		return
+	}
+
+	ap.queueMu.Lock()
+	if ap.queueDraining || len(ap.queuedAnnouncements) == 0 {
+		ap.queueMu.Unlock()
+		return
+	}
+	ap.queueDraining = true
+	ap.queueMu.Unlock()
+
+	go func() {
+		defer func() {
+			ap.queueMu.Lock()
+			ap.queueDraining = false
+			ap.queueMu.Unlock()
+		}()
+
+		for {
+			if ap.shouldQueueAnnouncementsNow() {
+				return
+			}
+			evt, ok := ap.dequeueAnnouncement()
+			if !ok {
+				return
+			}
+			ap.emitRuntimeEvent("background_event_dequeued", evt.SessionKey, "runtime_policy", "", map[string]any{
+				"tool": evt.ToolName,
+			})
+			ap.handleAsyncEvent(evt, false)
+		}
+	}()
+}
+
 func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
 	var lang string
 	if session != nil {
 		lang = session.primaryLanguage
 	}
 	ap := &AudioPipeline{
-		session:         session,
-		bridge:          bridge,
-		tts:             tts,
-		vadEvent:        vadEvent,
-		primaryLanguage: lang,
+		session:           session,
+		bridge:            bridge,
+		tts:               tts,
+		vadEvent:          vadEvent,
+		primaryLanguage:   lang,
+		greetingMode:      "dynamic",
+		asyncAnnounceMode: "immediate",
+		rateLimitCooldown: 2 * time.Minute,
+		failureCooldown:   30 * time.Second,
+	}
+	if session != nil {
+		mode := strings.ToLower(strings.TrimSpace(session.runtime.GreetingMode))
+		if mode != "" {
+			ap.greetingMode = mode
+		}
+		asyncMode := strings.ToLower(strings.TrimSpace(session.runtime.AsyncAnnounceMode))
+		if asyncMode != "" {
+			ap.asyncAnnounceMode = asyncMode
+		}
+		if sec := session.runtime.RateLimitCooldownSeconds; sec > 0 {
+			ap.rateLimitCooldown = time.Duration(sec) * time.Second
+		}
+		if sec := session.runtime.ProviderFailureCooldownSec; sec > 0 {
+			ap.failureCooldown = time.Duration(sec) * time.Second
+		}
 	}
 	ap.publishSpeechCreated = func() {
 		if ap.session != nil {
@@ -447,6 +548,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		if ap.session != nil {
 			ap.session.PublishAgentState("speaking", "listening")
 		}
+		ap.maybeDrainQueuedAnnouncements()
 		if onDone != nil {
 			onDone()
 		}
@@ -516,6 +618,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		if ap.session != nil {
 			ap.session.PublishAgentState("speaking", "listening")
 		}
+		ap.maybeDrainQueuedAnnouncements()
 		if onDone != nil {
 			onDone()
 		}
@@ -603,9 +706,43 @@ func (ap *AudioPipeline) proactiveAnnouncementFallbackPhrase() string {
 
 // TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
 // It bypasses the user speech wait loop and talks directly into the TTS pipeline.
+func (ap *AudioPipeline) TriggerGreetingFallbackOnly(ctx context.Context, sessionKey, reason string) {
+	turn := ap.turns.Start(ctx, "greeting_fallback_only")
+	turn = ap.attachTurnLatencyMeta(turn, &turnLatencyMeta{
+		TurnID:   turn.id,
+		Session:  sessionKey,
+		Path:     "greeting",
+		Trigger:  "fallback_only",
+		LLMStart: time.Now(),
+	})
+	ap.setTTSCancel(turn.cancel)
+	if ap.session != nil {
+		ap.session.PublishAgentState("listening", "speaking")
+	}
+	ap.publishSpeechCreated()
+	ap.synthesizeAndPlay(turn.ctx, ap.greetingFallbackPhrase())
+	if ap.turns.IsActive(turn) {
+		ap.flushSilenceForContext(turn.ctx, 300)
+		if ap.session != nil {
+			ap.session.PublishAgentState("speaking", "listening")
+		}
+	}
+	ap.maybeDrainQueuedAnnouncements()
+	turn.cancel()
+	ap.turns.Finish(turn)
+	ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "greeting_fallback_only_complete")
+	ap.emitRuntimeEvent("fallback_used", sessionKey, reason, "", nil)
+}
 
 func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string) {
 	if ap.bridge == nil || ap.session == nil {
+		return
+	}
+	if strings.EqualFold(ap.greetingMode, "disabled") {
+		return
+	}
+	if strings.EqualFold(ap.greetingMode, "fallback") {
+		ap.TriggerGreetingFallbackOnly(ctx, sessionKey, "runtime_policy")
 		return
 	}
 	if dynamicGreetingRateLimited() {
@@ -625,6 +762,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			ap.flushSilenceForContext(turn.ctx, 300)
 			ap.session.PublishAgentState("speaking", "listening")
 		}
+		ap.maybeDrainQueuedAnnouncements()
 		turn.cancel()
 		ap.turns.Finish(turn)
 		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "cooldown_fallback_complete")
@@ -683,6 +821,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			}
 			ap.flushSilenceForContext(turn.ctx, 500)
 			ap.session.PublishAgentState("speaking", "listening")
+			ap.maybeDrainQueuedAnnouncements()
 			turn.cancel()
 			ap.turns.Finish(turn)
 			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "greeting_complete")
@@ -702,12 +841,13 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 				if ap.session != nil {
 					ap.session.PublishAgentState("speaking", "listening")
 				}
+				ap.maybeDrainQueuedAnnouncements()
 			}
 			turn.cancel()
 			ap.turns.Finish(turn)
 			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "greeting_error")
 			if isRateLimitError(err) {
-				markDynamicGreetingRateLimited(2 * time.Minute)
+				markDynamicGreetingRateLimited(ap.rateLimitCooldown)
 				ap.emitRuntimeEvent("fallback_used", sessionKey, "greeting_rate_limited", err.Error(), nil)
 				logger.WarnCF("livekit", "Dynamic greeting rate-limited; used fallback greeting", map[string]any{
 					"session": sessionKey,
@@ -716,7 +856,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			} else {
 				// Non-429 provider failures can still storm proactive turns; apply a
 				// shorter cooldown while preserving local fallback speech behavior.
-				markDynamicGreetingRateLimited(30 * time.Second)
+				markDynamicGreetingRateLimited(ap.failureCooldown)
 				ap.emitRuntimeEvent("fallback_used", sessionKey, "greeting_provider_unavailable", err.Error(), nil)
 				logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
 					"session": sessionKey,
@@ -1015,6 +1155,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				if ap.session != nil && ap.session.participant != nil {
 					ap.session.participant.speaking.Store(false)
 				}
+				ap.maybeDrainQueuedAnnouncements()
 			}
 
 		case <-segmentTimerC:
@@ -1062,6 +1203,19 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		isSpeaking = ap.session.participant.speaking.Load()
 	}
 
+	// Runtime queue policy: defer announcements while user/agent is busy.
+	// When idle, process queued events FIFO before the latest event.
+	if strings.EqualFold(ap.asyncAnnounceMode, "queue") {
+		if isSpeaking || ap.turns.CurrentID() != 0 {
+			ap.enqueueAnnouncement(evt)
+			return
+		}
+		if queuedEvt, ok := ap.dequeueAnnouncement(); ok {
+			ap.enqueueAnnouncement(evt)
+			evt = queuedEvt
+		}
+	}
+
 	if isSpeaking {
 		// User is speaking — silently add to conversation history.
 		// The LLM will naturally see it on the next user-initiated turn.
@@ -1073,6 +1227,17 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			ap.bridge.sessions.AddMessage(sessionKey, "user",
 				"[Background Task Completed] "+evt.ToolName+": "+evt.Result.ContentForLLM())
 		}
+		return
+	}
+
+	if strings.EqualFold(ap.asyncAnnounceMode, "silent_append") {
+		if ap.bridge != nil && ap.bridge.sessions != nil && evt.Result != nil {
+			ap.bridge.sessions.AddMessage(sessionKey, "user",
+				"[Background Task Completed] "+evt.ToolName+": "+evt.Result.ContentForLLM())
+		}
+		ap.emitRuntimeEvent("background_event_silent_appended", sessionKey, "runtime_policy", "", map[string]any{
+			"tool": evt.ToolName,
+		})
 		return
 	}
 
@@ -1102,6 +1267,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			ap.flushSilenceForContext(turn.ctx, 500)
 			ap.session.PublishAgentState("speaking", "listening")
 		}
+		ap.maybeDrainQueuedAnnouncements()
 		turn.cancel()
 		ap.turns.Finish(turn)
 		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_cron_complete")
@@ -1132,6 +1298,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			ap.flushSilenceForContext(turn.ctx, 300)
 			ap.session.PublishAgentState("speaking", "listening")
 		}
+		ap.maybeDrainQueuedAnnouncements()
 		turn.cancel()
 		ap.turns.Finish(turn)
 		ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_cooldown_fallback_complete")
@@ -1197,6 +1364,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			if ap.session != nil {
 				ap.session.PublishAgentState("speaking", "listening")
 			}
+			ap.maybeDrainQueuedAnnouncements()
 			turn.cancel()
 			ap.turns.Finish(turn)
 			ap.finalizeTurnLatency(latencyMetaFromContext(turn.ctx), "background_task_complete")
@@ -1213,9 +1381,10 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 				if ap.session != nil {
 					ap.session.PublishAgentState("speaking", "listening")
 				}
+				ap.maybeDrainQueuedAnnouncements()
 			}
 			if isRateLimitError(err) {
-				markDynamicGreetingRateLimited(2 * time.Minute)
+				markDynamicGreetingRateLimited(ap.rateLimitCooldown)
 				ap.emitRuntimeEvent("fallback_used", sessionKey, "background_rate_limited", err.Error(), map[string]any{
 					"tool": evt.ToolName,
 				})
@@ -1225,7 +1394,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 					"session": sessionKey,
 				})
 			} else {
-				markDynamicGreetingRateLimited(30 * time.Second)
+				markDynamicGreetingRateLimited(ap.failureCooldown)
 				ap.emitRuntimeEvent("fallback_used", sessionKey, "background_provider_unavailable", err.Error(), map[string]any{
 					"tool": evt.ToolName,
 				})
