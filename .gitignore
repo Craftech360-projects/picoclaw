@@ -72,3 +72,8 @@ skills-lock.json
 .gocache/
 cheekoai-57a8432fbbf0.json
 .qwen/skills
+agent_stderr.log
+livekit-agent.err.log
+logs/
+agent_stdout.log
+livekit-agent.out.log
