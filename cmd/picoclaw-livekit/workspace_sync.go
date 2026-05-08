@@ -324,6 +324,13 @@ func collectWorkspaceSyncFiles(workspaceDir string, cfg config.LiveKitServiceMan
 		if err != nil {
 			return err
 		}
+		if bytes.IndexByte(content, 0x00) >= 0 {
+			logger.WarnCF("livekit", "workspace-sync skipped file with NUL byte (binary content)", map[string]any{
+				"path":       rel,
+				"size_bytes": len(content),
+			})
+			return nil
+		}
 		sum := sha256.Sum256(content)
 		files = append(files, workspaceSyncFile{
 			RelativePath: rel,
