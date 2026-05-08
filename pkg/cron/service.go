@@ -255,7 +255,9 @@ func (cs *CronService) executeJobByID(jobID string) {
 		}
 	}
 	if job == nil {
-		log.Printf("[cron] job %s disappeared before state update", jobID)
+		// The job can be removed concurrently (e.g. user says "stop reminder"
+		// while the tick is already executing). Treat as expected race.
+		log.Printf("[cron] job %s removed during execution; skipping state update", jobID)
 		return
 	}
 

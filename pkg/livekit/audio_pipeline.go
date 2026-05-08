@@ -474,11 +474,17 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 		return
 	}
 	if dynamicGreetingRateLimited() {
+		turn := ap.turns.Start(ctx, "greeting_rate_limited_fallback")
+		ap.setTTSCancel(turn.cancel)
 		ap.session.PublishAgentState("listening", "speaking")
 		ap.publishSpeechCreated()
-		ap.synthesizeAndPlay(ctx, ap.greetingFallbackPhrase())
-		ap.flushSilenceForContext(ctx, 300)
-		ap.session.PublishAgentState("speaking", "listening")
+		ap.synthesizeAndPlay(turn.ctx, ap.greetingFallbackPhrase())
+		if ap.turns.IsActive(turn) {
+			ap.flushSilenceForContext(turn.ctx, 300)
+			ap.session.PublishAgentState("speaking", "listening")
+		}
+		turn.cancel()
+		ap.turns.Finish(turn)
 		logger.InfoCF("livekit", "Skipped dynamic greeting due to active rate-limit cooldown", map[string]any{
 			"session": sessionKey,
 		})
@@ -525,20 +531,22 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 		})
 
 		if err != nil {
-			ap.turns.Finish(turn)
+			shouldFallback := !firstChunkReceived && turn.ctx.Err() == nil && ap.turns.IsActive(turn)
 			// When the greeting LLM call is rate-limited, speak a local fallback
 			// greeting so the child is not greeted with silence.
-			if !firstChunkReceived && ctx.Err() == nil {
+			if shouldFallback {
 				if ap.session != nil {
 					ap.session.PublishAgentState("listening", "speaking")
 				}
 				ap.publishSpeechCreated()
-				ap.synthesizeAndPlay(ctx, ap.greetingFallbackPhrase())
-				ap.flushSilenceForContext(ctx, 300)
+				ap.synthesizeAndPlay(turn.ctx, ap.greetingFallbackPhrase())
+				ap.flushSilenceForContext(turn.ctx, 300)
 				if ap.session != nil {
 					ap.session.PublishAgentState("speaking", "listening")
 				}
 			}
+			turn.cancel()
+			ap.turns.Finish(turn)
 			lowerErr := strings.ToLower(err.Error())
 			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate-limit") || strings.Contains(lowerErr, "rate limit") {
 				markDynamicGreetingRateLimited(2 * time.Minute)
@@ -880,15 +888,19 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		if content == "" {
 			return
 		}
+		turn := ap.turns.Start(context.Background(), "background_cron_announcement")
+		ap.setTTSCancel(turn.cancel)
 		if ap.session != nil {
 			ap.session.PublishAgentState("listening", "speaking")
 			ap.publishSpeechCreated()
 		}
-		ap.synthesizeAndPlay(context.Background(), content)
-		ap.flushSilenceForContext(context.Background(), 500)
-		if ap.session != nil {
+		ap.synthesizeAndPlay(turn.ctx, content)
+		if ap.turns.IsActive(turn) && ap.session != nil {
+			ap.flushSilenceForContext(turn.ctx, 500)
 			ap.session.PublishAgentState("speaking", "listening")
 		}
+		turn.cancel()
+		ap.turns.Finish(turn)
 		return
 	}
 

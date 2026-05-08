@@ -274,7 +274,9 @@ func (t *CronTool) removeJob(args map[string]any) *ToolResult {
 	if t.cronService.RemoveJob(jobID) {
 		return SilentResult(fmt.Sprintf("Cron job removed: %s", jobID))
 	}
-	return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
+	// Idempotent remove: in voice flows duplicate remove intents are common and
+	// concurrent execution can remove the job moments earlier.
+	return SilentResult(fmt.Sprintf("Cron job already removed: %s", jobID))
 }
 
 func (t *CronTool) enableJob(args map[string]any, enable bool) *ToolResult {
