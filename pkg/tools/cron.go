@@ -313,13 +313,15 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	if job.Payload.Command != "" {
 		if !t.execEnabled || t.execTool == nil {
 			output := "Error executing scheduled command: command execution is disabled"
-			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer pubCancel()
-			t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-				Channel: channel,
-				ChatID:  chatID,
-				Content: output,
-			})
+			if t.msgBus != nil {
+				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer pubCancel()
+				t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+					Channel: channel,
+					ChatID:  chatID,
+					Content: output,
+				})
+			}
 			return "ok"
 		}
 
@@ -337,25 +339,29 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 			output = fmt.Sprintf("Scheduled command '%s' executed:\n%s", job.Payload.Command, result.ForLLM)
 		}
 
-		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer pubCancel()
-		t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-			Channel: channel,
-			ChatID:  chatID,
-			Content: output,
-		})
+		if t.msgBus != nil {
+			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer pubCancel()
+			t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+				Channel: channel,
+				ChatID:  chatID,
+				Content: output,
+			})
+		}
 		return "ok"
 	}
 
 	// If deliver=true, send message directly without agent processing
 	if job.Payload.Deliver {
-		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer pubCancel()
-		t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-			Channel: channel,
-			ChatID:  chatID,
-			Content: job.Payload.Message,
-		})
+		if t.msgBus != nil {
+			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer pubCancel()
+			t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+				Channel: channel,
+				ChatID:  chatID,
+				Content: job.Payload.Message,
+			})
+		}
 		return "ok"
 	}
 
@@ -363,6 +369,9 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	sessionKey := fmt.Sprintf("cron-%s", job.ID)
 
 	// Call agent with job's message
+	if t.executor == nil {
+		return "Error: cron job execution is not configured in this runtime"
+	}
 	response, err := t.executor.ProcessDirectWithChannel(
 		ctx,
 		job.Payload.Message,
@@ -374,7 +383,15 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 		return fmt.Sprintf("Error: %v", err)
 	}
 
-	// Response is automatically sent via MessageBus by AgentLoop
-	_ = response // Will be sent by AgentLoop
-	return "ok"
+	// In gateway mode this may also be emitted through MessageBus by AgentLoop.
+	// Returning it lets other runtimes (e.g. LiveKit) announce it directly.
+	return response
+}
+
+// SetExecutor updates the runtime job executor used for deliver=false jobs.
+func (t *CronTool) SetExecutor(executor JobExecutor) {
+	if t == nil {
+		return
+	}
+	t.executor = executor
 }

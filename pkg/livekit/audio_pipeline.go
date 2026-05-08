@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/livekit/media-sdk"
@@ -23,6 +24,19 @@ import (
 )
 
 var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
+var dynamicGreetingCooldownUntilUnix atomic.Int64
+
+func dynamicGreetingRateLimited() bool {
+	return time.Now().Unix() < dynamicGreetingCooldownUntilUnix.Load()
+}
+
+func markDynamicGreetingRateLimited(cooldown time.Duration) {
+	if cooldown <= 0 {
+		cooldown = 2 * time.Minute
+	}
+	until := time.Now().Add(cooldown).Unix()
+	dynamicGreetingCooldownUntilUnix.Store(until)
+}
 
 func sanitizeVoiceTextForTTS(text string) string {
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")
@@ -459,6 +473,17 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 	if ap.bridge == nil || ap.session == nil {
 		return
 	}
+	if dynamicGreetingRateLimited() {
+		ap.session.PublishAgentState("listening", "speaking")
+		ap.publishSpeechCreated()
+		ap.synthesizeAndPlay(ctx, ap.greetingFallbackPhrase())
+		ap.flushSilenceForContext(ctx, 300)
+		ap.session.PublishAgentState("speaking", "listening")
+		logger.InfoCF("livekit", "Skipped dynamic greeting due to active rate-limit cooldown", map[string]any{
+			"session": sessionKey,
+		})
+		return
+	}
 
 	logger.InfoCF("livekit", "Triggering dynamic agent greeting", map[string]any{
 		"session": sessionKey,
@@ -516,6 +541,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			}
 			lowerErr := strings.ToLower(err.Error())
 			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate-limit") || strings.Contains(lowerErr, "rate limit") {
+				markDynamicGreetingRateLimited(2 * time.Minute)
 				logger.WarnCF("livekit", "Dynamic greeting rate-limited; used fallback greeting", map[string]any{
 					"session": sessionKey,
 					"error":   err.Error(),
@@ -847,6 +873,25 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 	}
 
 	// User is NOT speaking — trigger spontaneous announcement
+	// Cron jobs already executed through the agent path. Announce their result
+	// directly to avoid an extra LLM turn.
+	if evt.ToolName == "cron" && evt.Result != nil {
+		content := strings.TrimSpace(evt.Result.ContentForLLM())
+		if content == "" {
+			return
+		}
+		if ap.session != nil {
+			ap.session.PublishAgentState("listening", "speaking")
+			ap.publishSpeechCreated()
+		}
+		ap.synthesizeAndPlay(context.Background(), content)
+		ap.flushSilenceForContext(context.Background(), 500)
+		if ap.session != nil {
+			ap.session.PublishAgentState("speaking", "listening")
+		}
+		return
+	}
+
 	logger.InfoCF("livekit", "Triggering spontaneous announcement for background task", map[string]any{
 		"tool":    evt.ToolName,
 		"session": sessionKey,

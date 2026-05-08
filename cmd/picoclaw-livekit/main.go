@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/livekit"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -467,6 +469,37 @@ func main() {
 				"tools":              added,
 			})
 		}
+		var cronService *cron.CronService
+		var cronTool *tools.CronTool
+		if cfg.Tools.IsToolEnabled("cron") {
+			cronStorePath := filepath.Join(agentInstance.Workspace, "cron", "jobs.json")
+			cronService = cron.NewCronService(cronStorePath, nil)
+			if err := cronService.Start(); err != nil {
+				logger.WarnCF("livekit", "Failed to start cron service for LiveKit agent", map[string]any{
+					"room":  roomName,
+					"error": err.Error(),
+				})
+				cronService = nil
+			} else {
+				cronTool, err = tools.NewCronTool(
+					cronService,
+					nil,
+					nil,
+					agentInstance.Workspace,
+					cfg.Agents.Defaults.RestrictToWorkspace,
+					time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes)*time.Minute,
+					cfg,
+				)
+				if err != nil {
+					logger.WarnCF("livekit", "Failed to register cron tool for LiveKit agent", map[string]any{
+						"room":  roomName,
+						"error": err.Error(),
+					})
+				} else {
+					agentInstance.Tools.Register(cronTool)
+				}
+			}
+		}
 		mcpCfg := scopedMCPConfigForWorkspace(cfg, agentInstance.Workspace)
 		mcpManager, err := agent.RegisterMCPToolsForInstances(
 			context.Background(),
@@ -489,6 +522,9 @@ func main() {
 			WorkspaceArtifacts: artifactStore,
 			MCPManager:         mcpManager,
 			OnClose: func() {
+				if cronService != nil {
+					cronService.Stop()
+				}
 				if strings.TrimSpace(deviceMAC) == "" || managerAPIBaseURL(lkCfg.ManagerAPI) == "" || workspace == "" {
 					return
 				}
@@ -509,6 +545,34 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
 			return nil
+		}
+		if cronService != nil && cronTool != nil {
+			cronSessionKey := livekitCronSessionKey(deviceMAC, persistentAgentID, roomName)
+			cronExecutor := &livekitCronExecutor{
+				bridge:     bridge,
+				sessionKey: cronSessionKey,
+			}
+			cronService.SetOnJob(func(job *cron.CronJob) (string, error) {
+				if job == nil {
+					return "", errors.New("cron job is nil")
+				}
+				cronTool.SetExecutor(cronExecutor)
+				output := strings.TrimSpace(cronTool.ExecuteJob(context.Background(), job))
+				if output == "" || strings.EqualFold(output, "ok") {
+					return output, nil
+				}
+				queued := bridge.EnqueueAsyncEvent(livekit.AsyncEvent{
+					SessionKey: cronSessionKey,
+					ToolName:   "cron",
+					Result:     tools.SilentResult(output),
+				})
+				if !queued {
+					logger.WarnCF("livekit", "Cron result async queue is full; dropping announcement", map[string]any{
+						"room": roomName,
+					})
+				}
+				return output, nil
+			})
 		}
 		return bridge
 	}
@@ -703,6 +767,57 @@ func summarizeDBURL(raw string) (host, user string) {
 		user = "unknown"
 	}
 	return host, user
+}
+
+type livekitCronExecutor struct {
+	bridge     *livekit.AgentBridge
+	sessionKey string
+}
+
+func (e *livekitCronExecutor) ProcessDirectWithChannel(ctx context.Context, content, sessionKey, channel, chatID string) (string, error) {
+	if e == nil || e.bridge == nil {
+		return "", errors.New("livekit cron executor bridge is nil")
+	}
+	key := strings.TrimSpace(e.sessionKey)
+	if key == "" {
+		key = strings.TrimSpace(sessionKey)
+	}
+	if key == "" {
+		key = "livekit:cron"
+	}
+
+	var out strings.Builder
+	done := make(chan struct{})
+	_, err := e.bridge.ChatStream(ctx, key, content, func(chunk string) {
+		out.WriteString(chunk)
+	}, func() {
+		close(done)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-done:
+	}
+
+	result := strings.TrimSpace(out.String())
+	if result == "" {
+		result = "Scheduled task completed."
+	}
+	return result, nil
+}
+
+func livekitCronSessionKey(deviceMAC, agentID, roomName string) string {
+	if mac := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(deviceMAC), ":", "")); mac != "" {
+		return "livekit:device:" + mac
+	}
+	if aid := strings.TrimSpace(agentID); aid != "" {
+		return "livekit:agent:" + routing.NormalizeAgentID(aid)
+	}
+	return "livekit:" + strings.TrimSpace(roomName) + ":cron"
 }
 
 func resolveLiveKitJobBootstrapContext(job *livekitproto.Job) (roomName, metadata, source string) {

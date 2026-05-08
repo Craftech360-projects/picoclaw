@@ -195,6 +195,20 @@ func (ab *AgentBridge) AsyncEvents() <-chan AsyncEvent {
 	return ab.asyncEventChan
 }
 
+// EnqueueAsyncEvent publishes a background event to the bridge async queue.
+// Returns false when the bridge is nil, the queue is unavailable, or the queue is full.
+func (ab *AgentBridge) EnqueueAsyncEvent(evt AsyncEvent) bool {
+	if ab == nil || ab.asyncEventChan == nil {
+		return false
+	}
+	select {
+	case ab.asyncEventChan <- evt:
+		return true
+	default:
+		return false
+	}
+}
+
 func (ab *AgentBridge) RealtimeChatPersistenceEnabled() bool {
 	if ab == nil || ab.sessions == nil {
 		return false
