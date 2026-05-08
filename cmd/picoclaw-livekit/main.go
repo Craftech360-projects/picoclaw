@@ -498,6 +498,7 @@ func main() {
 				})
 			}(roomName, deviceMAC, workspace)
 		}
+		stopWorkspaceSyncLoop := func() {}
 
 		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
 		artifactStore := buildManagerArtifactStore(lkCfg, deviceMAC)
@@ -607,6 +608,7 @@ func main() {
 			WorkspaceArtifacts: artifactStore,
 			MCPManager:         mcpManager,
 			OnClose: func() {
+				stopWorkspaceSyncLoop()
 				defer releaseWorkspaceLock("bridge_close")
 				if cronService != nil {
 					cronService.Stop()
@@ -632,6 +634,9 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
 			return nil
+		}
+		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
+			stopWorkspaceSyncLoop = startWorkspaceSyncLoop(lkCfg.ManagerAPI, deviceMAC, workspace, roomName)
 		}
 		if cronService != nil && cronTool != nil {
 			cronSessionKey := livekitCronSessionKey(deviceMAC, persistentAgentID, roomName)
@@ -996,6 +1001,116 @@ func liveKitWorkspaceLockTimeout() time.Duration {
 		seconds = 300
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func liveKitWorkspaceSyncInterval() time.Duration {
+	const defaultSeconds = 180
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_WORKSPACE_SYNC_INTERVAL_SECONDS"))
+	if raw == "" {
+		return defaultSeconds * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return defaultSeconds * time.Second
+	}
+	if seconds < 30 {
+		seconds = 30
+	}
+	if seconds > 3600 {
+		seconds = 3600
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func liveKitWorkspaceSyncRetryInterval() time.Duration {
+	const defaultSeconds = 30
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_WORKSPACE_SYNC_RETRY_SECONDS"))
+	if raw == "" {
+		return defaultSeconds * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return defaultSeconds * time.Second
+	}
+	if seconds < 5 {
+		seconds = 5
+	}
+	if seconds > 600 {
+		seconds = 600
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func hasPendingWorkspaceSync(workspace string) bool {
+	path := workspaceSyncPendingPath(workspace)
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
+func startWorkspaceSyncLoop(
+	cfg config.LiveKitServiceManagerAPIConfig,
+	deviceMAC string,
+	workspace string,
+	roomName string,
+) func() {
+	interval := liveKitWorkspaceSyncInterval()
+	retryInterval := liveKitWorkspaceSyncRetryInterval()
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+
+	go func() {
+		defer close(doneCh)
+		checkpointTicker := time.NewTicker(interval)
+		defer checkpointTicker.Stop()
+		retryTicker := time.NewTicker(retryInterval)
+		defer retryTicker.Stop()
+
+		syncNow := func(trigger string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := uploadWorkspaceFiles(ctx, cfg, deviceMAC, workspace); err != nil {
+				logger.WarnCF("livekit", "Workspace sync loop upload failed", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"workspace":  workspace,
+					"trigger":    trigger,
+					"error":      err.Error(),
+				})
+				return
+			}
+			logger.InfoCF("livekit", "Workspace sync loop upload completed", map[string]any{
+				"room":       roomName,
+				"device_mac": deviceMAC,
+				"workspace":  workspace,
+				"trigger":    trigger,
+			})
+		}
+
+		if hasPendingWorkspaceSync(workspace) {
+			syncNow("startup_pending")
+		}
+
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-checkpointTicker.C:
+				syncNow("periodic_checkpoint")
+			case <-retryTicker.C:
+				if hasPendingWorkspaceSync(workspace) {
+					syncNow("pending_retry")
+				}
+			}
+		}
+	}()
+
+	return func() {
+		close(stopCh)
+		<-doneCh
+	}
 }
 
 func resolveLiveKitJobBootstrapContext(job *livekitproto.Job) (roomName, metadata, source string) {
