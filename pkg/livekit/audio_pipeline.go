@@ -38,6 +38,14 @@ func markDynamicGreetingRateLimited(cooldown time.Duration) {
 	dynamicGreetingCooldownUntilUnix.Store(until)
 }
 
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowerErr := strings.ToLower(err.Error())
+	return strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate-limit") || strings.Contains(lowerErr, "rate limit")
+}
+
 func sanitizeVoiceTextForTTS(text string) string {
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")
 	text = strings.NewReplacer(
@@ -466,6 +474,23 @@ func (ap *AudioPipeline) greetingFallbackPhrase() string {
 	}
 }
 
+func (ap *AudioPipeline) proactiveAnnouncementFallbackPhrase() string {
+	switch strings.ToLower(ap.primaryLanguage) {
+	case "hindi":
+		return "Mujhe ek chhota update dena tha, par meri voice mein thoda hiccup aa gaya. Main jaldi phir try karti hoon."
+	case "kannada":
+		return "Nanage ondu chikka update helbekittu, aadre nanna voice-ge swalpa hiccup aaytu. Naanu swalpa time nantara matte try madtini."
+	case "malayalam":
+		return "Enikku oru cheriya update parayan undayirunnu, pakshe ente voice-il oru cheriya hiccup undayi. Njan kurachu kazhinju veendum try cheyyam."
+	case "tamil":
+		return "Unakku oru chinna update sollanum nu irundhen, aana en voice-ku konjam hiccup vandhuduchu. Naan konjam nerathula thirumbi try panren."
+	case "telugu":
+		return "Nenu oka chinna update cheppali anukunna, kani naa voice ki konchem hiccup vachindi. Konchem sepu taruvata malli try chestanu."
+	default:
+		return "I had a quick update for you, but my voice had a tiny hiccup. I will try again shortly."
+	}
+}
+
 // TriggerGreeting executes a proactive dynamic LLM greeting using the bridge.
 // It bypasses the user speech wait loop and talks directly into the TTS pipeline.
 
@@ -547,14 +572,16 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			}
 			turn.cancel()
 			ap.turns.Finish(turn)
-			lowerErr := strings.ToLower(err.Error())
-			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate-limit") || strings.Contains(lowerErr, "rate limit") {
+			if isRateLimitError(err) {
 				markDynamicGreetingRateLimited(2 * time.Minute)
 				logger.WarnCF("livekit", "Dynamic greeting rate-limited; used fallback greeting", map[string]any{
 					"session": sessionKey,
 					"error":   err.Error(),
 				})
 			} else {
+				// Non-429 provider failures can still storm proactive turns; apply a
+				// shorter cooldown while preserving local fallback speech behavior.
+				markDynamicGreetingRateLimited(30 * time.Second)
 				logger.ErrorCF("livekit", "Failed to generate dynamic greeting", map[string]any{
 					"session": sessionKey,
 					"error":   err.Error(),
@@ -909,6 +936,27 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		"session": sessionKey,
 	})
 
+	if dynamicGreetingRateLimited() {
+		turn := ap.turns.Start(context.Background(), "background_task_cooldown_fallback")
+		ap.setTTSCancel(turn.cancel)
+		if ap.session != nil {
+			ap.session.PublishAgentState("listening", "speaking")
+			ap.publishSpeechCreated()
+		}
+		ap.synthesizeAndPlay(turn.ctx, ap.proactiveAnnouncementFallbackPhrase())
+		if ap.turns.IsActive(turn) && ap.session != nil {
+			ap.flushSilenceForContext(turn.ctx, 300)
+			ap.session.PublishAgentState("speaking", "listening")
+		}
+		turn.cancel()
+		ap.turns.Finish(turn)
+		logger.InfoCF("livekit", "Skipped dynamic spontaneous response due to active rate-limit cooldown", map[string]any{
+			"tool":    evt.ToolName,
+			"session": sessionKey,
+		})
+		return
+	}
+
 	turn := ap.turns.Start(context.Background(), "background_task_result")
 	ap.setTTSCancel(turn.cancel)
 
@@ -952,13 +1000,40 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			ap.turns.Finish(turn)
 		})
 		if err != nil {
+			shouldFallback := !firstChunkReceived && turn.ctx.Err() == nil && ap.turns.IsActive(turn)
+			if shouldFallback {
+				if ap.session != nil {
+					ap.session.PublishAgentState("listening", "speaking")
+					ap.publishSpeechCreated()
+				}
+				ap.synthesizeAndPlay(turn.ctx, ap.proactiveAnnouncementFallbackPhrase())
+				ap.flushSilenceForContext(turn.ctx, 300)
+				if ap.session != nil {
+					ap.session.PublishAgentState("speaking", "listening")
+				}
+			}
+			if isRateLimitError(err) {
+				markDynamicGreetingRateLimited(2 * time.Minute)
+				logger.WarnCF("livekit", "Spontaneous response rate-limited; used fallback announcement", map[string]any{
+					"error":   err.Error(),
+					"tool":    evt.ToolName,
+					"session": sessionKey,
+				})
+			} else {
+				markDynamicGreetingRateLimited(30 * time.Second)
+				logger.ErrorCF("livekit", "Spontaneous response generation failed; used fallback announcement", map[string]any{
+					"error":   err.Error(),
+					"tool":    evt.ToolName,
+					"session": sessionKey,
+				})
+			}
+			turn.cancel()
 			ap.turns.Finish(turn)
-			logger.ErrorCF("livekit", "Spontaneous response generation failed", map[string]any{
+			logger.DebugCF("livekit", "Spontaneous response turn finalized after error", map[string]any{
 				"error":   err.Error(),
 				"tool":    evt.ToolName,
 				"session": sessionKey,
 			})
-			turn.cancel()
 		}
 	}()
 }

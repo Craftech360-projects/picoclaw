@@ -9,6 +9,7 @@ import (
 
 	livekitproto "github.com/livekit/protocol/livekit"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
@@ -300,6 +301,7 @@ func TestHandleUtteranceDoesNotRetryCanceledChatStream(t *testing.T) {
 }
 
 func TestTriggerGreetingPublishesSpeechCreatedOnFirstChunk(t *testing.T) {
+	dynamicGreetingCooldownUntilUnix.Store(0)
 	provider := &countingStreamingProvider{calls: make(chan string, 4)}
 	bridge := &AgentBridge{
 		provider:       provider,
@@ -325,6 +327,7 @@ func TestTriggerGreetingPublishesSpeechCreatedOnFirstChunk(t *testing.T) {
 }
 
 func TestTriggerGreetingPublishesSpeechCreatedOnRateLimitFallback(t *testing.T) {
+	dynamicGreetingCooldownUntilUnix.Store(0)
 	provider := &rateLimitedStreamingProvider{}
 	bridge := &AgentBridge{
 		provider:       provider,
@@ -349,6 +352,80 @@ func TestTriggerGreetingPublishesSpeechCreatedOnRateLimitFallback(t *testing.T) 
 	case <-speechCreated:
 	case <-time.After(time.Second):
 		t.Fatal("rate-limited greeting did not publish speech_created fallback")
+	}
+}
+
+func TestHandleAsyncEventRateLimitedPublishesFallbackSpeechCreated(t *testing.T) {
+	dynamicGreetingCooldownUntilUnix.Store(0)
+	provider := &rateLimitedStreamingProvider{}
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, bridge, nil, nil)
+	speechCreated := make(chan struct{}, 1)
+	pipeline.publishSpeechCreated = func() {
+		select {
+		case speechCreated <- struct{}{}:
+		default:
+		}
+	}
+
+	pipeline.handleAsyncEvent(AsyncEvent{
+		SessionKey: "livekit:device:a",
+		ToolName:   "weather",
+		Result:     tools.SilentResult("rain expected in 10 minutes"),
+	}, false)
+
+	select {
+	case <-speechCreated:
+	case <-time.After(time.Second):
+		t.Fatal("rate-limited spontaneous response did not publish speech_created fallback")
+	}
+}
+
+func TestHandleAsyncEventCooldownSkipsSpontaneousLLMCall(t *testing.T) {
+	dynamicGreetingCooldownUntilUnix.Store(time.Now().Add(time.Minute).Unix())
+	defer dynamicGreetingCooldownUntilUnix.Store(0)
+
+	provider := &countingStreamingProvider{calls: make(chan string, 1)}
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, bridge, nil, nil)
+	speechCreated := make(chan struct{}, 1)
+	pipeline.publishSpeechCreated = func() {
+		select {
+		case speechCreated <- struct{}{}:
+		default:
+		}
+	}
+
+	pipeline.handleAsyncEvent(AsyncEvent{
+		SessionKey: "livekit:device:a",
+		ToolName:   "weather",
+		Result:     tools.SilentResult("rain expected in 10 minutes"),
+	}, false)
+
+	select {
+	case <-speechCreated:
+	case <-time.After(time.Second):
+		t.Fatal("cooldown fallback did not publish speech_created")
+	}
+
+	select {
+	case got := <-provider.calls:
+		t.Fatalf("provider should not be called during cooldown, got %q", got)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
 
