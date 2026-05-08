@@ -309,6 +309,9 @@ func (ap *AudioPipeline) logTurnLatency(meta *turnLatencyMeta, marker string, du
 		"elapsed_ms":   duration.Milliseconds(),
 		"timestamp_ms": time.Now().UnixMilli(),
 	}
+	if marker == "tts_first_audio" && meta.Path == "greeting" {
+		fields["first_greeting_ready_ms"] = duration.Milliseconds()
+	}
 	for k, v := range extra {
 		fields[k] = v
 	}
