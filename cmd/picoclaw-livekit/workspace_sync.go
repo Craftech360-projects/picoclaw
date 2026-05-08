@@ -517,6 +517,26 @@ func downloadWorkspaceFiles(
 		})
 	}
 
+	return downloadWorkspaceFilesLegacy(ctx, cfg, deviceMAC, workspaceDir)
+}
+
+func downloadWorkspaceFilesFastPath(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	deviceMAC string,
+	workspaceDir string,
+) error {
+	// Fast-path intentionally uses the compact legacy workspace-files payload
+	// to minimize room startup latency before first greeting.
+	return downloadWorkspaceFilesLegacy(ctx, cfg, deviceMAC, workspaceDir)
+}
+
+func downloadWorkspaceFilesLegacy(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	deviceMAC string,
+	workspaceDir string,
+) error {
 	baseURL := managerAPIBaseURL(cfg)
 	if baseURL == "" || strings.TrimSpace(deviceMAC) == "" || strings.TrimSpace(workspaceDir) == "" {
 		return nil

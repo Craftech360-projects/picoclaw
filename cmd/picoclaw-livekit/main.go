@@ -374,8 +374,8 @@ func main() {
 			}
 		}
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
-			if err := downloadWorkspaceFiles(context.Background(), lkCfg.ManagerAPI, deviceMAC, workspace); err != nil {
-				logger.WarnCF("livekit", "workspace-files post-hydration download from manager failed", map[string]any{
+			if err := downloadWorkspaceFilesFastPath(context.Background(), lkCfg.ManagerAPI, deviceMAC, workspace); err != nil {
+				logger.WarnCF("livekit", "workspace-files fast-path download from manager failed", map[string]any{
 					"room":       roomName,
 					"device_mac": deviceMAC,
 					"error":      err.Error(),
@@ -422,6 +422,22 @@ func main() {
 					}
 				}
 			}
+			go func(room string, mac string, dir string) {
+				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := downloadWorkspaceFiles(bgCtx, lkCfg.ManagerAPI, mac, dir); err != nil {
+					logger.WarnCF("livekit", "workspace background full restore failed", map[string]any{
+						"room":       room,
+						"device_mac": mac,
+						"error":      err.Error(),
+					})
+					return
+				}
+				logger.InfoCF("livekit", "workspace background full restore completed", map[string]any{
+					"room":       room,
+					"device_mac": mac,
+				})
+			}(roomName, deviceMAC, workspace)
 		}
 
 		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
