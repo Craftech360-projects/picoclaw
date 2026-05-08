@@ -50,6 +50,20 @@ type workspaceSyncData struct {
 	Delta    bool                `json:"delta"`
 }
 
+type workspaceManifestFile struct {
+	RelativePath string `json:"relativePath"`
+	SHA256       string `json:"sha256"`
+	SizeBytes    int    `json:"sizeBytes,omitempty"`
+	UpdatedAt    string `json:"updatedAt,omitempty"`
+}
+
+type workspaceLocalManifest struct {
+	Revision    string                  `json:"revision"`
+	GeneratedAt string                  `json:"generatedAt,omitempty"`
+	Files       []workspaceManifestFile `json:"files,omitempty"`
+	Deleted     []string                `json:"deleted,omitempty"`
+}
+
 const workspaceAgentDisplayName = "AGENT.md"
 const workspaceSyncManifestPath = ".picoclaw/workspace-manifest.json"
 const workspaceSyncOutboxDir = ".picoclaw/sync-outbox"
@@ -96,21 +110,57 @@ func isWorkspaceSyncExcluded(relativePath string) bool {
 	return strings.HasSuffix(rel, ".log")
 }
 
-func readLocalWorkspaceRevision(workspaceDir string) string {
+func readLocalWorkspaceManifest(workspaceDir string) workspaceLocalManifest {
 	data, err := os.ReadFile(filepath.Join(workspaceDir, filepath.FromSlash(workspaceSyncManifestPath)))
 	if err != nil {
-		return ""
+		return workspaceLocalManifest{}
 	}
-	var payload struct {
-		Revision string `json:"revision"`
-	}
+	var payload workspaceLocalManifest
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return ""
+		return workspaceLocalManifest{}
 	}
-	return strings.TrimSpace(payload.Revision)
+	payload.Revision = strings.TrimSpace(payload.Revision)
+	return payload
 }
 
-func writeLocalWorkspaceManifest(workspaceDir string, manifest map[string]any, revision string) error {
+func manifestFileMap(files []workspaceManifestFile) map[string]workspaceManifestFile {
+	out := make(map[string]workspaceManifestFile, len(files))
+	for _, f := range files {
+		rel := normalizeWorkspaceRelPath(f.RelativePath)
+		if rel == "." || rel == "" {
+			continue
+		}
+		out[rel] = workspaceManifestFile{
+			RelativePath: rel,
+			SHA256:       strings.TrimSpace(f.SHA256),
+			SizeBytes:    f.SizeBytes,
+			UpdatedAt:    strings.TrimSpace(f.UpdatedAt),
+		}
+	}
+	return out
+}
+
+func manifestFilesFromSync(files []workspaceSyncFile) []workspaceManifestFile {
+	out := make([]workspaceManifestFile, 0, len(files))
+	for _, f := range files {
+		rel := normalizeWorkspaceRelPath(f.RelativePath)
+		if rel == "." || rel == "" {
+			continue
+		}
+		out = append(out, workspaceManifestFile{
+			RelativePath: rel,
+			SHA256:       strings.TrimSpace(f.SHA256),
+			SizeBytes:    f.SizeBytes,
+			UpdatedAt:    strings.TrimSpace(f.UpdatedAt),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].RelativePath < out[j].RelativePath
+	})
+	return out
+}
+
+func writeLocalWorkspaceManifest(workspaceDir string, manifest map[string]any, revision string, files []workspaceManifestFile, deleted []string) error {
 	if strings.TrimSpace(workspaceDir) == "" {
 		return nil
 	}
@@ -123,11 +173,17 @@ func writeLocalWorkspaceManifest(workspaceDir string, manifest map[string]any, r
 	if _, ok := manifest["generatedAt"]; !ok {
 		manifest["generatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	local := workspaceLocalManifest{
+		Revision:    strings.TrimSpace(revision),
+		GeneratedAt: fmt.Sprintf("%v", manifest["generatedAt"]),
+		Files:       files,
+		Deleted:     deleted,
+	}
 	path := filepath.Join(workspaceDir, filepath.FromSlash(workspaceSyncManifestPath))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	encoded, err := json.MarshalIndent(local, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -252,9 +308,13 @@ func tryDownloadWorkspaceSync(
 	if baseURL == "" || strings.TrimSpace(deviceMAC) == "" || strings.TrimSpace(workspaceDir) == "" {
 		return nil
 	}
+	localManifest := readLocalWorkspaceManifest(workspaceDir)
 	endpoint := strings.TrimRight(baseURL, "/") +
 		"/agent/device/" + url.PathEscape(deviceMAC) + "/workspace-sync" +
 		"?limit=" + strconv.Itoa(workspaceSyncListLimit)
+	if localManifest.Revision != "" {
+		endpoint += "&sinceRevision=" + url.QueryEscape(localManifest.Revision)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
@@ -315,7 +375,13 @@ func tryDownloadWorkspaceSync(
 		target := filepath.Join(workspaceDir, filepath.FromSlash(rel))
 		_ = os.Remove(target)
 	}
-	if err := writeLocalWorkspaceManifest(workspaceDir, data.Manifest, data.Revision); err != nil {
+	if err := writeLocalWorkspaceManifest(
+		workspaceDir,
+		data.Manifest,
+		data.Revision,
+		manifestFilesFromSync(data.Files),
+		data.Deleted,
+	); err != nil {
 		logger.WarnCF("livekit", "workspace-sync: failed to write local manifest", map[string]any{
 			"device_mac": deviceMAC,
 			"error":      err.Error(),
@@ -344,19 +410,45 @@ func tryUploadWorkspaceSync(
 	if err != nil {
 		return err
 	}
-	baseRevision := readLocalWorkspaceRevision(workspaceDir)
+	localManifest := readLocalWorkspaceManifest(workspaceDir)
+	baseRevision := localManifest.Revision
 	newRevision := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+	localMap := manifestFileMap(localManifest.Files)
+	currentMap := make(map[string]workspaceManifestFile, len(files))
+	changed := make([]workspaceSyncFile, 0, len(files))
+	for _, f := range files {
+		rel := normalizeWorkspaceRelPath(f.RelativePath)
+		currentMap[rel] = workspaceManifestFile{
+			RelativePath: rel,
+			SHA256:       strings.TrimSpace(f.SHA256),
+			SizeBytes:    f.SizeBytes,
+			UpdatedAt:    strings.TrimSpace(f.UpdatedAt),
+		}
+		prev, ok := localMap[rel]
+		if !ok || prev.SHA256 != f.SHA256 {
+			changed = append(changed, f)
+		}
+	}
+	deleted := make([]string, 0, len(localMap))
+	for rel := range localMap {
+		if _, ok := currentMap[rel]; !ok {
+			deleted = append(deleted, rel)
+		}
+	}
+	sort.Strings(deleted)
 	manifest := map[string]any{
-		"source":      "picoclaw-livekit",
-		"generatedAt": time.Now().UTC().Format(time.RFC3339Nano),
-		"fileCount":   len(files),
-		"deleted":     []string{},
+		"source":       "picoclaw-livekit",
+		"generatedAt":  time.Now().UTC().Format(time.RFC3339Nano),
+		"fileCount":    len(files),
+		"changedCount": len(changed),
+		"deletedCount": len(deleted),
+		"deleted":      deleted,
 	}
 	payload := workspaceSyncSnapshot{
 		BaseRevision: baseRevision,
 		NewRevision:  newRevision,
-		Files:        files,
-		Deleted:      []string{},
+		Files:        changed,
+		Deleted:      deleted,
 		Manifest:     manifest,
 	}
 	encoded, err := json.Marshal(payload)
@@ -387,7 +479,13 @@ func tryUploadWorkspaceSync(
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("workspace-sync upload status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := writeLocalWorkspaceManifest(workspaceDir, manifest, newRevision); err != nil {
+	if err := writeLocalWorkspaceManifest(
+		workspaceDir,
+		manifest,
+		newRevision,
+		manifestFilesFromSync(files),
+		deleted,
+	); err != nil {
 		logger.WarnCF("livekit", "workspace-sync: failed to persist local revision", map[string]any{
 			"device_mac": deviceMAC,
 			"error":      err.Error(),
@@ -396,7 +494,9 @@ func tryUploadWorkspaceSync(
 	clearWorkspaceSyncPending(workspaceDir)
 	logger.InfoCF("livekit", "workspace-sync uploaded to manager", map[string]any{
 		"device_mac": deviceMAC,
-		"files":      len(files),
+		"files":      len(changed),
+		"deleted":    len(deleted),
+		"total":      len(files),
 		"revision":   newRevision,
 	})
 	return nil
