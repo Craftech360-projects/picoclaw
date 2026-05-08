@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,15 +155,26 @@ func (b *ManagerAPIBackend) hydrate(key string) {
 		return
 	}
 
+	var sessionHistory []providers.Message
+	if history, err := b.fetchSessionMessages(context.Background()); err != nil {
+		log.Printf("session: manager api session messages: %v", err)
+	} else {
+		sessionHistory = history
+	}
+
 	bootstrap, err := b.fetchBootstrap(context.Background())
 	if err != nil {
 		log.Printf("session: manager api bootstrap: %v", err)
-		return
 	}
 
 	b.local.GetOrCreate(key)
-	if len(b.local.GetHistory(key)) == 0 && len(bootstrap.RecentMessages) > 0 {
-		b.local.SetHistory(key, bootstrapMessagesToProvider(bootstrap.RecentMessages))
+	if len(b.local.GetHistory(key)) == 0 {
+		switch {
+		case len(sessionHistory) > 0:
+			b.local.SetHistory(key, sessionHistory)
+		case len(bootstrap.RecentMessages) > 0:
+			b.local.SetHistory(key, bootstrapMessagesToProvider(bootstrap.RecentMessages))
+		}
 	}
 	if strings.TrimSpace(b.local.GetSummary(key)) == "" && strings.TrimSpace(bootstrap.Agent.SummaryMemory) != "" {
 		b.local.SetSummary(key, bootstrap.Agent.SummaryMemory)
@@ -188,6 +200,18 @@ type managerBootstrapMessage struct {
 	Content  string `json:"content"`
 }
 
+type managerSessionMessagesPage struct {
+	Messages   []managerSessionMessage `json:"messages"`
+	NextCursor *int64                  `json:"nextCursor"`
+	HasMore    bool                    `json:"hasMore"`
+}
+
+type managerSessionMessage struct {
+	Role     string `json:"role"`
+	ChatType int    `json:"chatType"`
+	Content  string `json:"content"`
+}
+
 func (b *ManagerAPIBackend) fetchBootstrap(ctx context.Context) (managerBootstrapData, error) {
 	var out managerBootstrapData
 	endpoint := fmt.Sprintf("%s/agent/device/%s/bootstrap?includeMemories=false&recentLimit=%d",
@@ -206,6 +230,58 @@ func (b *ManagerAPIBackend) fetchBootstrap(ctx context.Context) (managerBootstra
 		return out, fmt.Errorf("decode bootstrap data: %w", err)
 	}
 	return out, nil
+}
+
+func (b *ManagerAPIBackend) fetchSessionMessages(ctx context.Context) ([]providers.Message, error) {
+	if strings.TrimSpace(b.cfg.MACAddress) == "" || strings.TrimSpace(b.cfg.SessionID) == "" {
+		return nil, nil
+	}
+
+	const (
+		pageLimit = 200
+		maxPages  = 200
+	)
+
+	cursor := int64(0)
+	all := make([]managerSessionMessage, 0, 128)
+	for page := 0; page < maxPages; page++ {
+		endpoint := fmt.Sprintf("%s/agent/device/%s/sessions/%s/messages?cursor=%s&limit=%d",
+			b.cfg.BaseURL,
+			url.PathEscape(strings.TrimSpace(b.cfg.MACAddress)),
+			url.PathEscape(strings.TrimSpace(b.cfg.SessionID)),
+			url.QueryEscape(strconv.FormatInt(cursor, 10)),
+			pageLimit,
+		)
+
+		body, err := b.doJSON(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var payload managerSessionMessagesPage
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return nil, fmt.Errorf("decode session messages data: %w", err)
+			}
+		}
+
+		if len(payload.Messages) > 0 {
+			all = append(all, payload.Messages...)
+		}
+		if !payload.HasMore || payload.NextCursor == nil {
+			break
+		}
+		next := *payload.NextCursor
+		if next <= cursor {
+			break
+		}
+		cursor = next
+	}
+
+	if len(all) == 0 {
+		return nil, nil
+	}
+	return sessionMessagesToProvider(all), nil
 }
 
 func (b *ManagerAPIBackend) reportMessage(ctx context.Context, chatType int, content string) error {
@@ -281,6 +357,24 @@ func (b *ManagerAPIBackend) doJSON(ctx context.Context, method, endpoint string,
 }
 
 func bootstrapMessagesToProvider(messages []managerBootstrapMessage) []providers.Message {
+	out := make([]providers.Message, 0, len(messages))
+	for _, msg := range messages {
+		role := strings.TrimSpace(msg.Role)
+		if role == "" {
+			role = roleFromChatType(msg.ChatType)
+		}
+		if role == "" {
+			continue
+		}
+		out = append(out, providers.Message{
+			Role:    role,
+			Content: msg.Content,
+		})
+	}
+	return out
+}
+
+func sessionMessagesToProvider(messages []managerSessionMessage) []providers.Message {
 	out := make([]providers.Message, 0, len(messages))
 	for _, msg := range messages {
 		role := strings.TrimSpace(msg.Role)

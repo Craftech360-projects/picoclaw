@@ -13,26 +13,43 @@ import (
 
 func TestManagerAPIBackendHydratesHistoryFromBootstrap(t *testing.T) {
 	var gotServiceKey string
+	var hitBootstrap bool
+	var hitSessionMessages bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/agent/device/AA:BB:CC:DD:EE:FF/bootstrap" {
+		gotServiceKey = r.Header.Get("X-Service-Key")
+		switch r.URL.Path {
+		case "/agent/device/AA:BB:CC:DD:EE:FF/sessions/room-1/messages":
+			hitSessionMessages = true
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"messages":   []map[string]any{},
+					"hasMore":    false,
+					"nextCursor": nil,
+				},
+			})
+			return
+		case "/agent/device/AA:BB:CC:DD:EE:FF/bootstrap":
+			hitBootstrap = true
+			if r.URL.Query().Get("includeMemories") != "false" {
+				t.Fatalf("includeMemories query = %q", r.URL.Query().Get("includeMemories"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"agent": map[string]any{
+						"summaryMemory": "Asha likes space.",
+					},
+					"recentMessages": []map[string]any{
+						{"role": "user", "content": "Hello"},
+						{"role": "assistant", "content": "Hi Asha!"},
+					},
+				},
+			})
+			return
+		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		gotServiceKey = r.Header.Get("X-Service-Key")
-		if r.URL.Query().Get("includeMemories") != "false" {
-			t.Fatalf("includeMemories query = %q", r.URL.Query().Get("includeMemories"))
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"data": map[string]any{
-				"agent": map[string]any{
-					"summaryMemory": "Asha likes space.",
-				},
-				"recentMessages": []map[string]any{
-					{"role": "user", "content": "Hello"},
-					{"role": "assistant", "content": "Hi Asha!"},
-				},
-			},
-		})
 	}))
 	defer server.Close()
 
@@ -48,6 +65,12 @@ func TestManagerAPIBackendHydratesHistoryFromBootstrap(t *testing.T) {
 	if gotServiceKey != "service-secret" {
 		t.Fatalf("X-Service-Key = %q, want service-secret", gotServiceKey)
 	}
+	if !hitSessionMessages {
+		t.Fatal("expected session messages endpoint to be queried")
+	}
+	if !hitBootstrap {
+		t.Fatal("expected bootstrap endpoint to be queried")
+	}
 	if len(history) != 2 {
 		t.Fatalf("history len = %d, want 2", len(history))
 	}
@@ -59,9 +82,90 @@ func TestManagerAPIBackendHydratesHistoryFromBootstrap(t *testing.T) {
 	}
 }
 
+func TestManagerAPIBackendHydratesFullHistoryFromSessionMessages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/device/AA:BB:CC:DD:EE:FF/sessions/room-1/messages":
+			cursor := r.URL.Query().Get("cursor")
+			switch cursor {
+			case "0":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": 0,
+					"data": map[string]any{
+						"messages": []map[string]any{
+							{"sequence": 1, "chatType": 1, "content": "Hi"},
+							{"sequence": 2, "chatType": 2, "content": "Hello there"},
+						},
+						"hasMore":    true,
+						"nextCursor": 2,
+					},
+				})
+			case "2":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": 0,
+					"data": map[string]any{
+						"messages": []map[string]any{
+							{"sequence": 3, "chatType": 1, "content": "How are you?"},
+						},
+						"hasMore":    false,
+						"nextCursor": nil,
+					},
+				})
+			default:
+				t.Fatalf("unexpected cursor: %s", cursor)
+			}
+		case "/agent/device/AA:BB:CC:DD:EE:FF/bootstrap":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"agent": map[string]any{
+						"summaryMemory": "Summary from bootstrap.",
+					},
+					"recentMessages": []map[string]any{
+						{"role": "user", "content": "recent fallback"},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	store := session.NewManagerAPIBackend(session.ManagerAPIBackendConfig{
+		BaseURL:    server.URL,
+		ServiceKey: "service-secret",
+		MACAddress: "AA:BB:CC:DD:EE:FF",
+		AgentID:    "agent-id",
+		SessionID:  "room-1",
+	})
+
+	history := store.GetHistory("livekit:device:AABBCCDDEEFF")
+	if len(history) != 3 {
+		t.Fatalf("history len = %d, want 3", len(history))
+	}
+	if history[0].Role != "user" || history[0].Content != "Hi" {
+		t.Fatalf("unexpected first history item: %+v", history[0])
+	}
+	if history[2].Role != "user" || history[2].Content != "How are you?" {
+		t.Fatalf("unexpected third history item: %+v", history[2])
+	}
+}
+
 func TestManagerAPIBackendReportsUserAndAssistantMessages(t *testing.T) {
 	var reportPayloads []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/sessions/room-1/messages") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"messages":   []map[string]any{},
+					"hasMore":    false,
+					"nextCursor": nil,
+				},
+			})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/bootstrap") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{}})
 			return
