@@ -21,13 +21,15 @@ const defaultManagerAPIBaseURL = "http://localhost:8002/toy"
 
 // ManagerAPIBackendConfig configures manager API backed session storage.
 type ManagerAPIBackendConfig struct {
-	BaseURL     string
-	ServiceKey  string
-	MACAddress  string
-	AgentID     string
-	SessionID   string
-	RecentLimit int
-	HTTPClient  *http.Client
+	BaseURL         string
+	ServiceKey      string
+	MACAddress      string
+	AgentID         string
+	SessionID       string
+	RecentLimit     int
+	HistoryPageSize int
+	MaxHistoryPages int
+	HTTPClient      *http.Client
 }
 
 // ManagerAPIBackend hydrates session context from Manager API and persists
@@ -50,6 +52,12 @@ func NewManagerAPIBackend(cfg ManagerAPIBackendConfig) *ManagerAPIBackend {
 	cfg.BaseURL = baseURL
 	if cfg.RecentLimit <= 0 {
 		cfg.RecentLimit = 50
+	}
+	if cfg.HistoryPageSize <= 0 {
+		cfg.HistoryPageSize = 200
+	}
+	if cfg.MaxHistoryPages <= 0 {
+		cfg.MaxHistoryPages = 200
 	}
 	client := cfg.HTTPClient
 	if client == nil {
@@ -237,13 +245,11 @@ func (b *ManagerAPIBackend) fetchSessionMessages(ctx context.Context) ([]provide
 		return nil, nil
 	}
 
-	const (
-		pageLimit = 200
-		maxPages  = 200
-	)
-
+	pageLimit := b.cfg.HistoryPageSize
+	maxPages := b.cfg.MaxHistoryPages
 	cursor := int64(0)
 	all := make([]managerSessionMessage, 0, 128)
+	loadedPages := 0
 	for page := 0; page < maxPages; page++ {
 		endpoint := fmt.Sprintf("%s/agent/device/%s/sessions/%s/messages?cursor=%s&limit=%d",
 			b.cfg.BaseURL,
@@ -268,6 +274,7 @@ func (b *ManagerAPIBackend) fetchSessionMessages(ctx context.Context) ([]provide
 		if len(payload.Messages) > 0 {
 			all = append(all, payload.Messages...)
 		}
+		loadedPages++
 		if !payload.HasMore || payload.NextCursor == nil {
 			break
 		}
@@ -281,6 +288,7 @@ func (b *ManagerAPIBackend) fetchSessionMessages(ctx context.Context) ([]provide
 	if len(all) == 0 {
 		return nil, nil
 	}
+	log.Printf("session: manager api session history hydrated pages=%d messages=%d", loadedPages, len(all))
 	return sessionMessagesToProvider(all), nil
 }
 

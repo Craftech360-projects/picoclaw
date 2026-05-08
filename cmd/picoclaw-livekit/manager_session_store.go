@@ -42,12 +42,14 @@ func buildManagerSessionStore(
 	}
 
 	return session.NewManagerAPIBackend(session.ManagerAPIBackendConfig{
-		BaseURL:     baseURL,
-		ServiceKey:  serviceKey,
-		MACAddress:  deviceMAC,
-		AgentID:     agentID,
-		SessionID:   sessionID,
-		RecentLimit: lkCfg.ManagerAPI.RecentLimit,
+		BaseURL:         baseURL,
+		ServiceKey:      serviceKey,
+		MACAddress:      deviceMAC,
+		AgentID:         agentID,
+		SessionID:       sessionID,
+		RecentLimit:     lkCfg.ManagerAPI.RecentLimit,
+		HistoryPageSize: lkCfg.ManagerAPI.WorkspaceRestore.HistoryPageSize,
+		MaxHistoryPages: lkCfg.ManagerAPI.WorkspaceRestore.MaxHistoryPagesOnIdle,
 	})
 }
 

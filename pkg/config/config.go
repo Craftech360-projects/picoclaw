@@ -865,9 +865,27 @@ type LiveKitServiceSTTConfig struct {
 // standalone LiveKit voice agent service. Service credentials are intentionally
 // read from environment variables by the worker, not persisted in config.json.
 type LiveKitServiceManagerAPIConfig struct {
-	BaseURL             string `json:"base_url,omitempty"              env:"PICOCLAW_LIVEKIT_MANAGER_API_URL"`
-	SessionStoreEnabled bool   `json:"session_store_enabled,omitempty" env:"PICOCLAW_LIVEKIT_MANAGER_SESSION_STORE_ENABLED"`
-	RecentLimit         int    `json:"recent_limit,omitempty"          env:"PICOCLAW_LIVEKIT_MANAGER_RECENT_LIMIT"`
+	BaseURL             string                        `json:"base_url,omitempty"              env:"PICOCLAW_LIVEKIT_MANAGER_API_URL"`
+	SessionStoreEnabled bool                          `json:"session_store_enabled,omitempty" env:"PICOCLAW_LIVEKIT_MANAGER_SESSION_STORE_ENABLED"`
+	RecentLimit         int                           `json:"recent_limit,omitempty"          env:"PICOCLAW_LIVEKIT_MANAGER_RECENT_LIMIT"`
+	WorkspaceSync       LiveKitWorkspaceSyncConfig    `json:"workspace_sync,omitempty"    envPrefix:"PICOCLAW_LIVEKIT_WORKSPACE_SYNC_"`
+	WorkspaceRestore    LiveKitWorkspaceRestoreConfig `json:"workspace_restore,omitempty" envPrefix:"PICOCLAW_LIVEKIT_WORKSPACE_RESTORE_"`
+}
+
+type LiveKitWorkspaceSyncConfig struct {
+	Enabled           bool     `json:"enabled,omitempty"              env:"ENABLED"`
+	IntervalSeconds   int      `json:"interval_seconds,omitempty"     env:"INTERVAL_SECONDS"`
+	MaxFileBytes      int      `json:"max_file_bytes,omitempty"       env:"MAX_FILE_BYTES"`
+	ExcludePatterns   []string `json:"exclude_patterns,omitempty"     env:"EXCLUDE_PATTERNS"`
+	OutboxRetrySecond int      `json:"outbox_retry_seconds,omitempty" env:"OUTBOX_RETRY_SECONDS"`
+	LockTimeoutSecond int      `json:"lock_timeout_seconds,omitempty" env:"LOCK_TIMEOUT_SECONDS"`
+}
+
+type LiveKitWorkspaceRestoreConfig struct {
+	FastPathTimeoutMS     int  `json:"fast_path_timeout_ms,omitempty"     env:"FAST_PATH_TIMEOUT_MS"`
+	BackgroundEnabled     bool `json:"background_enabled,omitempty"       env:"BACKGROUND_ENABLED"`
+	HistoryPageSize       int  `json:"history_page_size,omitempty"        env:"HISTORY_PAGE_SIZE"`
+	MaxHistoryPagesOnIdle int  `json:"max_history_pages_on_idle,omitempty" env:"MAX_HISTORY_PAGES_ON_IDLE"`
 }
 
 // LiveKitServiceRuntimeConfig exposes runtime voice controls for the standalone

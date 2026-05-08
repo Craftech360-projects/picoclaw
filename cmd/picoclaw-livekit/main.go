@@ -272,7 +272,7 @@ func main() {
 				workspaceFirstTime = true
 			}
 		}
-		lockTimeout := liveKitWorkspaceLockTimeout()
+		lockTimeout := liveKitWorkspaceLockTimeout(lkCfg.ManagerAPI)
 		lockStaleAfter := 2 * time.Minute
 		if lockTimeout > time.Minute {
 			lockStaleAfter = lockTimeout * 2
@@ -433,10 +433,14 @@ func main() {
 			}
 		}
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
-			if err := downloadWorkspaceFilesFastPath(context.Background(), lkCfg.ManagerAPI, deviceMAC, workspace); err != nil {
+			fastPathTimeout := liveKitWorkspaceFastPathTimeout(lkCfg.ManagerAPI)
+			fastCtx, fastCancel := context.WithTimeout(context.Background(), fastPathTimeout)
+			defer fastCancel()
+			if err := downloadWorkspaceFilesFastPath(fastCtx, lkCfg.ManagerAPI, deviceMAC, workspace); err != nil {
 				logger.WarnCF("livekit", "workspace-files fast-path download from manager failed", map[string]any{
 					"room":       roomName,
 					"device_mac": deviceMAC,
+					"timeout_ms": fastPathTimeout.Milliseconds(),
 					"error":      err.Error(),
 				})
 			} else if userContent := strings.TrimSpace(hydrationOptions.UserContent); userContent != "" {
@@ -481,22 +485,32 @@ func main() {
 					}
 				}
 			}
-			go func(room string, mac string, dir string) {
-				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := downloadWorkspaceFiles(bgCtx, lkCfg.ManagerAPI, mac, dir); err != nil {
-					logger.WarnCF("livekit", "workspace background full restore failed", map[string]any{
-						"room":       room,
-						"device_mac": mac,
-						"error":      err.Error(),
+			if liveKitWorkspaceBackgroundRestoreEnabled(lkCfg.ManagerAPI) {
+				go func(room string, mac string, dir string) {
+					startedAt := time.Now()
+					bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if err := downloadWorkspaceFiles(bgCtx, lkCfg.ManagerAPI, mac, dir); err != nil {
+						logger.WarnCF("livekit", "workspace background full restore failed", map[string]any{
+							"room":                            room,
+							"device_mac":                      mac,
+							"workspace_restore_background_ms": time.Since(startedAt).Milliseconds(),
+							"error":                           err.Error(),
+						})
+						return
+					}
+					logger.InfoCF("livekit", "workspace background full restore completed", map[string]any{
+						"room":                            room,
+						"device_mac":                      mac,
+						"workspace_restore_background_ms": time.Since(startedAt).Milliseconds(),
 					})
-					return
-				}
-				logger.InfoCF("livekit", "workspace background full restore completed", map[string]any{
-					"room":       room,
-					"device_mac": mac,
+				}(roomName, deviceMAC, workspace)
+			} else {
+				logger.InfoCF("livekit", "workspace background full restore disabled by config", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
 				})
-			}(roomName, deviceMAC, workspace)
+			}
 		}
 		stopWorkspaceSyncLoop := func() {}
 
@@ -987,8 +1001,15 @@ func livekitCronSessionKey(deviceMAC, agentID, roomName string) string {
 	return "livekit:" + strings.TrimSpace(roomName) + ":cron"
 }
 
-func liveKitWorkspaceLockTimeout() time.Duration {
+func liveKitWorkspaceLockTimeout(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
 	const defaultSeconds = 10
+	if cfg.WorkspaceSync.LockTimeoutSecond > 0 {
+		seconds := cfg.WorkspaceSync.LockTimeoutSecond
+		if seconds > 300 {
+			seconds = 300
+		}
+		return time.Duration(seconds) * time.Second
+	}
 	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_WORKSPACE_LOCK_TIMEOUT_SECONDS"))
 	if raw == "" {
 		return defaultSeconds * time.Second
@@ -1003,8 +1024,18 @@ func liveKitWorkspaceLockTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func liveKitWorkspaceSyncInterval() time.Duration {
+func liveKitWorkspaceSyncInterval(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
 	const defaultSeconds = 180
+	if cfg.WorkspaceSync.IntervalSeconds > 0 {
+		seconds := cfg.WorkspaceSync.IntervalSeconds
+		if seconds < 30 {
+			seconds = 30
+		}
+		if seconds > 3600 {
+			seconds = 3600
+		}
+		return time.Duration(seconds) * time.Second
+	}
 	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_WORKSPACE_SYNC_INTERVAL_SECONDS"))
 	if raw == "" {
 		return defaultSeconds * time.Second
@@ -1022,8 +1053,18 @@ func liveKitWorkspaceSyncInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func liveKitWorkspaceSyncRetryInterval() time.Duration {
+func liveKitWorkspaceSyncRetryInterval(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
 	const defaultSeconds = 30
+	if cfg.WorkspaceSync.OutboxRetrySecond > 0 {
+		seconds := cfg.WorkspaceSync.OutboxRetrySecond
+		if seconds < 5 {
+			seconds = 5
+		}
+		if seconds > 600 {
+			seconds = 600
+		}
+		return time.Duration(seconds) * time.Second
+	}
 	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_WORKSPACE_SYNC_RETRY_SECONDS"))
 	if raw == "" {
 		return defaultSeconds * time.Second
@@ -1041,6 +1082,32 @@ func liveKitWorkspaceSyncRetryInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func liveKitWorkspaceFastPathTimeout(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
+	const defaultMs = 1200
+	timeoutMS := cfg.WorkspaceRestore.FastPathTimeoutMS
+	if timeoutMS <= 0 {
+		timeoutMS = defaultMs
+	}
+	if timeoutMS < 200 {
+		timeoutMS = 200
+	}
+	if timeoutMS > 10_000 {
+		timeoutMS = 10_000
+	}
+	return time.Duration(timeoutMS) * time.Millisecond
+}
+
+func liveKitWorkspaceBackgroundRestoreEnabled(cfg config.LiveKitServiceManagerAPIConfig) bool {
+	// default enabled when unset
+	if !cfg.WorkspaceRestore.BackgroundEnabled &&
+		cfg.WorkspaceRestore.FastPathTimeoutMS == 0 &&
+		cfg.WorkspaceRestore.HistoryPageSize == 0 &&
+		cfg.WorkspaceRestore.MaxHistoryPagesOnIdle == 0 {
+		return true
+	}
+	return cfg.WorkspaceRestore.BackgroundEnabled
+}
+
 func hasPendingWorkspaceSync(workspace string) bool {
 	path := workspaceSyncPendingPath(workspace)
 	info, err := os.Stat(path)
@@ -1056,8 +1123,15 @@ func startWorkspaceSyncLoop(
 	workspace string,
 	roomName string,
 ) func() {
-	interval := liveKitWorkspaceSyncInterval()
-	retryInterval := liveKitWorkspaceSyncRetryInterval()
+	if !workspaceSyncEnabled(&cfg) {
+		logger.InfoCF("livekit", "workspace sync loop disabled by config", map[string]any{
+			"room":       roomName,
+			"device_mac": deviceMAC,
+		})
+		return func() {}
+	}
+	interval := liveKitWorkspaceSyncInterval(cfg)
+	retryInterval := liveKitWorkspaceSyncRetryInterval(cfg)
 	stopCh := make(chan struct{})
 	doneCh := make(chan struct{})
 
@@ -1072,20 +1146,24 @@ func startWorkspaceSyncLoop(
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if err := uploadWorkspaceFiles(ctx, cfg, deviceMAC, workspace); err != nil {
+				outboxSize := len(getWorkspaceOutboxEntries(workspace))
 				logger.WarnCF("livekit", "Workspace sync loop upload failed", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-					"workspace":  workspace,
-					"trigger":    trigger,
-					"error":      err.Error(),
+					"room":                       roomName,
+					"device_mac":                 deviceMAC,
+					"workspace":                  workspace,
+					"trigger":                    trigger,
+					"workspace_sync_outbox_size": outboxSize,
+					"error":                      err.Error(),
 				})
 				return
 			}
+			outboxSize := len(getWorkspaceOutboxEntries(workspace))
 			logger.InfoCF("livekit", "Workspace sync loop upload completed", map[string]any{
-				"room":       roomName,
-				"device_mac": deviceMAC,
-				"workspace":  workspace,
-				"trigger":    trigger,
+				"room":                       roomName,
+				"device_mac":                 deviceMAC,
+				"workspace":                  workspace,
+				"trigger":                    trigger,
+				"workspace_sync_outbox_size": outboxSize,
 			})
 		}
 

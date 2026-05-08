@@ -512,7 +512,26 @@
       "provider_failure_cooldown_seconds": 30
     },
     "manager_api": {
-      "recent_limit": 50
+      "recent_limit": 50,
+      "workspace_sync": {
+        "enabled": true,
+        "interval_seconds": 180,
+        "max_file_bytes": 262144,
+        "exclude_patterns": [
+          "trace/**",
+          "logs/**",
+          "*.log",
+          ".picoclaw/sync-outbox/**"
+        ],
+        "outbox_retry_seconds": 30,
+        "lock_timeout_seconds": 10
+      },
+      "workspace_restore": {
+        "fast_path_timeout_ms": 1200,
+        "background_enabled": true,
+        "history_page_size": 200,
+        "max_history_pages_on_idle": 200
+      }
     }
   },
   "build_info": {
