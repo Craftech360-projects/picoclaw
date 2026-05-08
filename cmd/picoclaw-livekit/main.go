@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
@@ -269,6 +271,63 @@ func main() {
 			if _, statErr := os.Stat(workspace); os.IsNotExist(statErr) {
 				workspaceFirstTime = true
 			}
+		}
+		lockTimeout := liveKitWorkspaceLockTimeout()
+		lockStaleAfter := 2 * time.Minute
+		if lockTimeout > time.Minute {
+			lockStaleAfter = lockTimeout * 2
+		}
+		var wsLock *workspaceLock
+		var wsLockReleaseOnce sync.Once
+		releaseWorkspaceLock := func(reason string) {
+			wsLockReleaseOnce.Do(func() {
+				if wsLock == nil {
+					return
+				}
+				if err := wsLock.Release(); err != nil {
+					logger.WarnCF("livekit", "Failed to release workspace lock", map[string]any{
+						"room":       roomName,
+						"device_mac": deviceMAC,
+						"workspace":  workspace,
+						"reason":     reason,
+						"error":      err.Error(),
+					})
+					return
+				}
+				logger.InfoCF("livekit", "Released per-device workspace lock", map[string]any{
+					"room":       roomName,
+					"device_mac": deviceMAC,
+					"workspace":  workspace,
+					"reason":     reason,
+				})
+			})
+		}
+		if workspace != "" && strings.TrimSpace(deviceMAC) != "" {
+			jobID := ""
+			if job != nil {
+				jobID = strings.TrimSpace(job.Id)
+			}
+			lockOwner := fmt.Sprintf("room=%s job=%s pid=%d", roomName, jobID, os.Getpid())
+			lock, err := acquireWorkspaceLock(workspace, lockOwner, lockTimeout, lockStaleAfter)
+			if err != nil {
+				logger.WarnCF("livekit", "Failed to acquire per-device workspace lock", map[string]any{
+					"room":            roomName,
+					"device_mac":      deviceMAC,
+					"workspace":       workspace,
+					"lock_owner":      lockOwner,
+					"lock_timeout_ms": lockTimeout.Milliseconds(),
+					"error":           err.Error(),
+				})
+				return nil
+			}
+			wsLock = lock
+			logger.InfoCF("livekit", "Acquired per-device workspace lock", map[string]any{
+				"room":            roomName,
+				"device_mac":      deviceMAC,
+				"workspace":       workspace,
+				"lock_owner":      lockOwner,
+				"lock_timeout_ms": lockTimeout.Milliseconds(),
+			})
 		}
 
 		// 2. Fetch and decode room metadata payload from MQTT gateway.
@@ -533,6 +592,7 @@ func main() {
 			agentInstance,
 		)
 		if err != nil {
+			releaseWorkspaceLock("mcp_init_failed")
 			fmt.Fprintf(os.Stderr, "Error initializing MCP tools for LiveKit agent: %v\n", err)
 			return nil
 		}
@@ -547,6 +607,7 @@ func main() {
 			WorkspaceArtifacts: artifactStore,
 			MCPManager:         mcpManager,
 			OnClose: func() {
+				defer releaseWorkspaceLock("bridge_close")
 				if cronService != nil {
 					cronService.Stop()
 				}
@@ -565,6 +626,7 @@ func main() {
 			},
 		})
 		if err != nil {
+			releaseWorkspaceLock("bridge_create_failed")
 			if mcpManager != nil {
 				_ = mcpManager.Close()
 			}
@@ -624,6 +686,9 @@ func main() {
 		MaxSessions:   lkCfg.MaxSessions,
 		HealthPort:    lkCfg.HealthPort,
 		RoomFactory: func(job *livekitproto.Job, assignment *livekitproto.JobAssignment, bridge *livekit.AgentBridge) (*livekit.RoomSession, error) {
+			if bridge == nil {
+				return nil, errors.New("agent bridge is nil")
+			}
 			serverURL := lkCfg.ServerURL
 			if assignment != nil && assignment.Url != nil && *assignment.Url != "" {
 				serverURL = *assignment.Url
@@ -915,6 +980,22 @@ func livekitCronSessionKey(deviceMAC, agentID, roomName string) string {
 		return "livekit:agent:" + routing.NormalizeAgentID(aid)
 	}
 	return "livekit:" + strings.TrimSpace(roomName) + ":cron"
+}
+
+func liveKitWorkspaceLockTimeout() time.Duration {
+	const defaultSeconds = 10
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_WORKSPACE_LOCK_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return defaultSeconds * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return defaultSeconds * time.Second
+	}
+	if seconds > 300 {
+		seconds = 300
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func resolveLiveKitJobBootstrapContext(job *livekitproto.Job) (roomName, metadata, source string) {
