@@ -16,17 +16,11 @@ func buildManagerArtifactStore(
 	lkCfg config.LiveKitServiceConfig,
 	deviceMAC string,
 ) picokit.WorkspaceArtifactStore {
-	if !managerSessionStoreEnabled(lkCfg.ManagerAPI) {
-		return nil
-	}
 	if strings.TrimSpace(deviceMAC) == "" {
 		return nil
 	}
-	return picokit.NewManagerArtifactStore(picokit.ManagerArtifactStoreConfig{
-		BaseURL:    managerAPIBaseURL(lkCfg.ManagerAPI),
-		ServiceKey: managerAPIServiceKey(),
-		DeviceMAC:  deviceMAC,
-	})
+	_ = lkCfg
+	return nil
 }
 
 func hydrateWorkspaceArtifacts(ctx context.Context, store picokit.WorkspaceArtifactStore, workspace string, limit int) (int, error) {

@@ -255,7 +255,6 @@ func main() {
 		// This ensures we drop the personalized prompt precisely where this room identity reads it.
 		var workspace string
 		var baseWorkspace string
-		workspaceFirstTime := false
 		if cfg.Agents.Defaults.Workspace != "" {
 			home := os.Getenv(config.EnvHome)
 			userHome, _ := os.UserHomeDir()
@@ -268,9 +267,6 @@ func main() {
 			}
 			id := routing.NormalizeAgentID(agentCfg.ID)
 			workspace = filepath.Join(baseWorkspace, "..", "workspace-"+id)
-			if _, statErr := os.Stat(workspace); os.IsNotExist(statErr) {
-				workspaceFirstTime = true
-			}
 		}
 		lockTimeout := liveKitWorkspaceLockTimeout(lkCfg.ManagerAPI)
 		lockStaleAfter := 2 * time.Minute
@@ -365,32 +361,7 @@ func main() {
 			}
 		}
 		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, renderedIdentity)
-		if strings.TrimSpace(deviceMAC) != "" && managerSessionStoreEnabled(lkCfg.ManagerAPI) {
-			managerBootstrap, err := fetchManagerWorkspaceBootstrap(
-				context.Background(),
-				lkCfg.ManagerAPI,
-				deviceMAC,
-				managerAPIServiceKey(),
-			)
-			if err != nil {
-				logger.WarnCF("livekit", "Manager API workspace bootstrap hydration failed", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-					"error":      err.Error(),
-				})
-			} else {
-				hydrationOptions = mergeManagerHydrationOptions(hydrationOptions, managerBootstrap, baseWorkspace)
-				workspaceBootstrapSource = bootstrapSourceManagerAPIFallback
-				logger.InfoCF("livekit", "Merged manager API memory into LiveKit workspace hydration", map[string]any{
-					"room":              roomName,
-					"device_mac":        deviceMAC,
-					"agent_name":        managerBootstrap.Agent.AgentName,
-					"recent_messages":   len(managerBootstrap.RecentMessages),
-					"session_summaries": len(managerBootstrap.SessionSummaries),
-					"recent_sessions":   len(managerBootstrap.RecentSessions),
-				})
-			}
-		} else if bootstrap.Source == bootstrapSourceRoomMetadata {
+		if bootstrap.Source == bootstrapSourceRoomMetadata {
 			workspaceBootstrapSource = bootstrap.Source
 		}
 		if workspace != "" {
@@ -443,47 +414,6 @@ func main() {
 					"timeout_ms": fastPathTimeout.Milliseconds(),
 					"error":      err.Error(),
 				})
-			} else if userContent := strings.TrimSpace(hydrationOptions.UserContent); userContent != "" {
-				userPath := filepath.Join(workspace, "USER.md")
-				if shouldWrite, reason := shouldRefreshUserFromMetadata(userPath, workspaceFirstTime); shouldWrite {
-					if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
-						logger.WarnCF("livekit", "Failed to reapply USER.md from room metadata child profile", map[string]any{
-							"room":       roomName,
-							"device_mac": deviceMAC,
-							"path":       userPath,
-							"error":      err.Error(),
-						})
-					} else {
-						logger.InfoCF("livekit", "Reapplied USER.md from room metadata child profile", map[string]any{
-							"room":       roomName,
-							"device_mac": deviceMAC,
-							"path":       userPath,
-							"reason":     reason,
-						})
-					}
-				} else {
-					desiredTimezone := extractTimezoneFromUserMarkdown(userContent)
-					if desiredTimezone == "" {
-						desiredTimezone = "Asia/Kolkata"
-					}
-					if changed, syncReason, err := syncUserTimezoneInFile(userPath, desiredTimezone); err != nil {
-						logger.WarnCF("livekit", "Failed to sync USER.md timezone from child profile metadata", map[string]any{
-							"room":       roomName,
-							"device_mac": deviceMAC,
-							"path":       userPath,
-							"timezone":   desiredTimezone,
-							"error":      err.Error(),
-						})
-					} else if changed {
-						logger.InfoCF("livekit", "Synchronized USER.md timezone from child profile metadata", map[string]any{
-							"room":       roomName,
-							"device_mac": deviceMAC,
-							"path":       userPath,
-							"timezone":   desiredTimezone,
-							"reason":     syncReason,
-						})
-					}
-				}
 			}
 			if liveKitWorkspaceBackgroundRestoreEnabled(lkCfg.ManagerAPI) {
 				go func(room string, mac string, dir string) {
@@ -532,19 +462,6 @@ func main() {
 				})
 			}
 		}
-		if managerStore := buildManagerSessionStore(lkCfg, deviceMAC, persistentAgentID, roomName); managerStore != nil {
-			if agentInstance.Sessions != nil {
-				_ = agentInstance.Sessions.Close()
-			}
-			agentInstance.Sessions = managerStore
-			logger.InfoCF("livekit", "Using manager-backed session store", map[string]any{
-				"room":               roomName,
-				"device_mac":         deviceMAC,
-				"agent_id":           persistentAgentID,
-				"workspace_identity": workspaceIdentity,
-			})
-		}
-
 		// Register shared tools on the ephemeral agent instance
 		singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
 		agent.RegisterSharedTools(agent.SharedToolDependencies{

@@ -25,17 +25,11 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 	if rs == nil || bridge == nil {
 		return
 	}
-	if strings.TrimSpace(rs.managerAPIURL) == "" {
-		logger.DebugCF("livekit", "Skipping post-session persistence: manager API URL not configured", map[string]any{
+	managerPersistenceEnabled := strings.TrimSpace(rs.managerAPIURL) != "" && strings.TrimSpace(rs.deviceMAC) != ""
+	if !managerPersistenceEnabled {
+		logger.InfoCF("livekit", "Manager post-session persistence disabled; using file-memory mode only", map[string]any{
 			"room": rs.roomName(),
 		})
-		return
-	}
-	if rs.deviceMAC == "" {
-		logger.WarnCF("livekit", "Skipping post-session persistence: device MAC unavailable", map[string]any{
-			"room": rs.roomName(),
-		})
-		return
 	}
 
 	usage := bridge.UsageSnapshot()
@@ -66,54 +60,33 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		"avg_ttft_ms":                quality.AvgTTFTMs,
 	})
 
-	usageCtx, usageCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := rs.sendUsageSummary(usageCtx, usage); err != nil {
-		logger.WarnCF("livekit", "Failed to persist usage summary", map[string]any{
-			"room":   rs.roomName(),
-			"error":  err.Error(),
-			"tokens": usage.TotalTokens,
-		})
+	if managerPersistenceEnabled {
+		usageCtx, usageCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := rs.sendUsageSummary(usageCtx, usage); err != nil {
+			logger.WarnCF("livekit", "Failed to persist usage summary", map[string]any{
+				"room":   rs.roomName(),
+				"error":  err.Error(),
+				"tokens": usage.TotalTokens,
+			})
+		}
+		usageCancel()
 	}
-	usageCancel()
 
 	summary, summaryMessageCount := rs.finalizeAndPersistSessionSummary(bridge)
 
 	if summary != "" {
-		summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := rs.sendSessionSummary(summaryCtx, summary, summaryMessageCount); err != nil {
-			logger.WarnCF("livekit", "Failed to persist session summary", map[string]any{
+		if err := rs.persistSummaryToMemoryFile(bridge, summary, summaryMessageCount); err != nil {
+			logger.WarnCF("livekit", "Failed to persist session summary to MEMORY.md", map[string]any{
 				"room":  rs.roomName(),
 				"error": err.Error(),
 			})
 		}
-		summaryCancel()
 	}
 
-	if bridge.RealtimeChatPersistenceEnabled() {
-		logger.InfoCF("livekit", "Skipping post-session chat history: real-time manager persistence enabled", map[string]any{
-			"room":     rs.roomName(),
-			"messages": len(messages),
-		})
-	} else {
-		chatCtx, chatCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := rs.sendChatHistory(chatCtx, messages); err != nil {
-			logger.WarnCF("livekit", "Failed to persist chat history", map[string]any{
-				"room":     rs.roomName(),
-				"error":    err.Error(),
-				"messages": len(messages),
-			})
-		}
-		chatCancel()
-	}
-
-	endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := rs.sendSessionEnd(endCtx, len(messages)); err != nil {
-		logger.WarnCF("livekit", "Failed to mark manager session ended", map[string]any{
-			"room":  rs.roomName(),
-			"error": err.Error(),
-		})
-	}
-	endCancel()
+	logger.InfoCF("livekit", "Skipping post-session manager chat/session persistence: file-memory mode", map[string]any{
+		"room":     rs.roomName(),
+		"messages": len(messages),
+	})
 
 	rs.exportSessionTraceBundle(bridge, usage, quality)
 }
@@ -243,6 +216,73 @@ func (rs *RoomSession) finalizeAndPersistSessionSummary(bridge *AgentBridge) (st
 		"messages":      messageCount,
 	})
 	return summary, messageCount
+}
+
+func (rs *RoomSession) persistSummaryToMemoryFile(bridge *AgentBridge, summary string, sourceMessageCount int) error {
+	if rs == nil || bridge == nil || strings.TrimSpace(summary) == "" {
+		return nil
+	}
+	if bridge.agentInstance == nil {
+		return fmt.Errorf("agent instance is nil")
+	}
+	workspace := strings.TrimSpace(bridge.agentInstance.Workspace)
+	if workspace == "" {
+		return fmt.Errorf("workspace is empty")
+	}
+
+	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
+	if err := os.MkdirAll(filepath.Dir(memoryPath), 0o755); err != nil {
+		return err
+	}
+
+	existing := ""
+	if data, err := os.ReadFile(memoryPath); err == nil {
+		existing = string(data)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	var sb strings.Builder
+	trimmedExisting := strings.TrimSpace(existing)
+	if trimmedExisting == "" {
+		sb.WriteString("# Memory\n\n## Session Summaries\n\n")
+	} else {
+		sb.WriteString(strings.TrimRight(existing, "\n"))
+		sb.WriteString("\n")
+		if !strings.Contains(strings.ToLower(trimmedExisting), "## session summaries") {
+			sb.WriteString("\n## Session Summaries\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	entry := strings.TrimSpace(strings.ReplaceAll(summary, "\n", " "))
+	ts := time.Now().Format("2006-01-02 15:04:05 MST")
+	if sourceMessageCount > 0 {
+		fmt.Fprintf(&sb, "- %s (%d messages): %s\n", ts, sourceMessageCount, entry)
+	} else {
+		fmt.Fprintf(&sb, "- %s: %s\n", ts, entry)
+	}
+
+	const maxMemoryBytes = 64 * 1024
+	output := sb.String()
+	if len(output) > maxMemoryBytes {
+		output = output[len(output)-maxMemoryBytes:]
+		header := "# Memory\n\n## Session Summaries\n\n"
+		output = header + strings.TrimLeft(output, "\n")
+	}
+	if !strings.HasSuffix(output, "\n") {
+		output += "\n"
+	}
+
+	if err := os.WriteFile(memoryPath, []byte(output), 0o600); err != nil {
+		return err
+	}
+	logger.InfoCF("livekit", "Persisted session summary to MEMORY.md", map[string]any{
+		"room":        rs.roomName(),
+		"path":        memoryPath,
+		"summary_len": len(entry),
+	})
+	return nil
 }
 
 func (rs *RoomSession) sendSessionSummary(ctx context.Context, summary string, sourceMessageCount int) error {

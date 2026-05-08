@@ -81,11 +81,25 @@ var workspaceDiskPaths = map[string]string{
 	"MEMORY.md":               filepath.Join("memory", "MEMORY.md"),
 }
 
+var protectedWorkspaceCorePaths = map[string]struct{}{
+	"agent.md":         {},
+	"user.md":          {},
+	"soul.md":          {},
+	"heartbeat.md":     {},
+	"memory/memory.md": {},
+}
+
 func workspaceDiskMode(diskPath string) os.FileMode {
 	if filepath.Clean(diskPath) == filepath.Join("memory", "MEMORY.md") {
 		return 0o600
 	}
 	return 0o644
+}
+
+func isProtectedWorkspaceCoreFile(relativePath string) bool {
+	normalized := strings.ToLower(strings.TrimPrefix(normalizeWorkspaceRelPath(relativePath), "./"))
+	_, ok := protectedWorkspaceCorePaths[normalized]
+	return ok
 }
 
 func normalizeWorkspaceRelPath(path string) string {
@@ -137,7 +151,7 @@ func workspaceExcludePatternMatches(rel, pattern string) bool {
 }
 
 func workspaceSyncExcludePatterns(cfg *config.LiveKitServiceManagerAPIConfig) []string {
-	defaults := []string{"trace/**", "logs/**", "*.log", ".picoclaw/sync-outbox/**"}
+	defaults := []string{"trace/**", "logs/**", "*.log", ".picoclaw/sync-outbox/**", "skills/**"}
 	if cfg == nil || len(cfg.WorkspaceSync.ExcludePatterns) == 0 {
 		return defaults
 	}
@@ -324,6 +338,12 @@ func collectWorkspaceSyncFiles(workspaceDir string, cfg config.LiveKitServiceMan
 		if err != nil {
 			return err
 		}
+		if isProtectedWorkspaceCoreFile(rel) && strings.TrimSpace(string(content)) == "" {
+			logger.WarnCF("livekit", "workspace-sync skipped blank protected core file upload", map[string]any{
+				"path": rel,
+			})
+			return nil
+		}
 		if bytes.IndexByte(content, 0x00) >= 0 {
 			logger.WarnCF("livekit", "workspace-sync skipped file with NUL byte (binary content)", map[string]any{
 				"path":       rel,
@@ -417,6 +437,12 @@ func tryDownloadWorkspaceSync(
 		if rel == "." || rel == "" || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
 			continue
 		}
+		if isProtectedWorkspaceCoreFile(rel) && strings.TrimSpace(file.Content) == "" {
+			logger.WarnCF("livekit", "workspace-sync skipped blank protected core file restore", map[string]any{
+				"path": rel,
+			})
+			continue
+		}
 		target := filepath.Join(workspaceDir, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			logger.WarnCF("livekit", "workspace-sync: failed to create dir", map[string]any{
@@ -441,6 +467,12 @@ func tryDownloadWorkspaceSync(
 	for _, deleted := range data.Deleted {
 		rel := normalizeWorkspaceRelPath(deleted)
 		if rel == "." || rel == "" || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
+			continue
+		}
+		if isProtectedWorkspaceCoreFile(rel) {
+			logger.WarnCF("livekit", "workspace-sync ignored delete for protected core file", map[string]any{
+				"path": rel,
+			})
 			continue
 		}
 		target := filepath.Join(workspaceDir, filepath.FromSlash(rel))

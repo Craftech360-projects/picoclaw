@@ -60,7 +60,6 @@ func buildLiveKitWorkspaceHydrationOptions(
 		opts.IdentityContent = formatRoomMetadataIdentityContent(md)
 	}
 	opts.UserContent = formatRoomMetadataUserContent(md)
-	opts.MemoryContent = formatRoomMetadataMemoryContent(md)
 	return opts
 }
 

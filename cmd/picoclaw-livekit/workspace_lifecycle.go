@@ -18,7 +18,7 @@ type liveKitWorkspaceLifecycle struct {
 func resolveLiveKitWorkspaceLifecycle(
 	roomName string,
 	roomMetadata string,
-	managerAPI config.LiveKitServiceManagerAPIConfig,
+	_ config.LiveKitServiceManagerAPIConfig,
 ) liveKitWorkspaceLifecycle {
 	deviceMAC, agentID := livekit.ResolvePersistenceFields(roomName, roomMetadata)
 	workspaceIdentity := strings.TrimSpace(roomName)
@@ -27,7 +27,7 @@ func resolveLiveKitWorkspaceLifecycle(
 	switch {
 	case deviceMAC != "":
 		workspaceIdentity = "device-" + strings.ReplaceAll(deviceMAC, ":", "")
-		preserveWorkspace = !managerSessionStoreEnabled(managerAPI)
+		preserveWorkspace = true
 	case strings.TrimSpace(agentID) != "":
 		workspaceIdentity = "agent-" + routing.NormalizeAgentID(agentID)
 		preserveWorkspace = true
