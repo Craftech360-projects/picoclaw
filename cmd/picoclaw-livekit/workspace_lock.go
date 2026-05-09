@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	livekitpkg "github.com/sipeed/picoclaw/pkg/livekit"
 )
 
 const workspaceLockFilePath = ".picoclaw/device.lock"
@@ -67,6 +69,7 @@ func acquireWorkspaceLock(workspace, owner string, waitTimeout, staleAfter time.
 				return nil, fmt.Errorf("write workspace lock: %w", writeErr)
 			}
 			_ = f.Close()
+			_ = livekitpkg.ClearWorkspaceReconnectHint(workspace)
 
 			lock := &workspaceLock{
 				path:   lockPath,
@@ -90,6 +93,8 @@ func acquireWorkspaceLock(workspace, owner string, waitTimeout, staleAfter time.
 				continue
 			}
 		}
+
+		_ = livekitpkg.RecordWorkspaceReconnectHint(workspace, owner)
 
 		if time.Now().After(deadline) {
 			if readErr == nil && existing.Owner != "" {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 )
@@ -67,5 +68,54 @@ func TestAgentBridgeCloseClosesMCPManager(t *testing.T) {
 
 	if !closer.closed {
 		t.Fatal("expected AgentBridge.Close to close MCP manager")
+	}
+}
+
+func TestAgentBridgeCloseSkipsDeleteWhenReconnectHintIsFresh(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace-handoff")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := RecordWorkspaceReconnectHint(workspace, "owner-reconnect"); err != nil {
+		t.Fatalf("RecordWorkspaceReconnectHint() error = %v", err)
+	}
+
+	ab := &AgentBridge{
+		agentInstance: &agent.AgentInstance{
+			Workspace: workspace,
+		},
+	}
+	ab.Close()
+
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("workspace should be preserved for reconnect handoff, stat err = %v", err)
+	}
+}
+
+func TestAgentBridgeCloseCallsOnAfterClose(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace-callback")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	onAfterCalled := false
+	ab := &AgentBridge{
+		agentInstance: &agent.AgentInstance{
+			Workspace: workspace,
+		},
+		onClose: func() {
+			// simulate lightweight close phase
+			time.Sleep(5 * time.Millisecond)
+		},
+		onAfterClose: func() {
+			onAfterCalled = true
+		},
+	}
+	ab.Close()
+
+	if !onAfterCalled {
+		t.Fatal("expected onAfterClose callback to be called")
 	}
 }

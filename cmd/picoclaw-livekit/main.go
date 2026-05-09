@@ -540,7 +540,6 @@ func main() {
 			MCPManager:         mcpManager,
 			OnClose: func() {
 				stopWorkspaceSyncLoop()
-				defer releaseWorkspaceLock("bridge_close")
 				if cronService != nil {
 					cronService.Stop()
 				}
@@ -556,6 +555,9 @@ func main() {
 						"error":      err.Error(),
 					})
 				}
+			},
+			OnAfterClose: func() {
+				releaseWorkspaceLock("bridge_close")
 			},
 		})
 		if err != nil {

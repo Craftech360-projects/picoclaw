@@ -113,6 +113,7 @@ type AgentBridge struct {
 	streamProvider      providers.StreamingProvider
 	preserveWorkspace   bool
 	onClose             func()
+	onAfterClose        func()
 	modelID             string
 	sessions            session.SessionStore
 	tools               *tools.ToolRegistry
@@ -148,6 +149,7 @@ type AgentBridgeConfig struct {
 	AgentInstance      *agent.AgentInstance
 	PreserveWorkspace  bool
 	OnClose            func()
+	OnAfterClose       func()
 	MaxIterations      int
 	LLMOptions         map[string]any
 	AsyncEventChan     chan AsyncEvent // optional channel for background task results
@@ -190,6 +192,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		modelID:                   cfg.ModelID,
 		preserveWorkspace:         cfg.PreserveWorkspace,
 		onClose:                   cfg.OnClose,
+		onAfterClose:              cfg.OnAfterClose,
 		sessions:                  cfg.AgentInstance.Sessions,
 		tools:                     cfg.AgentInstance.Tools,
 		contextBuilder:            cfg.AgentInstance.ContextBuilder,
@@ -229,13 +232,30 @@ func (ab *AgentBridge) Close() {
 	}
 	if ab.agentInstance != nil {
 		ab.agentInstance.Close()
+		workspace := strings.TrimSpace(ab.agentInstance.Workspace)
 		// Run OnClose before workspace deletion so callbacks can still read files.
+		// OnAfterClose is always executed last (for lock release / final handoff).
+		defer func() {
+			if ab.onAfterClose != nil {
+				ab.onAfterClose()
+			}
+		}()
 		if ab.onClose != nil {
 			ab.onClose()
 		}
 		// Default behavior is ephemeral cleanup unless persistence is requested.
-		if !ab.preserveWorkspace && ab.agentInstance.Workspace != "" {
-			os.RemoveAll(ab.agentInstance.Workspace)
+		if !ab.preserveWorkspace && workspace != "" {
+			if ok, owner := HasRecentWorkspaceReconnectHint(workspace, 45*time.Second); ok {
+				logger.InfoCF("livekit", "Skipping workspace delete due to reconnect handoff hint", map[string]any{
+					"workspace": workspace,
+					"owner":     owner,
+				})
+			} else if err := os.RemoveAll(workspace); err != nil {
+				logger.WarnCF("livekit", "Failed to delete workspace during bridge close", map[string]any{
+					"workspace": workspace,
+					"error":     err.Error(),
+				})
+			}
 		}
 	}
 }
