@@ -82,11 +82,48 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 			})
 		}
 	}
+	if managerPersistenceEnabled {
+		persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer persistCancel()
 
-	logger.InfoCF("livekit", "Skipping post-session manager chat/session persistence: file-memory mode", map[string]any{
-		"room":     rs.roomName(),
-		"messages": len(messages),
-	})
+		if summary != "" {
+			if err := rs.sendSessionSummary(persistCtx, summary, summaryMessageCount); err != nil {
+				logger.WarnCF("livekit", "Failed to persist session summary to manager", map[string]any{
+					"room":     rs.roomName(),
+					"messages": summaryMessageCount,
+					"error":    err.Error(),
+				})
+			}
+		}
+
+		if len(messages) > 0 {
+			if bridge.RealtimeChatPersistenceEnabled() {
+				logger.InfoCF("livekit", "Skipping batch chat-history upload: realtime persistence already enabled", map[string]any{
+					"room":     rs.roomName(),
+					"messages": len(messages),
+				})
+			} else if err := rs.sendChatHistory(persistCtx, messages); err != nil {
+				logger.WarnCF("livekit", "Failed to persist chat history", map[string]any{
+					"room":     rs.roomName(),
+					"messages": len(messages),
+					"error":    err.Error(),
+				})
+			}
+		}
+
+		if err := rs.sendSessionEnd(persistCtx, len(messages)); err != nil {
+			logger.WarnCF("livekit", "Failed to persist session end marker", map[string]any{
+				"room":     rs.roomName(),
+				"messages": len(messages),
+				"error":    err.Error(),
+			})
+		}
+	} else {
+		logger.InfoCF("livekit", "Skipping post-session manager chat/session persistence: manager persistence disabled", map[string]any{
+			"room":     rs.roomName(),
+			"messages": len(messages),
+		})
+	}
 
 	rs.exportSessionTraceBundle(bridge, usage, quality)
 }
