@@ -318,6 +318,120 @@ func TestHydrateLiveKitWorkspaceSkeletonSeedsCoreFilesFromTemplateSources(t *tes
 	assertFileEquals("memory/MEMORY.md", "# Memory\n\nTemplate memory.\n")
 }
 
+func TestHydrateLiveKitWorkspaceSkeletonRendersMemoryTemplateFromChildProfile(t *testing.T) {
+	workspace := t.TempDir()
+	templateWorkspace := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(templateWorkspace, "memory", "MEMORY.md"), `# Memory
+
+{% if child_name %}
+Child Profile:
+- Name: {{ child_name }}
+{% if child_age %}- Age: {{ child_age }} years old{% endif %}
+{% if child_interests %}- Interests: {{ child_interests }}{% endif %}
+{% endif %}
+`)
+
+	_, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs: []string{templateWorkspace},
+		ChildProfile: roomMetadataChildProfile{
+			Name:      "Aarav",
+			Age:       7,
+			Interests: "space, music",
+		},
+	})
+	if err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workspace, "memory", "MEMORY.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(MEMORY.md) error = %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"Child Profile:",
+		"Name: Aarav",
+		"Age: 7 years old",
+		"Interests: space, music",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("MEMORY.md missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "{{") || strings.Contains(got, "{%") {
+		t.Fatalf("MEMORY.md still contains template markers: %q", got)
+	}
+}
+
+func TestRenderMemoryTemplateWithChildProfile(t *testing.T) {
+	templateText := `# Memory
+
+{% if child_name %}
+Child Profile:
+- Name: {{ child_name }}
+{% if child_age %}- Age: {{ child_age }} years old{% endif %}
+{% if child_interests %}- Interests: {{ child_interests }}{% endif %}
+{% endif %}
+`
+	rendered, ok := renderMemoryTemplateWithChildProfile(templateText, roomMetadataChildProfile{
+		Name:      "Aarav",
+		Age:       7,
+		Interests: "space, music",
+	})
+	if !ok {
+		t.Fatal("renderMemoryTemplateWithChildProfile = false, want true")
+	}
+	for _, want := range []string{"Child Profile:", "Name: Aarav", "Age: 7 years old", "Interests: space, music"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered memory missing %q: %q", want, rendered)
+		}
+	}
+}
+
+func TestHydrateLiveKitWorkspaceSkeletonDoesNotOverrideRenderedMemoryOnSecondRun(t *testing.T) {
+	workspace := t.TempDir()
+	templateWorkspace := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(templateWorkspace, "memory", "MEMORY.md"), `# Memory
+
+Child Profile:
+- Name: {{ child_name }}
+`)
+
+	if _, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs: []string{templateWorkspace},
+		ChildProfile: roomMetadataChildProfile{
+			Name: "Aarav",
+		},
+	}); err != nil {
+		t.Fatalf("first hydrate returned error: %v", err)
+	}
+
+	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
+	firstContent, err := os.ReadFile(memoryPath)
+	if err != nil {
+		t.Fatalf("ReadFile(first MEMORY.md) error = %v", err)
+	}
+
+	if _, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs: []string{templateWorkspace},
+		ChildProfile: roomMetadataChildProfile{
+			Name: "Ira",
+		},
+	}); err != nil {
+		t.Fatalf("second hydrate returned error: %v", err)
+	}
+
+	secondContent, err := os.ReadFile(memoryPath)
+	if err != nil {
+		t.Fatalf("ReadFile(second MEMORY.md) error = %v", err)
+	}
+	if string(secondContent) != string(firstContent) {
+		t.Fatalf("MEMORY.md should not be overwritten on second run: first=%q second=%q", string(firstContent), string(secondContent))
+	}
+}
+
 func TestHydrateLiveKitWorkspaceSkeletonCopiesSkillsFromFallbackSources(t *testing.T) {
 	workspace := t.TempDir()
 	tmp := t.TempDir()

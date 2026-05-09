@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -17,6 +20,7 @@ type liveKitWorkspaceHydrationOptions struct {
 	IdentityContent       string
 	UserContent           string
 	MemoryContent         string
+	ChildProfile          roomMetadataChildProfile
 	SessionContextContent string
 	TemplateSourceDir     string
 	TemplateSourceDirs    []string
@@ -40,6 +44,12 @@ var workspaceTemplateFiles = map[string]workspaceTemplateFileSpec{
 	"memory/MEMORY.md": {Perm: 0o600},
 }
 
+var (
+	jinjaIfPattern    = regexp.MustCompile(`\{%\s*if\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*%\}`)
+	jinjaEndIfPattern = regexp.MustCompile(`\{%\s*endif\s*%\}`)
+	jinjaVarPattern   = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
+)
+
 func buildLiveKitWorkspaceHydrationOptions(
 	baseWorkspace string,
 	bootstrap roomMetadataBootstrap,
@@ -60,6 +70,8 @@ func buildLiveKitWorkspaceHydrationOptions(
 		opts.IdentityContent = formatRoomMetadataIdentityContent(md)
 	}
 	opts.UserContent = formatRoomMetadataUserContent(md)
+	opts.MemoryContent = formatRoomMetadataMemoryContent(md)
+	opts.ChildProfile = md.ChildProfile
 	return opts
 }
 
@@ -127,20 +139,40 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 	}
 
 	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
-	memoryContent := strings.TrimSpace(opts.MemoryContent)
-	switch {
-	case memoryContent != "":
-		if !strings.HasPrefix(memoryContent, "#") {
-			memoryContent = "# Memory\n\n" + memoryContent
+	existingMemory, memoryReadErr := os.ReadFile(memoryPath)
+	existingMemoryContent := ""
+	if memoryReadErr == nil {
+		existingMemoryContent = string(existingMemory)
+	} else if !os.IsNotExist(memoryReadErr) {
+		return result, memoryReadErr
+	}
+
+	if shouldInitializeMemoryContent(existingMemoryContent, memoryReadErr) {
+		contentToWrite := ""
+		if hasTemplateMarkers(existingMemoryContent) {
+			if rendered, ok := renderMemoryTemplateWithChildProfile(existingMemoryContent, opts.ChildProfile); ok {
+				contentToWrite = rendered
+			}
 		}
-		if err := os.WriteFile(memoryPath, []byte(ensureTrailingNewline(memoryContent)), 0o600); err != nil {
+		if strings.TrimSpace(contentToWrite) == "" {
+			memoryContent := strings.TrimSpace(opts.MemoryContent)
+			if memoryContent != "" {
+				if !strings.HasPrefix(memoryContent, "#") {
+					memoryContent = "# Memory\n\n" + memoryContent
+				}
+				contentToWrite = memoryContent
+			}
+		}
+		if strings.TrimSpace(contentToWrite) == "" {
+			contentToWrite = "# Memory\n\nNo durable memory has been hydrated yet.\n"
+		}
+		if err := os.MkdirAll(filepath.Dir(memoryPath), 0o755); err != nil {
+			return result, err
+		}
+		if err := os.WriteFile(memoryPath, []byte(ensureTrailingNewline(contentToWrite)), 0o600); err != nil {
 			return result, err
 		}
 		result.MemoryWritten = true
-	default:
-		if err := writeFileIfMissingOrBlank(memoryPath, "# Memory\n\nNo durable memory has been hydrated yet.\n", 0o600); err != nil {
-			return result, err
-		}
 	}
 
 	sessionContextContent := strings.TrimSpace(opts.SessionContextContent)
@@ -310,6 +342,104 @@ func writeFileIfMissingOrBlank(path, content string, perm os.FileMode) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(content), perm)
+}
+
+func shouldInitializeMemoryContent(content string, readErr error) bool {
+	if os.IsNotExist(readErr) {
+		return true
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return true
+	}
+	if strings.Contains(trimmed, "No durable memory has been hydrated yet.") {
+		return true
+	}
+	return hasTemplateMarkers(trimmed)
+}
+
+func hasTemplateMarkers(content string) bool {
+	return strings.Contains(content, "{{") || strings.Contains(content, "{%")
+}
+
+func normalizeMemoryTemplateSyntax(content string) string {
+	content = jinjaIfPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := jinjaIfPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return "{{ if " + memoryTemplateField(parts[1]) + " }}"
+	})
+	content = jinjaEndIfPattern.ReplaceAllString(content, "{{ end }}")
+	content = jinjaVarPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := jinjaVarPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		return "{{ " + memoryTemplateField(parts[1]) + " }}"
+	})
+	return content
+}
+
+func memoryTemplateField(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "end", "else", "if", "range", "with":
+		return strings.TrimSpace(name)
+	case "child_name":
+		return ".ChildName"
+	case "child_age":
+		return ".ChildAge"
+	case "child_gender":
+		return ".ChildGender"
+	case "child_interests":
+		return ".ChildInterests"
+	case "child_timezone":
+		return ".ChildTimezone"
+	default:
+		return "." + strings.TrimSpace(name)
+	}
+}
+
+func renderMemoryTemplateWithChildProfile(
+	content string,
+	child roomMetadataChildProfile,
+) (string, bool) {
+	if strings.TrimSpace(content) == "" || !hasTemplateMarkers(content) {
+		return "", false
+	}
+
+	tmplText := normalizeMemoryTemplateSyntax(content)
+	tmpl, err := template.New("memory").Option("missingkey=zero").Parse(tmplText)
+	if err != nil {
+		return "", false
+	}
+
+	ctx := struct {
+		ChildName      string
+		ChildAge       int
+		ChildGender    string
+		ChildInterests string
+		ChildTimezone  string
+		ChildProfile   roomMetadataChildProfile
+	}{
+		ChildName:      strings.TrimSpace(child.Name),
+		ChildAge:       child.Age,
+		ChildGender:    strings.TrimSpace(child.Gender),
+		ChildInterests: strings.TrimSpace(child.Interests),
+		ChildTimezone:  strings.TrimSpace(child.Timezone),
+		ChildProfile:   child,
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, ctx); err != nil {
+		return "", false
+	}
+
+	rendered := strings.TrimSpace(out.String())
+	if rendered == "" {
+		return "", false
+	}
+	return rendered, true
 }
 
 func ensureTrailingNewline(content string) string {
