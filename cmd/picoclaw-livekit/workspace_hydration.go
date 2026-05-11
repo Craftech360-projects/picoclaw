@@ -205,6 +205,11 @@ func liveKitSkillSourceDirs(baseWorkspace string) []string {
 		sources = append(sources, filepath.Join(baseWorkspace, "skills"))
 	}
 
+	if exeDir := liveKitExecutableDir(); exeDir != "" {
+		sources = append(sources, filepath.Join(exeDir, "workspace", "skills"))
+		sources = append(sources, filepath.Join(exeDir, "workspace-template", "skills"))
+	}
+
 	globalConfigDir := getLiveKitGlobalConfigDir()
 	if globalConfigDir != "" {
 		sources = append(sources, filepath.Join(globalConfigDir, "skills"))
@@ -227,6 +232,11 @@ func liveKitWorkspaceTemplateDirs(baseWorkspace string) []string {
 		sources = append(sources, baseWorkspace)
 	}
 
+	if exeDir := liveKitExecutableDir(); exeDir != "" {
+		sources = append(sources, filepath.Join(exeDir, "workspace"))
+		sources = append(sources, filepath.Join(exeDir, "workspace-template"))
+	}
+
 	globalConfigDir := getLiveKitGlobalConfigDir()
 	if globalConfigDir != "" {
 		sources = append(sources, filepath.Join(globalConfigDir, "workspace"))
@@ -238,6 +248,14 @@ func liveKitWorkspaceTemplateDirs(baseWorkspace string) []string {
 	}
 
 	return cleanUniquePaths(sources)
+}
+
+func liveKitExecutableDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(filepath.Dir(exe))
 }
 
 func getLiveKitGlobalConfigDir() string {

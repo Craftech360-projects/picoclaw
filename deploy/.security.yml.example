@@ -1,0 +1,8 @@
+model_list: {}
+
+livekit_service:
+  api_key: "your-livekit-api-key"
+  api_secret: "your-livekit-api-secret"
+  deepgram_api_key: "your-deepgram-key"
+  cartesia_api_key: "your-cartesia-key"
+  inworld_api_key: "your-inworld-key"

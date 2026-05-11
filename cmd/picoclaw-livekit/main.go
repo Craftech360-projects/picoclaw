@@ -63,6 +63,18 @@ func main() {
 	logger.SetLevelFromString(*logLevel)
 	configureGoogleCredentials(cfg, cfgPath)
 
+	workspaceBootstrap, err := ensureLiveKitDefaultWorkspaceTemplate(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error preparing default workspace template: %v\n", err)
+		os.Exit(1)
+	}
+	logger.InfoCF("livekit", "Default workspace template ready", map[string]any{
+		"workspace":       workspaceBootstrap.Workspace,
+		"seeded_files":    workspaceBootstrap.SeededFiles,
+		"skills_copied":   workspaceBootstrap.SkillsCopied,
+		"existing_skills": workspaceBootstrap.ExistingSkills,
+	})
+
 	provider, modelID, err := providers.CreateProvider(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating provider: %v\n", err)

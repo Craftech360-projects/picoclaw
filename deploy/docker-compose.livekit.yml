@@ -1,0 +1,18 @@
+services:
+  picoclaw-livekit:
+    image: your-registry/picoclaw-livekit:latest
+    container_name: picoclaw-livekit
+    restart: unless-stopped
+    environment:
+      PICOCLAW_CONFIG: /etc/picoclaw/config.json
+      PICOCLAW_AGENTS_DEFAULTS_WORKSPACE: /opt/picoclaw/workspace-template
+      STT_DATABASE_URL: ${STT_DATABASE_URL}
+      DIRECT_URL: ${DIRECT_URL}
+    volumes:
+      - ./config.json:/etc/picoclaw/config.json:ro
+      - ./.security.yml:/etc/picoclaw/.security.yml:ro
+      - picoclaw-data:/opt/picoclaw
+    command: ["picoclaw-livekit", "--agent-name", "cheeko-agent", "--config", "/etc/picoclaw/config.json"]
+
+volumes:
+  picoclaw-data:

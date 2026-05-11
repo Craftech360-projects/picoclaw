@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "agents": {
+    "defaults": {
+      "workspace": "/opt/picoclaw/workspace-template"
+    }
+  },
+  "livekit_service": {
+    "server_url": "ws://localhost:7880"
+  }
+}
