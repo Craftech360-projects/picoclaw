@@ -27,6 +27,7 @@ type roomMetadata struct {
 	AdditionalNotes  string                   `json:"additional_notes"`
 
 	SessionLanguageName string `json:"session_language_name"`
+	SessionLanguageCode string `json:"session_language_code"`
 }
 
 type roomMetadataChildProfile struct {
@@ -132,9 +133,13 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	metadata.MemoryEntities = normalizeEntities(mustGetMapValue(payload, "memory_entities", "memoryEntities"))
 
 	metadata.SessionLanguageName = normalizeString(mustGetMapValue(payload, "session_language_name", "sessionLanguageName"))
+	metadata.SessionLanguageCode = normalizeString(mustGetMapValue(payload, "session_language_code", "sessionLanguageCode"))
 	metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "primary_language", "primaryLanguage"))
 	if metadata.PrimaryLanguage == "" {
-		metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "session_language_code", "sessionLanguageCode"))
+		metadata.PrimaryLanguage = metadata.SessionLanguageName
+	}
+	if metadata.PrimaryLanguage == "" {
+		metadata.PrimaryLanguage = metadata.SessionLanguageCode
 	}
 	if metadata.PrimaryLanguage == "" {
 		metadata.PrimaryLanguage = normalizeString(mustGetMapValue(childProfile, "primary_language", "primaryLanguage", "language"))

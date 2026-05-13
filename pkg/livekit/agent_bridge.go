@@ -139,6 +139,11 @@ type AgentBridge struct {
 	quality    qualityState
 	traceMu    sync.Mutex
 	traceLog   []RuntimeEvent
+
+	sessionLanguageMu   sync.RWMutex
+	sessionLanguageName string
+	sessionLanguageCode string
+	languageLockEnabled bool
 }
 
 // AgentBridgeConfig defines shared resources for creating bridges.
@@ -162,6 +167,10 @@ type AgentBridgeConfig struct {
 	// ContextWindow is the model's context size in tokens (approximate), used to detect
 	// when the token budget is being approached. Defaults to 128000 if zero.
 	ContextWindow int
+
+	SessionLanguageName string
+	SessionLanguageCode string
+	LanguageLockEnabled bool
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -205,7 +214,11 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		mcpManager:                cfg.MCPManager,
 		summarizeMessageThreshold: summarizeThreshold,
 		contextWindow:             ctxWindow,
+		languageLockEnabled:       cfg.LanguageLockEnabled,
 	}
+	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
+	ab.sessionLanguageName = policy.DisplayName
+	ab.sessionLanguageCode = policy.RawCode
 	ab.usage.sessionStart = time.Now()
 	if sp, ok := cfg.Provider.(providers.StreamingProvider); ok {
 		ab.streamProvider = sp
@@ -672,25 +685,70 @@ CRITICAL RULES FOR VOICE:
 	}
 
 	// Insert voice directive right after the first system message (if any)
-	inserted := false
-	for i, msg := range messages {
-		if msg.Role == "system" {
-			// Insert after the first system message
-			result := make([]providers.Message, 0, len(messages)+1)
-			result = append(result, messages[:i+1]...)
-			result = append(result, voiceDirective)
-			result = append(result, messages[i+1:]...)
-			messages = result
-			inserted = true
-			break
+	// Insert voice first, then language lock. Because both are inserted at the
+	// same anchor (after the first system message), second insertion gets higher priority.
+	messages = insertSystemDirectiveAfterFirstSystem(messages, voiceDirective)
+	if ab.languageLockEnabled {
+		if directive := strings.TrimSpace(ab.sessionLanguageDirective()); directive != "" {
+			messages = insertSystemDirectiveAfterFirstSystem(messages, providers.Message{
+				Role:    "system",
+				Content: directive,
+			})
 		}
 	}
-	if !inserted {
-		// No system message found — prepend the voice directive
-		messages = append([]providers.Message{voiceDirective}, messages...)
-	}
+	// Deterministic priority: base system -> language lock -> voice.
 
 	return messages
+}
+
+func insertSystemDirectiveAfterFirstSystem(messages []providers.Message, directive providers.Message) []providers.Message {
+	for i, msg := range messages {
+		if msg.Role != "system" {
+			continue
+		}
+		result := make([]providers.Message, 0, len(messages)+1)
+		result = append(result, messages[:i+1]...)
+		result = append(result, directive)
+		result = append(result, messages[i+1:]...)
+		return result
+	}
+	return append([]providers.Message{directive}, messages...)
+}
+
+func (ab *AgentBridge) sessionLanguageDirective() string {
+	policy := ab.SessionLanguagePolicy()
+	if strings.TrimSpace(policy.DisplayName) == "" {
+		return ""
+	}
+	return fmt.Sprintf(`## Session Language Override
+This session language is fixed by RFID policy.
+Speak only in %s unless the user explicitly asks for translation or transliteration.
+Do not auto-switch language based on mixed-language input.
+Use child-friendly tone and prefer native script for %s by default.`, policy.DisplayName, policy.DisplayName)
+}
+
+// UpdateSessionLanguage updates in-memory session language policy atomically.
+func (ab *AgentBridge) UpdateSessionLanguage(name, code string) {
+	if ab == nil {
+		return
+	}
+	policy := NormalizeSessionLanguagePolicy(name, code)
+	ab.sessionLanguageMu.Lock()
+	ab.sessionLanguageName = policy.DisplayName
+	ab.sessionLanguageCode = policy.RawCode
+	ab.sessionLanguageMu.Unlock()
+}
+
+// SessionLanguagePolicy returns a snapshot of current language policy.
+func (ab *AgentBridge) SessionLanguagePolicy() SessionLanguagePolicy {
+	if ab == nil {
+		return NormalizeSessionLanguagePolicy("", "")
+	}
+	ab.sessionLanguageMu.RLock()
+	name := ab.sessionLanguageName
+	code := ab.sessionLanguageCode
+	ab.sessionLanguageMu.RUnlock()
+	return NormalizeSessionLanguagePolicy(name, code)
 }
 
 func (ab *AgentBridge) activeSkillNames() []string {

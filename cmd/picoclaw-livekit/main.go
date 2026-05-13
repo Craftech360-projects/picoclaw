@@ -98,6 +98,7 @@ func main() {
 		"vad_endpoint_ms":                   lkCfg.Runtime.VADEndpointMS,
 		"rate_limit_cooldown_seconds":       lkCfg.Runtime.RateLimitCooldownSeconds,
 		"provider_failure_cooldown_seconds": lkCfg.Runtime.ProviderFailureCooldownSec,
+		"language_lock_enabled":             lkCfg.Runtime.LanguageLockEnabled,
 	})
 
 	// Initialize STT factory with PostgreSQL
@@ -376,6 +377,18 @@ func main() {
 		if bootstrap.Source == bootstrapSourceRoomMetadata {
 			workspaceBootstrapSource = bootstrap.Source
 		}
+		sessionLanguagePolicy := livekit.NormalizeSessionLanguagePolicy(
+			bootstrap.Metadata.SessionLanguageName,
+			bootstrap.Metadata.SessionLanguageCode,
+		)
+		if strings.TrimSpace(bootstrap.Metadata.SessionLanguageName) == "" &&
+			strings.TrimSpace(bootstrap.Metadata.SessionLanguageCode) == "" &&
+			strings.TrimSpace(bootstrap.Metadata.PrimaryLanguage) != "" {
+			sessionLanguagePolicy = livekit.NormalizeSessionLanguagePolicy(
+				bootstrap.Metadata.PrimaryLanguage,
+				bootstrap.Metadata.PrimaryLanguage,
+			)
+		}
 		if workspace != "" {
 			hydration, err := hydrateLiveKitWorkspaceSkeleton(
 				workspace,
@@ -542,14 +555,17 @@ func main() {
 		}
 
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:             cfg,
-			Provider:           provider,
-			ModelID:            modelID,
-			AgentInstance:      agentInstance,
-			PreserveWorkspace:  preserveWorkspace,
-			MaxIterations:      cfg.Agents.Defaults.MaxToolIterations,
-			WorkspaceArtifacts: artifactStore,
-			MCPManager:         mcpManager,
+			Config:              cfg,
+			Provider:            provider,
+			ModelID:             modelID,
+			AgentInstance:       agentInstance,
+			PreserveWorkspace:   preserveWorkspace,
+			MaxIterations:       cfg.Agents.Defaults.MaxToolIterations,
+			SessionLanguageName: sessionLanguagePolicy.DisplayName,
+			SessionLanguageCode: sessionLanguagePolicy.RawCode,
+			LanguageLockEnabled: lkCfg.Runtime.LanguageLockEnabled,
+			WorkspaceArtifacts:  artifactStore,
+			MCPManager:          mcpManager,
 			OnClose: func() {
 				stopWorkspaceSyncLoop()
 				if cronService != nil {
@@ -647,39 +663,29 @@ func main() {
 			if assignment != nil {
 				token = assignment.Token
 			}
-			// Extract primaryLanguage from metadata for language-aware fallback phrases
-			primaryLanguage := ""
-			_, metadataPayload, metadataSource := resolveLiveKitJobBootstrapContext(job)
-			if strings.TrimSpace(metadataPayload) != "" {
-				if md, err := parseRoomMetadataBootstrap(metadataPayload); err == nil {
-					primaryLanguage = strings.TrimSpace(md.Metadata.PrimaryLanguage)
-				} else {
-					logger.WarnCF("livekit", "Failed to parse metadata for primary language", map[string]any{
-						"error":           err.Error(),
-						"metadata_source": metadataSource,
-					})
-				}
-			}
+			sessionLanguagePolicy := bridge.SessionLanguagePolicy()
 
 			// Get active STT provider for this session
 			sttProvider := buildSTTProvider(sttFactory)
 
 			return livekit.NewRoomSession(livekit.RoomSessionConfig{
-				Worker:          worker,
-				JobID:           job.Id,
-				RoomInfo:        job.Room,
-				Bridge:          bridge,
-				ServerURL:       serverURL,
-				Token:           token,
-				STT:             sttProvider,
-				TTS:             ttsProvider,
-				APIKey:          lkCfg.APIKey(),
-				APISecret:       lkCfg.APISecret(),
-				AgentName:       *agentName,
-				SampleRate:      ttsSampleRate,
-				FillerWords:     lkCfg.TTS.FillerWords,
-				PrimaryLanguage: primaryLanguage,
-				Runtime:         lkCfg.Runtime,
+				Worker:              worker,
+				JobID:               job.Id,
+				RoomInfo:            job.Room,
+				Bridge:              bridge,
+				ServerURL:           serverURL,
+				Token:               token,
+				STT:                 sttProvider,
+				TTS:                 ttsProvider,
+				APIKey:              lkCfg.APIKey(),
+				APISecret:           lkCfg.APISecret(),
+				AgentName:           *agentName,
+				SampleRate:          ttsSampleRate,
+				FillerWords:         lkCfg.TTS.FillerWords,
+				PrimaryLanguage:     sessionLanguagePolicy.DisplayName,
+				SessionLanguageName: sessionLanguagePolicy.DisplayName,
+				SessionLanguageCode: sessionLanguagePolicy.RawCode,
+				Runtime:             lkCfg.Runtime,
 			})
 		},
 	}

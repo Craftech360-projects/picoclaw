@@ -522,6 +522,9 @@ func DefaultConfig() *Config {
 				ModelID:      "",
 				OutputFormat: "pcm_24000",
 			},
+			Runtime: LiveKitServiceRuntimeConfig{
+				LanguageLockEnabled: true,
+			},
 			ManagerAPI: LiveKitServiceManagerAPIConfig{
 				BaseURL:             "",
 				SessionStoreEnabled: false,

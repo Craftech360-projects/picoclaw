@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 func TestAgentBridgeBuildMessagesIncludesActiveSkills(t *testing.T) {
@@ -79,4 +80,57 @@ func TestAgentBridgeBuildMessagesIncludesFreshnessPolicy(t *testing.T) {
 			t.Fatalf("messages missing freshness policy %q:\n%s", want, joined.String())
 		}
 	}
+}
+
+func TestAgentBridgeBuildMessagesIncludesSessionLanguageLock(t *testing.T) {
+	workspace := t.TempDir()
+	bridge := &AgentBridge{
+		agentInstance: &agent.AgentInstance{
+			ContextBuilder: agent.NewContextBuilder(workspace),
+		},
+		contextBuilder:      agent.NewContextBuilder(workspace),
+		sessionLanguageName: "Hindi",
+		sessionLanguageCode: "hi-IN",
+		languageLockEnabled: true,
+	}
+
+	messages := bridge.buildMessages(nil, "", "hello", "livekit:device:a")
+	joined := joinMessages(messages)
+	if !strings.Contains(joined, "Session Language Override") {
+		t.Fatalf("missing language lock directive:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Speak only in Hindi") {
+		t.Fatalf("missing strict language lock text:\n%s", joined)
+	}
+	if strings.Index(joined, "Session Language Override") > strings.Index(joined, "## Voice Mode Active") {
+		t.Fatalf("language lock should appear before voice mode directive:\n%s", joined)
+	}
+}
+
+func TestAgentBridgeBuildMessagesSkipsSessionLanguageLockWhenDisabled(t *testing.T) {
+	workspace := t.TempDir()
+	bridge := &AgentBridge{
+		agentInstance: &agent.AgentInstance{
+			ContextBuilder: agent.NewContextBuilder(workspace),
+		},
+		contextBuilder:      agent.NewContextBuilder(workspace),
+		sessionLanguageName: "Hindi",
+		sessionLanguageCode: "hi-IN",
+		languageLockEnabled: false,
+	}
+	joined := joinMessages(bridge.buildMessages(nil, "", "hello", "livekit:device:a"))
+	if strings.Contains(joined, "Session Language Override") {
+		t.Fatalf("language lock directive should be absent when disabled:\n%s", joined)
+	}
+}
+
+func joinMessages(messages []providers.Message) string {
+	var out strings.Builder
+	for _, msg := range messages {
+		out.WriteString(msg.Role)
+		out.WriteString(":")
+		out.WriteString(msg.Content)
+		out.WriteString("\n")
+	}
+	return out.String()
 }

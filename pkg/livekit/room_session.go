@@ -42,22 +42,31 @@ type RoomSession struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 
-	serverURL        string
-	token            string
-	stt              stt.Provider
-	tts              tts.Provider
-	apiKey           string
-	apiSecret        string
-	agentName        string
-	sampleRate       int
-	fillerWords      []string
-	primaryLanguage  string // from room metadata, used for language-aware fallbacks
-	runtime          config.LiveKitServiceRuntimeConfig
-	managerAPIURL    string
-	managerAPISecret string
-	deviceMAC        string
-	agentID          string
-	closeOnce        sync.Once
+	serverURL           string
+	token               string
+	stt                 stt.Provider
+	tts                 tts.Provider
+	apiKey              string
+	apiSecret           string
+	agentName           string
+	sampleRate          int
+	fillerWords         []string
+	primaryLanguage     string // from room metadata, used for language-aware fallbacks
+	SessionLanguageName string
+	SessionLanguageCode string
+	sessionLanguageName string
+	sessionLanguageCode string
+	runtime             config.LiveKitServiceRuntimeConfig
+	managerAPIURL       string
+	managerAPISecret    string
+	deviceMAC           string
+	agentID             string
+	closeOnce           sync.Once
+
+	languageUpdateMu          sync.Mutex
+	lastLanguageUpdateKey     string
+	lastLanguageUpdateAt      time.Time
+	languageReconnectInFlight bool
 }
 
 // ParticipantState tracks per-participant voice session state.
@@ -76,21 +85,23 @@ type ParticipantState struct {
 
 // RoomSessionConfig configures a RoomSession.
 type RoomSessionConfig struct {
-	Worker          *Worker
-	JobID           string
-	RoomInfo        *livekit.Room
-	Bridge          *AgentBridge
-	ServerURL       string
-	Token           string
-	STT             stt.Provider
-	TTS             tts.Provider
-	APIKey          string
-	APISecret       string
-	AgentName       string
-	SampleRate      int
-	FillerWords     []string
-	PrimaryLanguage string // e.g. "Hindi", "English" — from room metadata
-	Runtime         config.LiveKitServiceRuntimeConfig
+	Worker              *Worker
+	JobID               string
+	RoomInfo            *livekit.Room
+	Bridge              *AgentBridge
+	ServerURL           string
+	Token               string
+	STT                 stt.Provider
+	TTS                 tts.Provider
+	APIKey              string
+	APISecret           string
+	AgentName           string
+	SampleRate          int
+	FillerWords         []string
+	PrimaryLanguage     string // e.g. "Hindi", "English" — from room metadata
+	SessionLanguageName string
+	SessionLanguageCode string
+	Runtime             config.LiveKitServiceRuntimeConfig
 }
 
 // NewRoomSession creates a new room session for a job.
@@ -107,27 +118,33 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 	}
 	managerAPISecret := managerAPIServiceKeyFromEnv()
 	deviceMAC, agentID := resolvePersistenceFields(cfg.RoomInfo.Name, cfg.RoomInfo.Metadata)
+	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
+	if strings.TrimSpace(cfg.SessionLanguageName) == "" && strings.TrimSpace(cfg.SessionLanguageCode) == "" {
+		policy = NormalizeSessionLanguagePolicy(cfg.PrimaryLanguage, "")
+	}
 
 	return &RoomSession{
-		worker:           cfg.Worker,
-		jobID:            cfg.JobID,
-		roomInfo:         cfg.RoomInfo,
-		bridge:           cfg.Bridge,
-		serverURL:        cfg.ServerURL,
-		token:            cfg.Token,
-		stt:              cfg.STT,
-		tts:              cfg.TTS,
-		apiKey:           cfg.APIKey,
-		apiSecret:        cfg.APISecret,
-		agentName:        cfg.AgentName,
-		sampleRate:       cfg.SampleRate,
-		fillerWords:      cfg.FillerWords,
-		primaryLanguage:  cfg.PrimaryLanguage,
-		runtime:          cfg.Runtime,
-		managerAPIURL:    managerAPIURL,
-		managerAPISecret: managerAPISecret,
-		deviceMAC:        deviceMAC,
-		agentID:          agentID,
+		worker:              cfg.Worker,
+		jobID:               cfg.JobID,
+		roomInfo:            cfg.RoomInfo,
+		bridge:              cfg.Bridge,
+		serverURL:           cfg.ServerURL,
+		token:               cfg.Token,
+		stt:                 cfg.STT,
+		tts:                 cfg.TTS,
+		apiKey:              cfg.APIKey,
+		apiSecret:           cfg.APISecret,
+		agentName:           cfg.AgentName,
+		sampleRate:          cfg.SampleRate,
+		fillerWords:         cfg.FillerWords,
+		primaryLanguage:     policy.DisplayName,
+		sessionLanguageName: policy.DisplayName,
+		sessionLanguageCode: policy.RawCode,
+		runtime:             cfg.Runtime,
+		managerAPIURL:       managerAPIURL,
+		managerAPISecret:    managerAPISecret,
+		deviceMAC:           deviceMAC,
+		agentID:             agentID,
 	}, nil
 }
 
@@ -352,7 +369,102 @@ func (rs *RoomSession) handleDataMessage(data []byte) {
 		requireAck, _ := msg["require_ack"].(bool)
 		logger.InfoCF("livekit", "Received shutdown_request from gateway", map[string]any{"room": rs.roomInfo.Name})
 		go rs.handleShutdownRequest(sessionID, requireAck)
+	case "session_language_update":
+		update, ok := parseSessionLanguageUpdate(data)
+		if !ok {
+			logger.WarnCF("livekit", "Ignoring invalid session_language_update payload", map[string]any{
+				"room": rs.roomInfo.Name,
+			})
+			return
+		}
+		go rs.handleSessionLanguageUpdate(update)
 	}
+}
+
+type sessionLanguageUpdate struct {
+	Name    string `json:"session_language_name"`
+	Code    string `json:"session_language_code"`
+	RFIDUID string `json:"rfid_uid"`
+}
+
+func parseSessionLanguageUpdate(payload []byte) (sessionLanguageUpdate, bool) {
+	var envelope struct {
+		Type string `json:"type"`
+		sessionLanguageUpdate
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return sessionLanguageUpdate{}, false
+	}
+	if strings.TrimSpace(envelope.Type) != "session_language_update" {
+		return sessionLanguageUpdate{}, false
+	}
+	update := sessionLanguageUpdate{
+		Name:    strings.TrimSpace(envelope.Name),
+		Code:    strings.TrimSpace(envelope.Code),
+		RFIDUID: strings.TrimSpace(envelope.RFIDUID),
+	}
+	if update.Name == "" && update.Code == "" {
+		return sessionLanguageUpdate{}, false
+	}
+	return update, true
+}
+
+func (rs *RoomSession) handleSessionLanguageUpdate(update sessionLanguageUpdate) {
+	policy := NormalizeSessionLanguagePolicy(update.Name, update.Code)
+	key := strings.ToLower(strings.TrimSpace(policy.DisplayName) + "|" + strings.TrimSpace(policy.RawCode) + "|" + strings.TrimSpace(update.RFIDUID))
+
+	rs.languageUpdateMu.Lock()
+	ignoredDuplicate := key != "" && key == rs.lastLanguageUpdateKey && time.Since(rs.lastLanguageUpdateAt) < 10*time.Second
+	if ignoredDuplicate || rs.languageReconnectInFlight {
+		rs.languageUpdateMu.Unlock()
+		rs.publishSessionLanguageUpdateAck(update, policy, true)
+		logger.InfoCF("livekit", "Ignoring duplicate session language update", map[string]any{
+			"room":               rs.roomInfo.Name,
+			"rfid_uid":           update.RFIDUID,
+			"language_name":      policy.DisplayName,
+			"language_code":      policy.RawCode,
+			"ignored_duplicate":  ignoredDuplicate,
+			"reconnect_inflight": true,
+		})
+		return
+	}
+	rs.lastLanguageUpdateKey = key
+	rs.lastLanguageUpdateAt = time.Now()
+	rs.languageReconnectInFlight = true
+	rs.sessionLanguageName = policy.DisplayName
+	rs.sessionLanguageCode = policy.RawCode
+	rs.primaryLanguage = policy.DisplayName
+	rs.languageUpdateMu.Unlock()
+
+	if rs.bridge != nil {
+		rs.bridge.UpdateSessionLanguage(update.Name, update.Code)
+	}
+	rs.publishSessionLanguageUpdateAck(update, policy, false)
+	logger.InfoCF("livekit", "Applying session language update and triggering graceful reconnect", map[string]any{
+		"room":               rs.roomInfo.Name,
+		"rfid_uid":           update.RFIDUID,
+		"language_name":      policy.DisplayName,
+		"language_code":      policy.RawCode,
+		"ignored_duplicate":  false,
+		"reconnect_inflight": true,
+	})
+	rs.Leave()
+}
+
+func (rs *RoomSession) publishSessionLanguageUpdateAck(update sessionLanguageUpdate, policy SessionLanguagePolicy, ignored bool) {
+	if rs == nil || rs.room == nil || rs.room.LocalParticipant == nil {
+		return
+	}
+	ack, _ := json.Marshal(map[string]any{
+		"type":                  "session_language_update_ack",
+		"session_language_name": policy.DisplayName,
+		"session_language_code": policy.RawCode,
+		"rfid_uid":              strings.TrimSpace(update.RFIDUID),
+		"ignored_duplicate":     ignored,
+		"timestamp":             time.Now().UnixMilli(),
+		"source":                "picoclaw_agent",
+	})
+	_ = rs.room.LocalParticipant.PublishData(ack, lksdk.WithDataPublishReliable(true))
 }
 
 // handleEndPrompt asks the LLM to generate and speak a farewell message,
@@ -432,25 +544,12 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	// Determine model and language
 	model := ""
-	language := rs.primaryLanguage
-
-	// Validate language support if provider declares languages
-	if len(caps.Languages) > 0 && language != "" {
-		supported := false
-		for _, lang := range caps.Languages {
-			if lang == language || lang == "auto" || lang == "multi" {
-				supported = true
-				break
-			}
-		}
-		if !supported {
-			logger.WarnCF("livekit", "Language not supported, using auto", map[string]any{
-				"language": language,
-				"provider": rs.stt.Name(),
-			})
-			language = "auto"
-		}
+	policy := NormalizeSessionLanguagePolicy(rs.sessionLanguageName, rs.sessionLanguageCode)
+	language := ResolveSTTHintWithCapabilities(policy, caps.Languages)
+	if strings.TrimSpace(language) == "" {
+		language = "auto"
 	}
+	rs.primaryLanguage = policy.DisplayName
 
 	// Open transcription stream with provider-specific options
 	stream, err := rs.stt.OpenStream(rs.ctx, stt.StreamOptions{
@@ -470,8 +569,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	}
 
 	logger.InfoCF("livekit", "STT stream opened", map[string]any{
-		"provider": rs.stt.Name(),
-		"language": language,
+		"provider":              rs.stt.Name(),
+		"language":              language,
+		"session_language_name": policy.DisplayName,
+		"session_language_code": policy.RawCode,
 	})
 
 	var vadPipe *vad.VADPipeline

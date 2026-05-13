@@ -897,6 +897,7 @@ type LiveKitServiceRuntimeConfig struct {
 	VADEndpointMS              int     `json:"vad_endpoint_ms,omitempty"                  env:"PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS"`
 	RateLimitCooldownSeconds   int     `json:"rate_limit_cooldown_seconds,omitempty"      env:"PICOCLAW_LIVEKIT_RUNTIME_RATE_LIMIT_COOLDOWN_SECONDS"`
 	ProviderFailureCooldownSec int     `json:"provider_failure_cooldown_seconds,omitempty" env:"PICOCLAW_LIVEKIT_RUNTIME_PROVIDER_FAILURE_COOLDOWN_SECONDS"`
+	LanguageLockEnabled        bool    `json:"language_lock_enabled,omitempty"             env:"PICOCLAW_LIVEKIT_RUNTIME_LANGUAGE_LOCK_ENABLED"`
 }
 
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.

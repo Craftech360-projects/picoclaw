@@ -16,7 +16,8 @@ func TestParseRoomMetadataBootstrapUsesValidRoomMetadata(t *testing.T) {
 		"long_term_memories": ["likes planets"],
 		"memory_relations": [{"source":"Asha","relation":"likes","target":"planets"}],
 		"memory_entities": [{"name":"Asha","type":"person"}],
-		"session_language_name": "English"
+		"session_language_name": "English",
+		"session_language_code": "en-IN"
 	}`
 
 	bootstrap, err := parseRoomMetadataBootstrap(metadata)
@@ -34,6 +35,9 @@ func TestParseRoomMetadataBootstrapUsesValidRoomMetadata(t *testing.T) {
 	}
 	if bootstrap.Metadata.PrimaryLanguage != "English" {
 		t.Fatalf("PrimaryLanguage = %q, want English", bootstrap.Metadata.PrimaryLanguage)
+	}
+	if bootstrap.Metadata.SessionLanguageCode != "en-IN" {
+		t.Fatalf("SessionLanguageCode = %q, want en-IN", bootstrap.Metadata.SessionLanguageCode)
 	}
 }
 
@@ -98,5 +102,30 @@ func TestParseRoomMetadataBootstrapAcceptsWrappedMetadataPayload(t *testing.T) {
 	}
 	if got := len(bootstrap.Metadata.LongTermMemories); got != 1 {
 		t.Fatalf("LongTermMemories len = %d, want 1", got)
+	}
+}
+
+func TestParseRoomMetadataBootstrapParsesSessionLanguageCode(t *testing.T) {
+	metadata := `{"session_language_name":"Kannada","session_language_code":"kn-IN"}`
+	bootstrap, err := parseRoomMetadataBootstrap(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.Metadata.SessionLanguageCode != "kn-IN" {
+		t.Fatalf("SessionLanguageCode = %q, want kn-IN", bootstrap.Metadata.SessionLanguageCode)
+	}
+}
+
+func TestParseRoomMetadataBootstrapLanguagePrecedence(t *testing.T) {
+	metadata := `{"session_language_name":"Hindi","session_language_code":"hi-IN","primary_language":"en"}`
+	bootstrap, err := parseRoomMetadataBootstrap(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.Metadata.SessionLanguageCode != "hi-IN" {
+		t.Fatalf("SessionLanguageCode = %q, want hi-IN", bootstrap.Metadata.SessionLanguageCode)
+	}
+	if bootstrap.Metadata.PrimaryLanguage != "en" {
+		t.Fatalf("PrimaryLanguage = %q, want en", bootstrap.Metadata.PrimaryLanguage)
 	}
 }
