@@ -318,6 +318,30 @@ func main() {
 			}
 			lockOwner := fmt.Sprintf("room=%s job=%s pid=%d", roomName, jobID, os.Getpid())
 			lock, err := acquireWorkspaceLock(workspace, lockOwner, lockTimeout, lockStaleAfter)
+			if err != nil && strings.Contains(err.Error(), "workspace lock busy") {
+				// Reconnect races are expected when the previous room is still flushing
+				// post-session persistence. Give handoff one extra grace window before
+				// abandoning this assignment.
+				if ok, hintOwner := livekit.HasRecentWorkspaceReconnectHint(workspace, 2*time.Minute); ok &&
+					strings.TrimSpace(hintOwner) == lockOwner {
+					retryTimeout := lockTimeout
+					if retryTimeout < 20*time.Second {
+						retryTimeout = 20 * time.Second
+					}
+					if retryTimeout > 120*time.Second {
+						retryTimeout = 120 * time.Second
+					}
+					logger.InfoCF("livekit", "Retrying per-device workspace lock acquisition during reconnect handoff", map[string]any{
+						"room":              roomName,
+						"device_mac":        deviceMAC,
+						"workspace":         workspace,
+						"lock_owner":        lockOwner,
+						"retry_timeout_ms":  retryTimeout.Milliseconds(),
+						"initial_timeout_ms": lockTimeout.Milliseconds(),
+					})
+					lock, err = acquireWorkspaceLock(workspace, lockOwner, retryTimeout, lockStaleAfter)
+				}
+			}
 			if err != nil {
 				logger.WarnCF("livekit", "Failed to acquire per-device workspace lock", map[string]any{
 					"room":            roomName,
@@ -939,7 +963,7 @@ func livekitCronSessionKey(deviceMAC, agentID, roomName string) string {
 }
 
 func liveKitWorkspaceLockTimeout(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
-	const defaultSeconds = 10
+	const defaultSeconds = 30
 	if cfg.WorkspaceSync.LockTimeoutSecond > 0 {
 		seconds := cfg.WorkspaceSync.LockTimeoutSecond
 		if seconds > 300 {

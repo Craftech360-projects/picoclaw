@@ -294,6 +294,16 @@ func TestCallTool_ErrorsForClosedOrMissingServer(t *testing.T) {
 			t.Fatalf("expected server not found error, got: %v", err)
 		}
 	})
+
+	t.Run("server unavailable", func(t *testing.T) {
+		mgr := NewManager()
+		mgr.servers["broken"] = &ServerConnection{Name: "broken"}
+
+		_, err := mgr.CallTool(context.Background(), "broken", "tool", nil)
+		if err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("expected server unavailable error, got: %v", err)
+		}
+	})
 }
 
 func TestClose_IdempotentOnEmptyManager(t *testing.T) {
@@ -304,5 +314,22 @@ func TestClose_IdempotentOnEmptyManager(t *testing.T) {
 	}
 	if err := mgr.Close(); err != nil {
 		t.Fatalf("second close should be idempotent, got: %v", err)
+	}
+}
+
+func TestClose_NilReceiver(t *testing.T) {
+	var mgr *Manager
+	if err := mgr.Close(); err != nil {
+		t.Fatalf("nil receiver close should be safe, got: %v", err)
+	}
+}
+
+func TestClose_ToleratesNilConnectionsAndSessions(t *testing.T) {
+	mgr := NewManager()
+	mgr.servers["nil-conn"] = nil
+	mgr.servers["nil-session"] = &ServerConnection{Name: "nil-session", Session: nil}
+
+	if err := mgr.Close(); err != nil {
+		t.Fatalf("close should tolerate nil entries, got: %v", err)
 	}
 }

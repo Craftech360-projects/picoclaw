@@ -453,13 +453,16 @@ func (m *Manager) CallTool(
 		return nil, fmt.Errorf("manager is closed")
 	}
 	conn, ok := m.servers[serverName]
-	if ok {
+	if ok && conn != nil && conn.Session != nil {
 		m.wg.Add(1) // Add to WaitGroup while holding the lock
 	}
 	m.mu.RUnlock()
 
 	if !ok {
 		return nil, fmt.Errorf("server %s not found", serverName)
+	}
+	if conn == nil || conn.Session == nil {
+		return nil, fmt.Errorf("server %s is unavailable", serverName)
 	}
 	defer m.wg.Done()
 
@@ -478,6 +481,10 @@ func (m *Manager) CallTool(
 
 // Close closes all server connections
 func (m *Manager) Close() error {
+	if m == nil {
+		return nil
+	}
+
 	// Use Swap to atomically set closed=true and get the previous value
 	// This prevents TOCTOU race with CallTool's closed check
 	if m.closed.Swap(true) {
@@ -498,6 +505,20 @@ func (m *Manager) Close() error {
 
 	var errs []error
 	for name, conn := range m.servers {
+		if conn == nil {
+			logger.WarnCF("mcp", "Skipping nil server connection during close",
+				map[string]any{
+					"server": name,
+				})
+			continue
+		}
+		if conn.Session == nil {
+			logger.WarnCF("mcp", "Skipping server with nil session during close",
+				map[string]any{
+					"server": name,
+				})
+			continue
+		}
 		if err := conn.Session.Close(); err != nil {
 			logger.ErrorCF("mcp", "Failed to close server connection",
 				map[string]any{
@@ -524,6 +545,9 @@ func (m *Manager) GetAllTools() map[string][]*mcp.Tool {
 
 	result := make(map[string][]*mcp.Tool)
 	for name, conn := range m.servers {
+		if conn == nil {
+			continue
+		}
 		if len(conn.Tools) > 0 {
 			result[name] = conn.Tools
 		}
