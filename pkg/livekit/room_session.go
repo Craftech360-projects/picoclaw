@@ -550,6 +550,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		language = "auto"
 	}
 	rs.primaryLanguage = policy.DisplayName
+	sttEndpointMS := rs.runtime.VADEndpointMS
+	if sttEndpointMS <= 0 {
+		sttEndpointMS = envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
+	}
 
 	// Open transcription stream with provider-specific options
 	stream, err := rs.stt.OpenStream(rs.ctx, stt.StreamOptions{
@@ -558,7 +562,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		Language:       language,
 		Model:          model,
 		InterimResults: true,
-		EndpointingMS:  800,
+		EndpointingMS:  sttEndpointMS,
 	})
 	if err != nil {
 		logger.ErrorCF("livekit", "Failed to open STT stream", map[string]any{
@@ -581,10 +585,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	if vadThreshold <= 0 {
 		vadThreshold = envFloat("PICOCLAW_VAD_THRESHOLD", 0.7)
 	}
-	vadEndpointMS := rs.runtime.VADEndpointMS
-	if vadEndpointMS <= 0 {
-		vadEndpointMS = envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
-	}
+	vadEndpointMS := sttEndpointMS
 	engine, err := vad.NewTenVAD(256, vadThreshold)
 	if err == nil {
 		vadPipe = vad.NewVADPipeline(engine, vadThreshold, vadEndpointMS)

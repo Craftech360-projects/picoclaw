@@ -332,11 +332,11 @@ func main() {
 						retryTimeout = 120 * time.Second
 					}
 					logger.InfoCF("livekit", "Retrying per-device workspace lock acquisition during reconnect handoff", map[string]any{
-						"room":              roomName,
-						"device_mac":        deviceMAC,
-						"workspace":         workspace,
-						"lock_owner":        lockOwner,
-						"retry_timeout_ms":  retryTimeout.Milliseconds(),
+						"room":               roomName,
+						"device_mac":         deviceMAC,
+						"workspace":          workspace,
+						"lock_owner":         lockOwner,
+						"retry_timeout_ms":   retryTimeout.Milliseconds(),
 						"initial_timeout_ms": lockTimeout.Milliseconds(),
 					})
 					lock, err = acquireWorkspaceLock(workspace, lockOwner, retryTimeout, lockStaleAfter)
@@ -565,19 +565,6 @@ func main() {
 				}
 			}
 		}
-		mcpCfg := scopedMCPConfigForWorkspace(cfg, agentInstance.Workspace)
-		mcpManager, err := agent.RegisterMCPToolsForInstances(
-			context.Background(),
-			mcpCfg,
-			agentInstance.Workspace,
-			agentInstance,
-		)
-		if err != nil {
-			releaseWorkspaceLock("mcp_init_failed")
-			fmt.Fprintf(os.Stderr, "Error initializing MCP tools for LiveKit agent: %v\n", err)
-			return nil
-		}
-
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
 			Config:              cfg,
 			Provider:            provider,
@@ -589,7 +576,7 @@ func main() {
 			SessionLanguageCode: sessionLanguagePolicy.RawCode,
 			LanguageLockEnabled: lkCfg.Runtime.LanguageLockEnabled,
 			WorkspaceArtifacts:  artifactStore,
-			MCPManager:          mcpManager,
+			MCPManager:          nil,
 			OnClose: func() {
 				stopWorkspaceSyncLoop()
 				if cronService != nil {
@@ -614,12 +601,10 @@ func main() {
 		})
 		if err != nil {
 			releaseWorkspaceLock("bridge_create_failed")
-			if mcpManager != nil {
-				_ = mcpManager.Close()
-			}
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
 			return nil
 		}
+		startLiveKitAsyncMCPInitialization(cfg, agentInstance, bridge, roomName, workspaceIdentity)
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
 			stopWorkspaceSyncLoop = startWorkspaceSyncLoop(lkCfg.ManagerAPI, deviceMAC, workspace, roomName)
 		}
@@ -749,6 +734,72 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
+}
+
+func startLiveKitAsyncMCPInitialization(
+	cfg *config.Config,
+	agentInstance *agent.AgentInstance,
+	bridge *livekit.AgentBridge,
+	roomName string,
+	workspaceIdentity string,
+) {
+	if cfg == nil || agentInstance == nil || bridge == nil {
+		return
+	}
+	if !cfg.Tools.IsToolEnabled("mcp") {
+		return
+	}
+
+	workspacePath := strings.TrimSpace(agentInstance.Workspace)
+	if workspacePath == "" {
+		return
+	}
+
+	logger.InfoCF("livekit", "Starting async MCP initialization for LiveKit agent", map[string]any{
+		"room":               roomName,
+		"workspace_identity": workspaceIdentity,
+		"workspace":          workspacePath,
+	})
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+
+		mcpCfg := scopedMCPConfigForWorkspace(cfg, workspacePath)
+		mcpManager, err := agent.RegisterMCPToolsForInstances(
+			ctx,
+			mcpCfg,
+			workspacePath,
+			agentInstance,
+		)
+		if err != nil {
+			logger.WarnCF("livekit", "Async MCP initialization failed for LiveKit agent", map[string]any{
+				"room":               roomName,
+				"workspace_identity": workspaceIdentity,
+				"error":              err.Error(),
+			})
+			return
+		}
+		if mcpManager == nil {
+			logger.InfoCF("livekit", "Async MCP initialization skipped/no manager for LiveKit agent", map[string]any{
+				"room":               roomName,
+				"workspace_identity": workspaceIdentity,
+			})
+			return
+		}
+		if !bridge.AttachMCPManager(mcpManager) {
+			logger.InfoCF("livekit", "Async MCP manager ready after bridge close; manager closed", map[string]any{
+				"room":               roomName,
+				"workspace_identity": workspaceIdentity,
+			})
+			return
+		}
+
+		logger.InfoCF("livekit", "Async MCP initialization completed for LiveKit agent", map[string]any{
+			"room":               roomName,
+			"workspace_identity": workspaceIdentity,
+		})
+	}()
 }
 
 func normalizeLiveKitRuntimeConfig(rt *config.LiveKitServiceRuntimeConfig) {

@@ -41,9 +41,12 @@ type RuntimeEvent struct {
 }
 
 const (
-	chatTypeUser      = 1
-	chatTypeAssistant = 2
-	maxChatContentLen = 2000
+	chatTypeUser        = 1
+	chatTypeAssistant   = 2
+	maxChatContentLen   = 2000
+	maxToolDefsForLLM   = 20
+	maxGemini429Retries = 2
+	maxLLMLogContentLen = 1200
 )
 
 // PersistedChatMessage is the serialized chat history shape expected by Manager API.
@@ -144,6 +147,11 @@ type AgentBridge struct {
 	sessionLanguageName string
 	sessionLanguageCode string
 	languageLockEnabled bool
+
+	closeMu sync.Mutex
+	closed  bool
+
+	sessionLLMLocks sync.Map // map[string]*sync.Mutex
 }
 
 // AgentBridgeConfig defines shared resources for creating bridges.
@@ -232,16 +240,26 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 // Close gracefully releases the session memory store and conditionally cleans
 // the active workspace.
 func (ab *AgentBridge) Close() {
-	if ab.runtimeEventChan != nil {
-		close(ab.runtimeEventChan)
-		ab.runtimeEventChan = nil
+	ab.closeMu.Lock()
+	if ab.closed {
+		ab.closeMu.Unlock()
+		return
 	}
-	if ab.mcpManager != nil {
-		if err := ab.mcpManager.Close(); err != nil {
+	ab.closed = true
+	runtimeEventChan := ab.runtimeEventChan
+	ab.runtimeEventChan = nil
+	mcpManager := ab.mcpManager
+	ab.mcpManager = nil
+	ab.closeMu.Unlock()
+
+	if runtimeEventChan != nil {
+		close(runtimeEventChan)
+	}
+	if mcpManager != nil {
+		if err := mcpManager.Close(); err != nil {
 			logger.WarnCF("livekit", "Failed to close MCP manager",
 				map[string]any{"error": err.Error()})
 		}
-		ab.mcpManager = nil
 	}
 	if ab.agentInstance != nil {
 		ab.agentInstance.Close()
@@ -271,6 +289,36 @@ func (ab *AgentBridge) Close() {
 			}
 		}
 	}
+}
+
+// AttachMCPManager safely binds a late-initialized MCP manager to the bridge.
+// It returns false when the bridge is already closed; in that case the provided
+// manager is closed immediately to avoid leaks.
+func (ab *AgentBridge) AttachMCPManager(manager MCPManager) bool {
+	if ab == nil || manager == nil {
+		return false
+	}
+
+	ab.closeMu.Lock()
+	if ab.closed {
+		ab.closeMu.Unlock()
+		if err := manager.Close(); err != nil {
+			logger.WarnCF("livekit", "Failed to close MCP manager after late attach on closed bridge",
+				map[string]any{"error": err.Error()})
+		}
+		return false
+	}
+	if ab.mcpManager != nil {
+		ab.closeMu.Unlock()
+		if err := manager.Close(); err != nil {
+			logger.WarnCF("livekit", "Failed to close redundant MCP manager attach",
+				map[string]any{"error": err.Error()})
+		}
+		return false
+	}
+	ab.mcpManager = manager
+	ab.closeMu.Unlock()
+	return true
 }
 
 // AsyncEvents returns the channel that receives background task completion events.
@@ -507,8 +555,23 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	}
 
 	toolDefs := ab.toolDefs()
+	releaseLLMSlot, err := ab.acquireSessionLLMSlot(ctx, sessionKey)
+	if err != nil {
+		ab.EmitRuntimeEvent(RuntimeEvent{
+			Kind:       "turn_error",
+			SessionKey: sessionKey,
+			Error:      err.Error(),
+			Cause:      "llm_slot_wait_canceled",
+		})
+		if onDone != nil {
+			onDone()
+		}
+		return false, err
+	}
+	defer releaseLLMSlot()
+
 	callStarted := time.Now()
-	resp, err := ab.callLLM(ctx, messages, toolDefs, ab.optionsForProfile(profile), cb)
+	resp, err := ab.callLLM(ctx, sessionKey, messages, toolDefs, ab.optionsForProfile(profile), cb)
 	if err != nil {
 		ab.EmitRuntimeEvent(RuntimeEvent{
 			Kind:       "turn_error",
@@ -527,6 +590,13 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		Role:    "assistant",
 		Content: resp.Content,
 	}
+	logger.InfoCF("livekit", "LLM response received", map[string]any{
+		"session":         sessionKey,
+		"profile":         profile,
+		"content":         trimForLog(resp.Content, maxLLMLogContentLen),
+		"content_len":     len(resp.Content),
+		"tool_call_count": len(resp.ToolCalls),
+	})
 
 	normalized := normalizeToolCalls(resp.ToolCalls)
 	if len(normalized) > 0 {
@@ -777,10 +847,108 @@ func (ab *AgentBridge) toolDefs() []providers.ToolDefinition {
 	if ab.tools == nil {
 		return nil
 	}
-	return ab.tools.ToProviderDefs()
+	defs := ab.tools.ToProviderDefs()
+	if len(defs) <= maxToolDefsForLLM {
+		return defs
+	}
+	prioritized := prioritizeVoiceToolDefs(defs)
+	logger.WarnCF("livekit", "Tool definitions exceed provider limit; truncating for voice turn", map[string]any{
+		"configured": len(defs),
+		"limit":      maxToolDefsForLLM,
+		"priority_kept": []string{
+			"web_search", "web_fetch", "exec", "read_file", "write_file", "list_dir", "timer", "cron",
+		},
+	})
+	return prioritized[:maxToolDefsForLLM]
+}
+
+func prioritizeVoiceToolDefs(defs []providers.ToolDefinition) []providers.ToolDefinition {
+	if len(defs) <= 1 {
+		return defs
+	}
+	priority := []string{
+		"web_search",
+		"web_fetch",
+		"exec",
+		"read_file",
+		"write_file",
+		"list_dir",
+		"timer",
+		"cron",
+	}
+	added := make(map[int]struct{}, len(defs))
+	out := make([]providers.ToolDefinition, 0, len(defs))
+
+	for _, name := range priority {
+		for i := range defs {
+			if _, ok := added[i]; ok {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(defs[i].Function.Name), name) {
+				out = append(out, defs[i])
+				added[i] = struct{}{}
+				break
+			}
+		}
+	}
+	for i := range defs {
+		if _, ok := added[i]; ok {
+			continue
+		}
+		out = append(out, defs[i])
+	}
+	return out
 }
 
 func (ab *AgentBridge) callLLM(
+	ctx context.Context,
+	sessionKey string,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	llmOptions map[string]any,
+	cb func(chunk string),
+) (*providers.LLMResponse, error) {
+	if !ab.shouldRetryGeminiRateLimit() {
+		return ab.callLLMOnce(ctx, messages, toolDefs, llmOptions, cb)
+	}
+
+	backoffs := []time.Duration{300 * time.Millisecond, 900 * time.Millisecond}
+	var lastErr error
+	for attempt := 0; attempt <= maxGemini429Retries; attempt++ {
+		streamedAny := false
+		wrappedCB := func(chunk string) {
+			if strings.TrimSpace(chunk) != "" {
+				streamedAny = true
+			}
+			if cb != nil {
+				cb(chunk)
+			}
+		}
+		resp, err := ab.callLLMOnce(ctx, messages, toolDefs, llmOptions, wrappedCB)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt >= maxGemini429Retries || streamedAny || !isRateLimitLLMError(err) {
+			break
+		}
+		delay := applySmallJitter(backoffs[attempt%len(backoffs)])
+		logger.WarnCF("livekit", "Gemini rate-limited; retrying LLM call", map[string]any{
+			"session":     sessionKey,
+			"attempt":     attempt + 1,
+			"max_retries": maxGemini429Retries,
+			"delay_ms":    delay.Milliseconds(),
+		})
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return nil, lastErr
+}
+
+func (ab *AgentBridge) callLLMOnce(
 	ctx context.Context,
 	messages []providers.Message,
 	toolDefs []providers.ToolDefinition,
@@ -818,6 +986,56 @@ func (ab *AgentBridge) callLLM(
 	return resp, nil
 }
 
+func (ab *AgentBridge) shouldRetryGeminiRateLimit() bool {
+	model := strings.ToLower(strings.TrimSpace(ab.modelID))
+	return strings.Contains(model, "gemini")
+}
+
+func isRateLimitLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowerErr := strings.ToLower(err.Error())
+	return strings.Contains(lowerErr, "429") ||
+		strings.Contains(lowerErr, "rate limit") ||
+		strings.Contains(lowerErr, "rate-limited") ||
+		strings.Contains(lowerErr, "resource exhausted") ||
+		strings.Contains(lowerErr, "resource_exhausted")
+}
+
+func applySmallJitter(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	jitter := time.Duration(time.Now().UnixNano()%90) * time.Millisecond
+	return base + jitter
+}
+
+func (ab *AgentBridge) acquireSessionLLMSlot(ctx context.Context, sessionKey string) (func(), error) {
+	key := strings.TrimSpace(strings.ToLower(sessionKey))
+	if key == "" {
+		key = "__global__"
+	}
+	lockAny, _ := ab.sessionLLMLocks.LoadOrStore(key, &sync.Mutex{})
+	mu, _ := lockAny.(*sync.Mutex)
+	if mu == nil {
+		return func() {}, nil
+	}
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if mu.TryLock() {
+			return mu.Unlock, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (ab *AgentBridge) optionsForProfile(profile string) map[string]any {
 	if strings.EqualFold(profile, "proactive") {
 		return ab.proactiveLLMOptions
@@ -834,6 +1052,14 @@ func cloneOptions(src map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func trimForLog(content string, limit int) string {
+	content = strings.TrimSpace(content)
+	if limit <= 0 || len(content) <= limit {
+		return content
+	}
+	return content[:limit] + "...(truncated)"
 }
 
 func buildProactiveLLMOptions(base map[string]any) map[string]any {
