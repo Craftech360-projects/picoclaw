@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type Worker struct {
 	healthServer *http.Server
 	connected    bool // true after successful WebSocket connection
 	ready        bool // true after worker registration
+	draining     bool // true when SIGTERM/SIGINT drain mode begins
 }
 
 // WorkerConfig holds configuration for creating a Worker.
@@ -199,6 +201,9 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 	w.mu.RUnlock()
 
 	available := currentJobs < w.maxSessions
+	if w.draining {
+		available = false
+	}
 
 	logger.DebugCF("livekit", "Availability request", map[string]any{
 		"job_id":       req.Job.Id,
@@ -206,6 +211,7 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 		"current_jobs": currentJobs,
 		"max_sessions": w.maxSessions,
 		"available":    available,
+		"draining":     w.draining,
 	})
 
 	resp := &livekit.WorkerMessage{
@@ -390,6 +396,37 @@ func (w *Worker) Shutdown() {
 	}
 }
 
+// BeginDraining stops the worker from accepting new jobs while allowing active jobs to finish.
+func (w *Worker) BeginDraining() {
+	w.mu.Lock()
+	w.draining = true
+	activeJobs := len(w.jobs)
+	w.mu.Unlock()
+	logger.InfoCF("livekit", "Worker entering drain mode", map[string]any{
+		"active_jobs": activeJobs,
+	})
+}
+
+// WaitForDrain waits for active jobs to complete until timeout expires.
+func (w *Worker) WaitForDrain(timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		w.mu.RLock()
+		activeJobs := len(w.jobs)
+		w.mu.RUnlock()
+		if activeJobs == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("drain timeout with %d active jobs", activeJobs)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func (w *Worker) workerToken() (string, error) {
 	if w.apiKey == "" || w.apiSecret == "" {
 		return "", errors.New("livekit api key/secret missing")
@@ -442,8 +479,8 @@ func (w *Worker) startHealthServer() {
 			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(rw).Encode(map[string]any{
-				"status": "not ready",
-				"connected": connected,
+				"status":     "not ready",
+				"connected":  connected,
 				"registered": ready,
 			})
 			return
@@ -451,9 +488,15 @@ func (w *Worker) startHealthServer() {
 
 		// Worker is ready if it has capacity for more sessions
 		available := activeJobs < maxSessions
+		if w.draining {
+			available = false
+		}
 		statusCode := http.StatusOK
 		status := "ready"
-		if !available {
+		if w.draining {
+			statusCode = http.StatusServiceUnavailable
+			status = "draining"
+		} else if !available {
 			statusCode = http.StatusTooManyRequests
 			status = "at capacity"
 		}
@@ -465,7 +508,13 @@ func (w *Worker) startHealthServer() {
 			"activeJobs":  activeJobs,
 			"maxSessions": maxSessions,
 			"available":   available,
+			"draining":    w.draining,
 		})
+	})
+
+	mux.HandleFunc("/metrics", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = rw.Write([]byte(w.prometheusMetrics()))
 	})
 
 	w.healthServer = &http.Server{
@@ -475,9 +524,9 @@ func (w *Worker) startHealthServer() {
 
 	go func() {
 		logger.InfoCF("livekit", "Health check server started", map[string]any{
-			"port": w.healthPort,
+			"port":   w.healthPort,
 			"health": fmt.Sprintf("http://0.0.0.0:%d/health", w.healthPort),
-			"ready": fmt.Sprintf("http://0.0.0.0:%d/ready", w.healthPort),
+			"ready":  fmt.Sprintf("http://0.0.0.0:%d/ready", w.healthPort),
 		})
 		if err := w.healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.ErrorCF("livekit", "Health check server error", map[string]any{
@@ -485,6 +534,86 @@ func (w *Worker) startHealthServer() {
 			})
 		}
 	}()
+}
+
+func (w *Worker) prometheusMetrics() string {
+	w.mu.RLock()
+	activeJobs := len(w.jobs)
+	maxSessions := w.maxSessions
+	draining := w.draining
+	ready := w.ready
+	connected := w.connected
+	agentName := w.agentName
+	w.mu.RUnlock()
+
+	loadPercent := 0.0
+	if maxSessions > 0 {
+		loadPercent = (float64(activeJobs) / float64(maxSessions)) * 100.0
+	}
+	drainingValue := 0
+	if draining {
+		drainingValue = 1
+	}
+	readyValue := 0
+	if ready {
+		readyValue = 1
+	}
+	connectedValue := 0
+	if connected {
+		connectedValue = 1
+	}
+
+	escapedAgent := strings.ReplaceAll(strings.ReplaceAll(agentName, "\\", "\\\\"), "\"", "\\\"")
+	var sb strings.Builder
+	sb.WriteString("# HELP picoclaw_livekit_active_sessions Active LiveKit sessions handled by this worker.\n")
+	sb.WriteString("# TYPE picoclaw_livekit_active_sessions gauge\n")
+	sb.WriteString("picoclaw_livekit_active_sessions{agent_name=\"")
+	sb.WriteString(escapedAgent)
+	sb.WriteString("\"} ")
+	sb.WriteString(strconv.Itoa(activeJobs))
+	sb.WriteString("\n")
+
+	sb.WriteString("# HELP picoclaw_livekit_max_sessions Configured max concurrent LiveKit sessions for this worker.\n")
+	sb.WriteString("# TYPE picoclaw_livekit_max_sessions gauge\n")
+	sb.WriteString("picoclaw_livekit_max_sessions{agent_name=\"")
+	sb.WriteString(escapedAgent)
+	sb.WriteString("\"} ")
+	sb.WriteString(strconv.Itoa(maxSessions))
+	sb.WriteString("\n")
+
+	sb.WriteString("# HELP picoclaw_livekit_session_load_percent Session load as percentage of max sessions.\n")
+	sb.WriteString("# TYPE picoclaw_livekit_session_load_percent gauge\n")
+	sb.WriteString("picoclaw_livekit_session_load_percent{agent_name=\"")
+	sb.WriteString(escapedAgent)
+	sb.WriteString("\"} ")
+	sb.WriteString(strconv.FormatFloat(loadPercent, 'f', 6, 64))
+	sb.WriteString("\n")
+
+	sb.WriteString("# HELP picoclaw_livekit_draining Whether this worker is draining (1) or not (0).\n")
+	sb.WriteString("# TYPE picoclaw_livekit_draining gauge\n")
+	sb.WriteString("picoclaw_livekit_draining{agent_name=\"")
+	sb.WriteString(escapedAgent)
+	sb.WriteString("\"} ")
+	sb.WriteString(strconv.Itoa(drainingValue))
+	sb.WriteString("\n")
+
+	sb.WriteString("# HELP picoclaw_livekit_ready Whether this worker is registered and ready (1) or not (0).\n")
+	sb.WriteString("# TYPE picoclaw_livekit_ready gauge\n")
+	sb.WriteString("picoclaw_livekit_ready{agent_name=\"")
+	sb.WriteString(escapedAgent)
+	sb.WriteString("\"} ")
+	sb.WriteString(strconv.Itoa(readyValue))
+	sb.WriteString("\n")
+
+	sb.WriteString("# HELP picoclaw_livekit_connected Whether this worker websocket is connected (1) or not (0).\n")
+	sb.WriteString("# TYPE picoclaw_livekit_connected gauge\n")
+	sb.WriteString("picoclaw_livekit_connected{agent_name=\"")
+	sb.WriteString(escapedAgent)
+	sb.WriteString("\"} ")
+	sb.WriteString(strconv.Itoa(connectedValue))
+	sb.WriteString("\n")
+
+	return sb.String()
 }
 
 func agentWebsocketURL(serverURL string) (string, error) {

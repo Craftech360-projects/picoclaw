@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: picoclaw-livekit
+  namespace: picoclaw-dev
+  labels:
+    app: picoclaw-livekit
+spec:
+  selector:
+    app: picoclaw-livekit
+  ports:
+    - name: health
+      port: 8192
+      targetPort: health
+      protocol: TCP
+

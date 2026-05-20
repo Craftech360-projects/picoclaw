@@ -54,10 +54,21 @@ func main() {
 	if cfgPath == "" {
 		cfgPath = defaultConfigPath()
 	}
+	strictStartup := liveKitStrictConfigEnabled()
+	if strictStartup {
+		if err := validateLiveKitStartupConfigFiles(cfgPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error validating startup config files: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+	if err := validateLiveKitStartupCredentials(cfg, strictStartup); err != nil {
+		fmt.Fprintf(os.Stderr, "Error validating startup config credentials: %v\n", err)
 		os.Exit(1)
 	}
 	logger.SetLevelFromString(*logLevel)
@@ -286,10 +297,16 @@ func main() {
 		if lockTimeout > time.Minute {
 			lockStaleAfter = lockTimeout * 2
 		}
+		lockTTLSeconds := liveKitWorkspaceLockLeaseTTL(lkCfg.ManagerAPI)
 		var wsLock *workspaceLock
+		var managerLockLease *managerWorkspaceLockLease
 		var wsLockReleaseOnce sync.Once
 		releaseWorkspaceLock := func(reason string) {
 			wsLockReleaseOnce.Do(func() {
+				if managerLockLease != nil {
+					managerLockLease.Release(reason)
+					managerLockLease = nil
+				}
 				if wsLock == nil {
 					return
 				}
@@ -317,6 +334,42 @@ func main() {
 				jobID = strings.TrimSpace(job.Id)
 			}
 			lockOwner := fmt.Sprintf("room=%s job=%s pid=%d", roomName, jobID, os.Getpid())
+			if managerAPIBaseURL(lkCfg.ManagerAPI) != "" {
+				lockCtx, lockCancel := context.WithTimeout(context.Background(), lockTimeout)
+				lease, err := acquireManagerWorkspaceLockWithRetry(
+					lockCtx,
+					lkCfg.ManagerAPI,
+					deviceMAC,
+					lockOwner,
+					lockTimeout,
+					lockTTLSeconds,
+				)
+				lockCancel()
+				if err != nil {
+					logger.WarnCF("livekit", "Failed to acquire manager distributed workspace lock", map[string]any{
+						"room":             roomName,
+						"device_mac":       deviceMAC,
+						"workspace":        workspace,
+						"lock_owner":       lockOwner,
+						"lock_timeout_ms":  lockTimeout.Milliseconds(),
+						"lock_ttl_seconds": lockTTLSeconds,
+						"error":            err.Error(),
+					})
+					return nil
+				}
+				managerLockLease = lease
+				if lease != nil {
+					logger.InfoCF("livekit", "Acquired manager distributed workspace lock", map[string]any{
+						"room":             roomName,
+						"device_mac":       deviceMAC,
+						"workspace":        workspace,
+						"lock_owner":       lockOwner,
+						"lock_timeout_ms":  lockTimeout.Milliseconds(),
+						"lock_ttl_seconds": lockTTLSeconds,
+						"fencing_token":    lease.fencingToken,
+					})
+				}
+			}
 			lock, err := acquireWorkspaceLock(workspace, lockOwner, lockTimeout, lockStaleAfter)
 			if err != nil && strings.Contains(err.Error(), "workspace lock busy") {
 				// Reconnect races are expected when the previous room is still flushing
@@ -713,6 +766,14 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
+		worker.BeginDraining()
+		drainTimeout := liveKitDrainTimeout()
+		if err := worker.WaitForDrain(drainTimeout); err != nil {
+			logger.WarnCF("livekit", "Worker drain timeout reached; forcing shutdown", map[string]any{
+				"drain_timeout_ms": drainTimeout.Milliseconds(),
+				"error":            err.Error(),
+			})
+		}
 		worker.Shutdown()
 		cancel()
 	}()
@@ -734,6 +795,60 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
+}
+
+func liveKitStrictConfigEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_STRICT_CONFIG"))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
+}
+
+func validateLiveKitStartupConfigFiles(cfgPath string) error {
+	cfgPath = strings.TrimSpace(cfgPath)
+	if cfgPath == "" {
+		return fmt.Errorf("config path is empty")
+	}
+	cfgInfo, err := os.Stat(cfgPath)
+	if err != nil {
+		return fmt.Errorf("config file is not readable at %s: %w", cfgPath, err)
+	}
+	if cfgInfo.IsDir() {
+		return fmt.Errorf("config path is a directory, expected file: %s", cfgPath)
+	}
+	secPath := filepath.Join(filepath.Dir(cfgPath), config.SecurityConfigFile)
+	secInfo, err := os.Stat(secPath)
+	if err != nil {
+		return fmt.Errorf("security file is not readable at %s: %w", secPath, err)
+	}
+	if secInfo.IsDir() {
+		return fmt.Errorf("security path is a directory, expected file: %s", secPath)
+	}
+	return nil
+}
+
+func validateLiveKitStartupCredentials(cfg *config.Config, strict bool) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	lkCfg := cfg.LiveKitService
+	if strings.TrimSpace(lkCfg.ServerURL) == "" {
+		return fmt.Errorf("livekit_service.server_url is required")
+	}
+	if strict {
+		if strings.TrimSpace(lkCfg.APIKey()) == "" {
+			return fmt.Errorf("livekit_service.api_key is required in strict mode")
+		}
+		if strings.TrimSpace(lkCfg.APISecret()) == "" {
+			return fmt.Errorf("livekit_service.api_secret is required in strict mode")
+		}
+		if managerAPIBaseURL(lkCfg.ManagerAPI) != "" && strings.TrimSpace(managerAPIServiceKey()) == "" {
+			return fmt.Errorf("manager API service key is required in strict mode when manager_api.base_url is configured")
+		}
+	}
+	return nil
 }
 
 func startLiveKitAsyncMCPInitialization(
@@ -1107,6 +1222,25 @@ func liveKitWorkspaceFastPathTimeout(cfg config.LiveKitServiceManagerAPIConfig) 
 		timeoutMS = 10_000
 	}
 	return time.Duration(timeoutMS) * time.Millisecond
+}
+
+func liveKitDrainTimeout() time.Duration {
+	const defaultSeconds = 900
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_DRAIN_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return defaultSeconds * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return defaultSeconds * time.Second
+	}
+	if seconds < 30 {
+		seconds = 30
+	}
+	if seconds > 3600 {
+		seconds = 3600
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func liveKitWorkspaceBackgroundRestoreEnabled(cfg config.LiveKitServiceManagerAPIConfig) bool {

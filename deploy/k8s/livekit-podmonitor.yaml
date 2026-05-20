@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: picoclaw-livekit
+  labels:
+    app: picoclaw-livekit
+spec:
+  selector:
+    matchLabels:
+      app: picoclaw-livekit
+  podMetricsEndpoints:
+    - port: health
+      path: /metrics
+      interval: 15s
+
