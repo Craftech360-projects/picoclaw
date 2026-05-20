@@ -1,0 +1,20 @@
+prometheus:
+  # Update if your Prometheus service name differs.
+  url: http://prometheus-server.monitoring.svc
+  port: 80
+  path: ""
+
+rules:
+  default: false
+  custom:
+    - seriesQuery: 'picoclaw_livekit_session_load_percent{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace:
+            resource: namespace
+          pod:
+            resource: pod
+      name:
+        matches: ^picoclaw_livekit_session_load_percent$
+        as: picoclaw_livekit_session_load_percent
+      metricsQuery: 'avg_over_time(picoclaw_livekit_session_load_percent{<<.LabelMatchers>>}[2m])'

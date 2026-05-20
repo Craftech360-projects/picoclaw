@@ -1,0 +1,41 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: picoclaw-livekit
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: picoclaw-livekit
+  minReplicas: 1
+  maxReplicas: 3
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+  metrics:
+    # Primary metric: session load (%) per pod.
+    # 50% is intentionally below worker saturation thresholds (70-75%).
+    - type: Pods
+      pods:
+        metric:
+          name: picoclaw_livekit_session_load_percent
+        target:
+          type: AverageValue
+          averageValue: "50"
+    # Secondary safety metric.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

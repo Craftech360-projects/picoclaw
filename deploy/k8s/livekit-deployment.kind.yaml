@@ -2,13 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: picoclaw-livekit
+  namespace: picoclaw-dev
 spec:
   replicas: 1
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       app: picoclaw-livekit
@@ -21,48 +19,35 @@ spec:
         prometheus.io/port: "8192"
         prometheus.io/path: "/metrics"
     spec:
-      terminationGracePeriodSeconds: 900
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 120
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit:20260520-134857
+          image: picoclaw-livekit:local
+          imagePullPolicy: IfNotPresent
           args: ["--agent-name", "cheeko-picoclaw", "--config", "/etc/picoclaw/config.json"]
           ports:
             - name: health
               containerPort: 8192
               protocol: TCP
           env:
-            - name: PICOCLAW_CONFIG
-              value: /etc/picoclaw/config.json
             - name: PICOCLAW_LIVEKIT_STRICT_CONFIG
               value: "true"
             - name: PICOCLAW_LIVEKIT_DRAIN_TIMEOUT_SECONDS
-              value: "900"
-            - name: PICOCLAW_LIVEKIT_HEALTH_PORT
-              value: "8192"
-            - name: PICOCLAW_LIVEKIT_MAX_SESSIONS
-              value: "12"
+              value: "120"
             - name: PICOCLAW_AGENTS_DEFAULTS_WORKSPACE
               value: /opt/picoclaw/workspace-template
-            - name: PICOCLAW_LIVEKIT_MANAGER_API_URL
+            - name: MANAGER_API_URL
               valueFrom:
                 secretKeyRef:
                   name: picoclaw-secrets
                   key: manager_api_url
-            - name: PICOCLAW_LIVEKIT_MANAGER_API_SERVICE_KEY
+            - name: MANAGER_API_SECRET
               valueFrom:
                 secretKeyRef:
                   name: picoclaw-secrets
-                  key: manager_api_service_key
-            - name: STT_DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: picoclaw-secrets
-                  key: stt_database_url
-            - name: DIRECT_URL
-              valueFrom:
-                secretKeyRef:
-                  name: picoclaw-secrets
-                  key: direct_url
+                  key: manager_api_secret
           startupProbe:
             httpGet:
               path: /health
@@ -85,19 +70,13 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 10"]
           resources:
             requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
               cpu: "1000m"
               memory: "2Gi"
-              ephemeral-storage: "5Gi"
-            limits:
-              cpu: "2000m"
-              memory: "4Gi"
-              ephemeral-storage: "10Gi"
           volumeMounts:
             - name: cfg
               mountPath: /etc/picoclaw/config.json
