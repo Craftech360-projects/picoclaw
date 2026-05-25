@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -78,14 +77,57 @@ func TestEnsureLiveKitWorkspaceFileToolsReplacesDefaultWorkspaceTools(t *testing
 		"content":   "petals",
 		"overwrite": true,
 	})
-	if result.IsError {
-		t.Fatalf("write_file should allow absolute path inside device workspace, got: %s", result.ForLLM)
+	if !result.IsError {
+		t.Fatalf("write_file should block non-memory paths in voice runtime")
+	}
+}
+
+func TestEnsureLiveKitWorkspaceFileToolsAllowsOnlyMemoryAndUserFiles(t *testing.T) {
+	cfg := config.DefaultConfig()
+	defaults := cfg.Agents.Defaults
+
+	deviceWorkspace := t.TempDir()
+	instance := &agent.AgentInstance{
+		Workspace: deviceWorkspace,
+		Tools:     tools.NewToolRegistry(),
+	}
+	ensureLiveKitWorkspaceFileTools(instance, &defaults, cfg)
+
+	writeTool, ok := instance.Tools.Get("write_file")
+	if !ok {
+		t.Fatal("write_file should be registered")
 	}
 
-	if _, err := os.Stat(filepath.Join(deviceWorkspace, "flower_song.txt")); err != nil {
-		t.Fatalf("expected file in device workspace: %v", err)
+	allowedCases := []string{
+		"USER.md",
+		"memory/MEMORY.md",
+		filepath.Join(deviceWorkspace, "USER.md"),
+		filepath.Join(deviceWorkspace, "memory", "MEMORY.md"),
 	}
-	if _, err := os.Stat(filepath.Join(defaultWorkspace, "flower_song.txt")); !os.IsNotExist(err) {
-		t.Fatalf("expected no file in default workspace, got err=%v", err)
+	for _, path := range allowedCases {
+		result := writeTool.Execute(context.Background(), map[string]any{
+			"path":      path,
+			"content":   "allowed",
+			"overwrite": true,
+		})
+		if result.IsError {
+			t.Fatalf("write_file should allow path %q, got error: %s", path, result.ForLLM)
+		}
+	}
+
+	blockedCases := []string{
+		"AGENT.md",
+		"skills/weather/SKILL.md",
+		filepath.Join(deviceWorkspace, "notes.txt"),
+	}
+	for _, path := range blockedCases {
+		result := writeTool.Execute(context.Background(), map[string]any{
+			"path":      path,
+			"content":   "blocked",
+			"overwrite": true,
+		})
+		if !result.IsError {
+			t.Fatalf("write_file should block path %q", path)
+		}
 	}
 }

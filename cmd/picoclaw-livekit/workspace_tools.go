@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -58,6 +60,7 @@ func ensureLiveKitWorkspaceFileTools(
 		},
 	)
 	registerLiveKitRuntimeTools(agentInstance, cfg)
+	enforceLiveKitWritePathGuard(agentInstance)
 
 	added := make([]string, 0, len(missingBefore))
 	for name := range missingBefore {
@@ -67,6 +70,113 @@ func ensureLiveKitWorkspaceFileTools(
 	}
 	sort.Strings(added)
 	return added
+}
+
+type liveKitWriteGuardTool struct {
+	delegate  tools.Tool
+	workspace string
+}
+
+var liveKitWriteAllowedRelativePaths = map[string]struct{}{
+	"user.md":          {},
+	"memory/memory.md": {},
+}
+
+func newLiveKitWriteGuardTool(delegate tools.Tool, workspace string) tools.Tool {
+	if delegate == nil {
+		return nil
+	}
+	return &liveKitWriteGuardTool{
+		delegate:  delegate,
+		workspace: strings.TrimSpace(workspace),
+	}
+}
+
+func (t *liveKitWriteGuardTool) Name() string {
+	return t.delegate.Name()
+}
+
+func (t *liveKitWriteGuardTool) Description() string {
+	return t.delegate.Description()
+}
+
+func (t *liveKitWriteGuardTool) Parameters() map[string]any {
+	return t.delegate.Parameters()
+}
+
+func (t *liveKitWriteGuardTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
+	rawPath, _ := args["path"].(string)
+	if !isLiveKitAllowedWritePath(rawPath, t.workspace) {
+		return tools.ErrorResult("write_file blocked in voice runtime: only USER.md and memory/MEMORY.md are writable")
+	}
+	return t.delegate.Execute(ctx, args)
+}
+
+func enforceLiveKitWritePathGuard(agentInstance *agent.AgentInstance) {
+	if agentInstance == nil || agentInstance.Tools == nil {
+		return
+	}
+	writeTool, ok := agentInstance.Tools.Get("write_file")
+	if !ok || writeTool == nil {
+		return
+	}
+	if _, alreadyWrapped := writeTool.(*liveKitWriteGuardTool); alreadyWrapped {
+		return
+	}
+	guarded := newLiveKitWriteGuardTool(writeTool, agentInstance.Workspace)
+	if guarded != nil {
+		agentInstance.Tools.Register(guarded)
+	}
+}
+
+func isLiveKitAllowedWritePath(rawPath, workspace string) bool {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return false
+	}
+
+	normalizedRel := normalizeLiveKitRelativePath(path)
+	if normalizedRel != "" {
+		if _, ok := liveKitWriteAllowedRelativePaths[normalizedRel]; ok {
+			return true
+		}
+	}
+
+	if workspace == "" || !filepath.IsAbs(path) {
+		return false
+	}
+
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absWorkspace, absPath)
+	if err != nil {
+		return false
+	}
+	rel = normalizeLiveKitRelativePath(rel)
+	if rel == "" || strings.HasPrefix(rel, "../") || rel == ".." {
+		return false
+	}
+	_, ok := liveKitWriteAllowedRelativePaths[rel]
+	return ok
+}
+
+func normalizeLiveKitRelativePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(path)
+	normalized := filepath.ToSlash(cleaned)
+	normalized = strings.TrimPrefix(normalized, "./")
+	normalized = strings.TrimPrefix(normalized, "/")
+	normalized = strings.ToLower(normalized)
+	return normalized
 }
 
 func registerLiveKitRuntimeTools(agentInstance *agent.AgentInstance, cfg *config.Config) {

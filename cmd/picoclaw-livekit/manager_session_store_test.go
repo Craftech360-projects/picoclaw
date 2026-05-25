@@ -69,3 +69,15 @@ func TestBuildManagerSessionStoreRequiresDeviceMACAndSessionID(t *testing.T) {
 		t.Fatal("buildManagerSessionStore returned store without session ID")
 	}
 }
+
+func TestManagerAPIBaseURLPrefersEnvOverConfig(t *testing.T) {
+	t.Setenv("PICOCLAW_LIVEKIT_MANAGER_API_URL", "http://env-primary.test/toy")
+	t.Setenv("MANAGER_API_URL", "http://env-secondary.test/toy")
+
+	got := managerAPIBaseURL(config.LiveKitServiceManagerAPIConfig{
+		BaseURL: "http://config.test/toy",
+	})
+	if got != "http://env-primary.test/toy" {
+		t.Fatalf("managerAPIBaseURL() = %q, want env primary", got)
+	}
+}
