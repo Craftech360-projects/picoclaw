@@ -128,6 +128,7 @@ type AgentBridge struct {
 	runtimeEventChan    chan RuntimeEvent
 	workspaceArtifacts  WorkspaceArtifactStore
 	mcpManager          MCPManager
+	allowedToolNames    map[string]struct{}
 
 	// summarization config
 	summarizeMessageThreshold int
@@ -179,6 +180,7 @@ type AgentBridgeConfig struct {
 	SessionLanguageName string
 	SessionLanguageCode string
 	LanguageLockEnabled bool
+	AllowedToolNames    []string
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -223,6 +225,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		summarizeMessageThreshold: summarizeThreshold,
 		contextWindow:             ctxWindow,
 		languageLockEnabled:       cfg.LanguageLockEnabled,
+		allowedToolNames:          normalizeAllowedToolNames(cfg.AllowedToolNames),
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
 	ab.sessionLanguageName = policy.DisplayName
@@ -747,9 +750,9 @@ CRITICAL RULES FOR VOICE:
 3. NEVER use markdown formatting (**, *, #, backticks, bullet points). Speak in plain natural language.
 4. When using tools like write_file or spawn, do NOT narrate or preview the content. Just do it and briefly confirm.
 5. Avoid reading file paths character by character. Say "I saved it to your workspace" instead.
-6. If an active skill shows shell commands or curl examples, call the exec tool directly with action=run. Do not write shell scripts unless the user explicitly asks you to create a script file.
-7. On Windows, use curl.exe instead of curl so PowerShell does not invoke its curl alias.
-8. For current or time-sensitive facts such as latest, today, yesterday, 2026 data, scores, schedules, rosters, rankings, weather, news, prices, or team data: do not answer from memory. Use web_search, web_fetch on a real source page, or exec against a reliable live endpoint.
+6. For weather requests, use get_weather first.
+7. For date/time requests, use get_time_date first.
+8. For current or time-sensitive facts such as latest, today, yesterday, 2026 data, scores, schedules, rosters, rankings, weather, news, prices, or team data: do not answer from memory. Use tools and verify.
 9. Do not use web_fetch on search result pages like Google search as evidence. Use web_search first, then fetch a real source page from the results.
 10. If tools fail, return blocked, or provide too little evidence, say you could not verify it instead of guessing.`,
 	}
@@ -848,6 +851,7 @@ func (ab *AgentBridge) toolDefs() []providers.ToolDefinition {
 		return nil
 	}
 	defs := ab.tools.ToProviderDefs()
+	defs = ab.filterToolDefsByAllowlist(defs)
 	if len(defs) <= maxToolDefsForLLM {
 		return defs
 	}
@@ -856,7 +860,7 @@ func (ab *AgentBridge) toolDefs() []providers.ToolDefinition {
 		"configured": len(defs),
 		"limit":      maxToolDefsForLLM,
 		"priority_kept": []string{
-			"web_search", "web_fetch", "exec", "read_file", "write_file", "list_dir", "timer", "cron",
+			"get_weather", "get_time_date", "web_search", "web_fetch", "read_file", "write_file", "list_dir",
 		},
 	})
 	return prioritized[:maxToolDefsForLLM]
@@ -867,14 +871,13 @@ func prioritizeVoiceToolDefs(defs []providers.ToolDefinition) []providers.ToolDe
 		return defs
 	}
 	priority := []string{
+		"get_weather",
+		"get_time_date",
 		"web_search",
 		"web_fetch",
-		"exec",
 		"read_file",
 		"write_file",
 		"list_dir",
-		"timer",
-		"cron",
 	}
 	added := make(map[int]struct{}, len(defs))
 	out := make([]providers.ToolDefinition, 0, len(defs))
@@ -1077,6 +1080,9 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 	if ab.tools == nil {
 		return tools.ErrorResult("No tools available")
 	}
+	if !ab.isToolAllowed(tc.Name) {
+		return tools.ErrorResult(fmt.Sprintf("tool %q is not allowed in LiveKit voice runtime", tc.Name))
+	}
 
 	// Create an async callback that routes completed background tasks to the
 	// asyncEventChan, so the audio pipeline can announce results spontaneously.
@@ -1105,6 +1111,45 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 	result := ab.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, "livekit", sessionKey, asyncCb)
 	ab.maybeMirrorWorkspaceArtifact(ctx, sessionKey, tc, result)
 	return result
+}
+
+func normalizeAllowedToolNames(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		allowed[key] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	return allowed
+}
+
+func (ab *AgentBridge) isToolAllowed(name string) bool {
+	if ab == nil || len(ab.allowedToolNames) == 0 {
+		return true
+	}
+	_, ok := ab.allowedToolNames[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+func (ab *AgentBridge) filterToolDefsByAllowlist(defs []providers.ToolDefinition) []providers.ToolDefinition {
+	if ab == nil || len(ab.allowedToolNames) == 0 || len(defs) == 0 {
+		return defs
+	}
+	filtered := make([]providers.ToolDefinition, 0, len(defs))
+	for _, def := range defs {
+		if _, ok := ab.allowedToolNames[strings.ToLower(strings.TrimSpace(def.Function.Name))]; ok {
+			filtered = append(filtered, def)
+		}
+	}
+	return filtered
 }
 
 func (ab *AgentBridge) maybeMirrorWorkspaceArtifact(ctx context.Context, sessionKey string, tc providers.ToolCall, result *tools.ToolResult) {

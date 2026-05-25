@@ -48,8 +48,8 @@ Always check live weather before answering weather questions.
 	if !strings.Contains(joined.String(), "Always check live weather before answering weather questions.") {
 		t.Fatalf("messages missing weather skill content:\n%s", joined.String())
 	}
-	if !strings.Contains(joined.String(), "curl.exe") {
-		t.Fatalf("messages should tell Windows LiveKit agents to use curl.exe:\n%s", joined.String())
+	if !strings.Contains(joined.String(), "use get_weather first") {
+		t.Fatalf("messages should prefer native weather tool:\n%s", joined.String())
 	}
 }
 

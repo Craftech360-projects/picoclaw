@@ -516,6 +516,7 @@ func DefaultConfig() *Config {
 		},
 		LiveKitService: LiveKitServiceConfig{
 			ServerURL: "",
+			Skills:    []string{"weather", "time"},
 			TTS: LiveKitServiceTTSConfig{
 				Provider:     "elevenlabs",
 				VoiceID:      "",

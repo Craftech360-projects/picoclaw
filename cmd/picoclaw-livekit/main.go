@@ -248,8 +248,56 @@ func main() {
 		"has_elevenlabs_key": strings.TrimSpace(cfg.Voice.ElevenLabsAPIKey) != "",
 		"tts_enabled":        ttsProvider != nil,
 	})
+	type roomRuntimeSelection struct {
+		ttsProvider   tts.Provider
+		ttsSampleRate int
+	}
+	var roomRuntimeByJobID sync.Map
 
 	bridgeFactory := func(job *livekitproto.Job) *livekit.AgentBridge {
+		sessionCfg := cfg
+		sessionProvider := provider
+		sessionModelID := modelID
+		sessionSelectionSource := "config_json"
+		if resolvedCfg, source, err := resolveLiveKitProviderConfigForSession(cfg, lkCfg.ManagerAPI); resolvedCfg != nil {
+			sessionCfg = resolvedCfg
+			sessionSelectionSource = source
+			resolvedProvider, resolvedModelID, providerErr := providers.CreateProvider(sessionCfg)
+			if providerErr != nil {
+				logger.WarnCF("livekit", "Manager provider selection failed; using startup LLM provider fallback", map[string]any{
+					"source": source,
+					"error":  providerErr.Error(),
+				})
+				if err != nil {
+					logger.WarnCF("livekit", "Manager provider fetch warning", map[string]any{
+						"source": source,
+						"error":  err.Error(),
+					})
+				}
+			} else {
+				sessionProvider = resolvedProvider
+				sessionModelID = resolvedModelID
+			}
+		}
+		sessionTTSProvider, sessionTTSSampleRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)
+		if sessionTTSProvider == nil {
+			sessionTTSProvider = ttsProvider
+			sessionTTSSampleRate = ttsSampleRate
+		}
+		if job != nil && strings.TrimSpace(job.Id) != "" {
+			roomRuntimeByJobID.Store(job.Id, roomRuntimeSelection{
+				ttsProvider:   sessionTTSProvider,
+				ttsSampleRate: sessionTTSSampleRate,
+			})
+		}
+		logger.InfoCF("livekit", "Resolved per-session provider selection", map[string]any{
+			"source":       sessionSelectionSource,
+			"llm_model":    sessionModelID,
+			"tts_provider": sessionCfg.LiveKitService.TTS.Provider,
+			"tts_voice_id": sessionCfg.LiveKitService.TTS.VoiceID,
+			"stt_provider": sessionCfg.LiveKitService.STT.Provider,
+		})
+
 		roomName, roomMetadata, metadataSource := resolveLiveKitJobBootstrapContext(job)
 		if strings.TrimSpace(roomMetadata) == "" {
 			logger.WarnCF("livekit", "No metadata available for LiveKit job bootstrap", map[string]any{
@@ -546,7 +594,7 @@ func main() {
 		}
 		stopWorkspaceSyncLoop := func() {}
 
-		agentInstance := agent.NewAgentInstance(agentCfg, &cfg.Agents.Defaults, cfg, provider)
+		agentInstance := agent.NewAgentInstance(agentCfg, &sessionCfg.Agents.Defaults, sessionCfg, sessionProvider)
 		artifactStore := buildManagerArtifactStore(lkCfg, deviceMAC)
 		if artifactStore != nil {
 			hydrated, err := hydrateWorkspaceArtifacts(context.Background(), artifactStore, agentInstance.Workspace, lkCfg.ManagerAPI.RecentLimit)
@@ -565,22 +613,24 @@ func main() {
 			}
 		}
 		// Register shared tools on the ephemeral agent instance
-		singleAgentRegistry := agent.NewAgentRegistry(cfg, provider)
+		singleAgentRegistry := agent.NewAgentRegistry(sessionCfg, sessionProvider)
 		agent.RegisterSharedTools(agent.SharedToolDependencies{
-			Config:   cfg,
+			Config:   sessionCfg,
 			Registry: singleAgentRegistry,
-			Provider: provider,
+			Provider: sessionProvider,
 		})
 
 		if defaultAgent := singleAgentRegistry.GetDefaultAgent(); defaultAgent != nil {
 			for _, toolName := range defaultAgent.Tools.List() {
+				if !isLiveKitVoiceAllowedTool(toolName) {
+					continue
+				}
 				if t, ok := defaultAgent.Tools.Get(toolName); ok {
 					agentInstance.Tools.Register(t)
 				}
 			}
 		}
-		agentInstance.Tools.Register(tools.NewTimerTool())
-		if added := ensureLiveKitWorkspaceFileTools(agentInstance, &cfg.Agents.Defaults, cfg); len(added) > 0 {
+		if added := ensureLiveKitWorkspaceFileTools(agentInstance, &sessionCfg.Agents.Defaults, sessionCfg); len(added) > 0 {
 			logger.WarnCF("livekit", "Forced required workspace file tools for LiveKit agent", map[string]any{
 				"room":               roomName,
 				"workspace_identity": workspaceIdentity,
@@ -589,7 +639,7 @@ func main() {
 		}
 		var cronService *cron.CronService
 		var cronTool *tools.CronTool
-		if cfg.Tools.IsToolEnabled("cron") {
+		if sessionCfg.Tools.IsToolEnabled("cron") {
 			cronStorePath := filepath.Join(agentInstance.Workspace, "cron", "jobs.json")
 			cronService = cron.NewCronService(cronStorePath, nil)
 			if err := cronService.Start(); err != nil {
@@ -604,9 +654,9 @@ func main() {
 					nil,
 					nil,
 					agentInstance.Workspace,
-					cfg.Agents.Defaults.RestrictToWorkspace,
-					time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes)*time.Minute,
-					cfg,
+					sessionCfg.Agents.Defaults.RestrictToWorkspace,
+					time.Duration(sessionCfg.Tools.Cron.ExecTimeoutMinutes)*time.Minute,
+					sessionCfg,
 				)
 				if err != nil {
 					logger.WarnCF("livekit", "Failed to register cron tool for LiveKit agent", map[string]any{
@@ -619,15 +669,16 @@ func main() {
 			}
 		}
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:              cfg,
-			Provider:            provider,
-			ModelID:             modelID,
+			Config:              sessionCfg,
+			Provider:            sessionProvider,
+			ModelID:             sessionModelID,
 			AgentInstance:       agentInstance,
 			PreserveWorkspace:   preserveWorkspace,
-			MaxIterations:       cfg.Agents.Defaults.MaxToolIterations,
+			MaxIterations:       sessionCfg.Agents.Defaults.MaxToolIterations,
 			SessionLanguageName: sessionLanguagePolicy.DisplayName,
 			SessionLanguageCode: sessionLanguagePolicy.RawCode,
 			LanguageLockEnabled: lkCfg.Runtime.LanguageLockEnabled,
+			AllowedToolNames:    liveKitVoiceToolAllowlist(),
 			WorkspaceArtifacts:  artifactStore,
 			MCPManager:          nil,
 			OnClose: func() {
@@ -657,7 +708,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
 			return nil
 		}
-		startLiveKitAsyncMCPInitialization(cfg, agentInstance, bridge, roomName, workspaceIdentity)
+		startLiveKitAsyncMCPInitialization(sessionCfg, agentInstance, bridge, roomName, workspaceIdentity)
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
 			stopWorkspaceSyncLoop = startWorkspaceSyncLoop(lkCfg.ManagerAPI, deviceMAC, workspace, roomName)
 		}
@@ -726,6 +777,20 @@ func main() {
 				token = assignment.Token
 			}
 			sessionLanguagePolicy := bridge.SessionLanguagePolicy()
+			sessionTTSProvider := ttsProvider
+			sessionTTSSampleRate := ttsSampleRate
+			if job != nil {
+				if selected, ok := roomRuntimeByJobID.LoadAndDelete(job.Id); ok {
+					if runtimeSelection, castOK := selected.(roomRuntimeSelection); castOK {
+						if runtimeSelection.ttsProvider != nil {
+							sessionTTSProvider = runtimeSelection.ttsProvider
+						}
+						if runtimeSelection.ttsSampleRate > 0 {
+							sessionTTSSampleRate = runtimeSelection.ttsSampleRate
+						}
+					}
+				}
+			}
 
 			// Get active STT provider for this session
 			sttProvider := buildSTTProvider(sttFactory)
@@ -738,11 +803,11 @@ func main() {
 				ServerURL:           serverURL,
 				Token:               token,
 				STT:                 sttProvider,
-				TTS:                 ttsProvider,
+				TTS:                 sessionTTSProvider,
 				APIKey:              lkCfg.APIKey(),
 				APISecret:           lkCfg.APISecret(),
 				AgentName:           *agentName,
-				SampleRate:          ttsSampleRate,
+				SampleRate:          sessionTTSSampleRate,
 				FillerWords:         lkCfg.TTS.FillerWords,
 				PrimaryLanguage:     sessionLanguagePolicy.DisplayName,
 				SessionLanguageName: sessionLanguagePolicy.DisplayName,

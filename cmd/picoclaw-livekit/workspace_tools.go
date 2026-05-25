@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -9,7 +10,24 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
-var liveKitRequiredWorkspaceFileTools = []string{"read_file", "write_file", "list_dir", "exec", "web_fetch", "web_search"}
+var liveKitRequiredWorkspaceFileTools = []string{
+	"read_file",
+	"write_file",
+	"list_dir",
+	"web_fetch",
+	"web_search",
+	"get_weather",
+	"get_time_date",
+}
+var liveKitVoiceAllowedTools = []string{
+	"read_file",
+	"write_file",
+	"list_dir",
+	"web_fetch",
+	"web_search",
+	"get_weather",
+	"get_time_date",
+}
 
 func ensureLiveKitWorkspaceFileTools(
 	agentInstance *agent.AgentInstance,
@@ -27,11 +45,13 @@ func ensureLiveKitWorkspaceFileTools(
 		}
 	}
 
+	cfgForWorkspace := *cfg
+	cfgForWorkspace.Tools.Exec.Enabled = false
 	agent.RegisterWorkspaceTools(
 		agentInstance.Tools,
 		agentInstance.Workspace,
 		defaults,
-		cfg,
+		&cfgForWorkspace,
 		agent.WorkspaceToolRegistrationOptions{
 			ForceFileTools:   true,
 			ReplaceFileTools: true,
@@ -52,24 +72,6 @@ func ensureLiveKitWorkspaceFileTools(
 func registerLiveKitRuntimeTools(agentInstance *agent.AgentInstance, cfg *config.Config) {
 	if agentInstance == nil || agentInstance.Tools == nil || cfg == nil {
 		return
-	}
-
-	if _, ok := agentInstance.Tools.Get("exec"); !ok {
-		execCfg := *cfg
-		execCfg.Tools.Exec.Enabled = true
-		execCfg.Tools.Exec.AllowRemote = true
-		execCfg.Tools.Exec.EnableDenyPatterns = true
-		if execCfg.Tools.Exec.TimeoutSeconds <= 0 {
-			execCfg.Tools.Exec.TimeoutSeconds = 30
-		}
-		execTool, err := tools.NewExecToolWithConfig(agentInstance.Workspace, true, &execCfg)
-		if err != nil {
-			logger.WarnCF("livekit", "Failed to force required exec tool for LiveKit agent", map[string]any{
-				"error": err.Error(),
-			})
-		} else {
-			agentInstance.Tools.Register(execTool)
-		}
 	}
 
 	if _, ok := agentInstance.Tools.Get("web_fetch"); !ok {
@@ -125,4 +127,31 @@ func registerLiveKitRuntimeTools(agentInstance *agent.AgentInstance, cfg *config
 			agentInstance.Tools.Register(searchTool)
 		}
 	}
+
+	if _, ok := agentInstance.Tools.Get("get_weather"); !ok {
+		agentInstance.Tools.Register(tools.NewGetWeatherTool())
+	}
+
+	if _, ok := agentInstance.Tools.Get("get_time_date"); !ok {
+		agentInstance.Tools.Register(tools.NewGetTimeDateTool())
+	}
+}
+
+func liveKitVoiceToolAllowlist() []string {
+	out := make([]string, len(liveKitVoiceAllowedTools))
+	copy(out, liveKitVoiceAllowedTools)
+	return out
+}
+
+func isLiveKitVoiceAllowedTool(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	for _, allowed := range liveKitVoiceAllowedTools {
+		if strings.EqualFold(allowed, name) {
+			return true
+		}
+	}
+	return false
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
@@ -17,8 +16,6 @@ func TestEnsureLiveKitWorkspaceFileToolsAddsRequiredToolsWhenConfigDisablesThem(
 	cfg.Tools.ReadFile.Enabled = false
 	cfg.Tools.WriteFile.Enabled = false
 	cfg.Tools.ListDir.Enabled = false
-	cfg.Tools.Exec.Enabled = false
-	cfg.Tools.Exec.AllowRemote = false
 	cfg.Tools.Web.Enabled = false
 	cfg.Tools.WebFetch.Enabled = false
 
@@ -34,45 +31,23 @@ func TestEnsureLiveKitWorkspaceFileToolsAddsRequiredToolsWhenConfigDisablesThem(
 			t.Fatalf("%s should be registered for LiveKit workspace agents", name)
 		}
 	}
-	if _, ok := instance.Tools.Get("exec"); !ok {
-		t.Fatal("exec should be registered for LiveKit active-skill agents")
-	}
 	if _, ok := instance.Tools.Get("web_fetch"); !ok {
 		t.Fatal("web_fetch should be registered for LiveKit active-skill agents")
 	}
 	if _, ok := instance.Tools.Get("web_search"); !ok {
 		t.Fatal("web_search should be registered for LiveKit active-skill agents")
 	}
-	if len(added) != 6 {
-		t.Fatalf("added len = %d, want 6", len(added))
+	if _, ok := instance.Tools.Get("exec"); ok {
+		t.Fatal("exec should not be registered in LiveKit voice runtime")
 	}
-}
-
-func TestEnsureLiveKitWorkspaceFileToolsAllowsExecFromLiveKitChannel(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Tools.Exec.Enabled = false
-	cfg.Tools.Exec.AllowRemote = false
-
-	instance := &agent.AgentInstance{
-		Workspace: t.TempDir(),
-		Tools:     tools.NewToolRegistry(),
+	if _, ok := instance.Tools.Get("get_weather"); !ok {
+		t.Fatal("get_weather should be registered for LiveKit voice runtime")
 	}
-
-	ensureLiveKitWorkspaceFileTools(instance, &cfg.Agents.Defaults, cfg)
-
-	execTool, ok := instance.Tools.Get("exec")
-	if !ok {
-		t.Fatal("exec should be registered for LiveKit active-skill agents")
+	if _, ok := instance.Tools.Get("get_time_date"); !ok {
+		t.Fatal("get_time_date should be registered for LiveKit voice runtime")
 	}
-	result := execTool.Execute(tools.WithToolContext(context.Background(), "livekit", "session-a"), map[string]any{
-		"action":  "run",
-		"command": "echo livekit-ok",
-	})
-	if result.IsError {
-		t.Fatalf("exec should be allowed from livekit channel, got: %s", result.ForLLM)
-	}
-	if !strings.Contains(result.ForLLM, "livekit-ok") {
-		t.Fatalf("exec output missing marker, got: %s", result.ForLLM)
+	if len(added) != 7 {
+		t.Fatalf("added len = %d, want 7", len(added))
 	}
 }
 

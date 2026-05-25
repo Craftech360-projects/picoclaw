@@ -1,0 +1,80 @@
+package main
+
+import (
+	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/config"
+)
+
+func TestApplyManagerActiveProvidersOverridesLLMAndTTS(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = "gpt-5.4"
+
+	applyManagerActiveProviders(cfg, managerActiveProviders{
+		LLM: managerActiveLLMProvider{
+			ModelName: "voice-llm",
+			Model:     "openai/gpt-4o-mini",
+			APIBase:   "https://api.openai.com/v1",
+			APIKey:    "llm-key",
+		},
+		TTS: managerActiveTTSProvider{
+			Provider:     "elevenlabs",
+			VoiceID:      "voice-123",
+			ModelID:      "eleven_multilingual_v2",
+			OutputFormat: "pcm_24000",
+			SampleRateHz: 24000,
+			APIKey:       "tts-key",
+		},
+		STT: managerActiveSTTProvider{
+			Provider: "deepgram",
+			Model:    "nova-2",
+			Language: "en",
+		},
+	})
+
+	if cfg.Agents.Defaults.ModelName != "voice-llm" {
+		t.Fatalf("defaults model_name = %q, want voice-llm", cfg.Agents.Defaults.ModelName)
+	}
+	found := false
+	for _, m := range cfg.ModelList {
+		if m != nil && m.ModelName == "voice-llm" {
+			found = true
+			if m.Model != "openai/gpt-4o-mini" {
+				t.Fatalf("model = %q, want openai/gpt-4o-mini", m.Model)
+			}
+			if m.APIKey() != "llm-key" {
+				t.Fatalf("llm API key = %q, want llm-key", m.APIKey())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected voice-llm model in model_list")
+	}
+	if cfg.LiveKitService.TTS.Provider != "elevenlabs" {
+		t.Fatalf("tts provider = %q, want elevenlabs", cfg.LiveKitService.TTS.Provider)
+	}
+	if cfg.LiveKitService.TTS.VoiceID != "voice-123" {
+		t.Fatalf("tts voice_id = %q, want voice-123", cfg.LiveKitService.TTS.VoiceID)
+	}
+	if cfg.Voice.ElevenLabsAPIKey != "tts-key" {
+		t.Fatalf("elevenlabs key = %q, want tts-key", cfg.Voice.ElevenLabsAPIKey)
+	}
+	if cfg.LiveKitService.STT.Provider != "deepgram" {
+		t.Fatalf("stt provider = %q, want deepgram", cfg.LiveKitService.STT.Provider)
+	}
+}
+
+func TestResolveLiveKitProviderConfigForSessionNoManagerURLFallsBackToConfig(t *testing.T) {
+	liveKitActiveProvidersCache = managerActiveProvidersCache{}
+	cfg := config.DefaultConfig()
+	resolved, source, err := resolveLiveKitProviderConfigForSession(cfg, config.LiveKitServiceManagerAPIConfig{})
+	if err != nil {
+		t.Fatalf("resolve error = %v", err)
+	}
+	if source != "config_json" {
+		t.Fatalf("source = %q, want config_json", source)
+	}
+	if resolved == cfg {
+		t.Fatal("expected cloned config instance, got same pointer")
+	}
+}
