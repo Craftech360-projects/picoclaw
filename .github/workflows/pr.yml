@@ -1,7 +1,20 @@
 name: PR
 
 on:
-  pull_request: { }
+  pull_request:
+    paths:
+      - "cmd/picoclaw-livekit/**"
+      - "pkg/livekit/**"
+      - "pkg/voice/**"
+      - "pkg/tools/**"
+      - "pkg/providers/**"
+      - "pkg/config/**"
+      - "workspace-template/skills/**"
+      - "scripts/stt_providers_postgres.sql"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/pr.yml"
 
 jobs:
   lint:
@@ -17,13 +30,16 @@ jobs:
           go-version-file: go.mod
 
       - name: Run go generate
-        run: go generate ./...
+        run: |
+          go generate ./cmd/picoclaw-livekit/...
+          go generate ./pkg/livekit/...
+          go generate ./pkg/voice/...
 
       - name: Golangci Lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.10.1
-          args: --build-tags=goolm,stdjson
+          args: --build-tags=goolm,stdjson ./cmd/picoclaw-livekit/... ./pkg/livekit/... ./pkg/voice/... ./pkg/tools/... ./pkg/providers/... ./pkg/config/...
 
   vuln_check:
     name: Security Check
@@ -44,7 +60,7 @@ jobs:
       - name: Run Govulncheck
         uses: golang/govulncheck-action@v1
         with:
-          go-package: ./...
+          go-package: ./cmd/picoclaw-livekit/... ./pkg/livekit/... ./pkg/voice/... ./pkg/tools/... ./pkg/providers/... ./pkg/config/...
 
   test:
     name: Tests
@@ -59,7 +75,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Run go generate
-        run: go generate ./...
+        run: |
+          go generate ./cmd/picoclaw-livekit/...
+          go generate ./pkg/livekit/...
+          go generate ./pkg/voice/...
 
       - name: Run go test
-        run: go test -tags goolm,stdjson ./...
+        run: go test -tags goolm,stdjson ./cmd/picoclaw-livekit/... ./pkg/livekit/... ./pkg/voice/... ./pkg/tools/... ./pkg/providers/... ./pkg/config/...

@@ -3,6 +3,19 @@ name: build
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - "cmd/picoclaw-livekit/**"
+      - "pkg/livekit/**"
+      - "pkg/voice/**"
+      - "pkg/tools/**"
+      - "pkg/providers/**"
+      - "pkg/config/**"
+      - "workspace-template/skills/**"
+      - "scripts/stt_providers_postgres.sql"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
@@ -16,5 +29,5 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build
-        run: make build-all
+      - name: Build voice worker
+        run: make build-livekit
