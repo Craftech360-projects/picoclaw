@@ -123,6 +123,9 @@ func isWorkspaceSyncExcluded(relativePath string, cfg *config.LiveKitServiceMana
 	if strings.HasPrefix(rel, ".picoclaw/sync-outbox/") {
 		return true
 	}
+	if rel == ".picoclaw/device.lock" {
+		return true
+	}
 	if strings.HasSuffix(rel, ".log") {
 		return true
 	}

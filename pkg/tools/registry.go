@@ -191,7 +191,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 	channel, chatID string,
 	asyncCallback AsyncCallback,
 ) *ToolResult {
-	logger.InfoCF("tool", "Tool execution started",
+	logger.DebugCF("tool", "Tool execution started",
 		map[string]any{
 			"tool": name,
 			"args": args,
@@ -277,13 +277,13 @@ func (r *ToolRegistry) ExecuteWithContext(
 				"error":    result.ForLLM,
 			})
 	} else if result.Async {
-		logger.InfoCF("tool", "Tool started (async)",
+		logger.DebugCF("tool", "Tool started (async)",
 			map[string]any{
 				"tool":     name,
 				"duration": duration.Milliseconds(),
 			})
 	} else {
-		logger.InfoCF("tool", "Tool execution completed",
+		logger.DebugCF("tool", "Tool execution completed",
 			map[string]any{
 				"tool":          name,
 				"duration_ms":   duration.Milliseconds(),

@@ -19,6 +19,8 @@ import (
 
 	"github.com/joho/godotenv"
 	livekitproto "github.com/livekit/protocol/livekit"
+	lklogger "github.com/livekit/protocol/logger"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -72,6 +74,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger.SetLevelFromString(*logLevel)
+	configureLiveKitSDKLogger()
 	configureGoogleCredentials(cfg, cfgPath)
 
 	workspaceBootstrap, err := ensureLiveKitDefaultWorkspaceTemplate(cfg)
@@ -86,21 +89,29 @@ func main() {
 		"existing_skills": workspaceBootstrap.ExistingSkills,
 	})
 
-	provider, modelID, err := providers.CreateProvider(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating provider: %v\n", err)
-		os.Exit(1)
-	}
-
-	logger.InfoCF("livekit", "Finished provider initialization", map[string]any{
-		"model": modelID,
-	})
-
 	lkCfg := cfg.LiveKitService
 	if lkCfg.ServerURL == "" {
 		fmt.Fprintln(os.Stderr, "Error: livekit_service.server_url is required")
 		os.Exit(1)
 	}
+	startupProvider, startupModelID, err := providers.CreateProvider(cfg)
+	if err != nil {
+		if strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
+			logger.WarnCF("livekit", "Startup provider initialization failed; manager DB-first mode enabled", map[string]any{
+				"error": err.Error(),
+			})
+			startupProvider = nil
+			startupModelID = ""
+		} else {
+			fmt.Fprintf(os.Stderr, "Error creating provider: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.InfoCF("livekit", "Finished provider initialization", map[string]any{
+			"model": startupModelID,
+		})
+	}
+
 	normalizeLiveKitRuntimeConfig(&lkCfg.Runtime)
 	logger.InfoCF("livekit", "LiveKit runtime policy", map[string]any{
 		"greeting_mode":                     lkCfg.Runtime.GreetingMode,
@@ -256,18 +267,32 @@ func main() {
 
 	bridgeFactory := func(job *livekitproto.Job) *livekit.AgentBridge {
 		sessionCfg := cfg
-		sessionProvider := provider
-		sessionModelID := modelID
-		sessionSelectionSource := "config_json"
+		sessionProvider := startupProvider
+		sessionModelID := startupModelID
+		sessionSelectionSource := "startup_config_fallback"
 		if resolvedCfg, source, err := resolveLiveKitProviderConfigForSession(cfg, lkCfg.ManagerAPI); resolvedCfg != nil {
 			sessionCfg = resolvedCfg
 			sessionSelectionSource = source
 			resolvedProvider, resolvedModelID, providerErr := providers.CreateProvider(sessionCfg)
 			if providerErr != nil {
-				logger.WarnCF("livekit", "Manager provider selection failed; using startup LLM provider fallback", map[string]any{
-					"source": source,
-					"error":  providerErr.Error(),
-				})
+				if startupProvider != nil {
+					logger.WarnCF("livekit", "Manager provider selection failed; using startup LLM provider fallback", map[string]any{
+						"source": source,
+						"error":  providerErr.Error(),
+					})
+				} else {
+					logger.ErrorCF("livekit", "Manager provider selection failed and no startup fallback provider exists", map[string]any{
+						"source": source,
+						"error":  providerErr.Error(),
+					})
+					if err != nil {
+						logger.ErrorCF("livekit", "Manager provider fetch warning", map[string]any{
+							"source": source,
+							"error":  err.Error(),
+						})
+					}
+					return nil
+				}
 				if err != nil {
 					logger.WarnCF("livekit", "Manager provider fetch warning", map[string]any{
 						"source": source,
@@ -278,6 +303,12 @@ func main() {
 				sessionProvider = resolvedProvider
 				sessionModelID = resolvedModelID
 			}
+		}
+		if sessionProvider == nil {
+			logger.ErrorCF("livekit", "No LLM provider available for LiveKit room", map[string]any{
+				"source": sessionSelectionSource,
+			})
+			return nil
 		}
 		sessionTTSProvider, sessionTTSSampleRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)
 		if sessionTTSProvider == nil {
@@ -847,6 +878,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Worker error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func configureLiveKitSDKLogger() {
+	sdkLevel := strings.ToLower(strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_SDK_LOG_LEVEL")))
+	if sdkLevel == "" {
+		// Keep SDK/WebRTC internals quiet by default; app-level logs remain unchanged.
+		sdkLevel = "error"
+	}
+	conf := &lklogger.Config{
+		Level: sdkLevel,
+	}
+	lkLog, err := lklogger.NewZapLogger(conf)
+	if err != nil {
+		lksdk.SetLogger(lklogger.GetDiscardLogger())
+		logger.WarnCF("livekit", "Failed to configure LiveKit SDK logger; falling back to discard logger", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+	lksdk.SetLogger(lkLog.WithName("livekit-sdk"))
+	logger.InfoCF("livekit", "Configured LiveKit SDK logger", map[string]any{
+		"sdk_log_level": sdkLevel,
+	})
 }
 
 func defaultConfigPath() string {

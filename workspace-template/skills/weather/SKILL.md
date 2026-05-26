@@ -1,16 +1,23 @@
-﻿---
+---
 name: weather
-description: Get current weather and forecasts with verified location matching.
-homepage: https://open-meteo.com/en/docs
+description: Weather skill for voice runtime using native tool get_weather.
 ---
 
-# Weather
+# Weather (Voice Runtime)
 
-Use the native `get_weather` tool first. It already uses Open-Meteo first and falls back to wttr.in when needed.
+Use `get_weather` as the first and default tool for weather.
 
-## Accuracy Rules
+## Rules
 
-- Always restate the matched location, region/country, and observation time in the final answer.
-- Do not trust ambiguous place names blindly. If multiple plausible matches exist, ask a short clarification.
-- Prefer metric unless the user asks for imperial units.
-- If the native tool fails, say verification failed instead of guessing.
+- Do not use curl, shell commands, or external weather CLIs.
+- Use the location provided by the user directly; if ambiguous, ask one short clarification.
+- In answers, include:
+  - resolved location
+  - local observation time
+  - temperature and condition
+- If tool output is unclear or missing, say you could not verify.
+
+## Response Style
+
+- Keep it brief and child-friendly.
+- Avoid raw JSON in spoken responses.

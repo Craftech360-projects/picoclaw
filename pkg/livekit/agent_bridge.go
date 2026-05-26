@@ -754,7 +754,11 @@ CRITICAL RULES FOR VOICE:
 7. For date/time requests, use get_time_date first.
 8. For current or time-sensitive facts such as latest, today, yesterday, 2026 data, scores, schedules, rosters, rankings, weather, news, prices, or team data: do not answer from memory. Use tools and verify.
 9. Do not use web_fetch on search result pages like Google search as evidence. Use web_search first, then fetch a real source page from the results.
-10. If tools fail, return blocked, or provide too little evidence, say you could not verify it instead of guessing.`,
+10. If tools fail, return blocked, or provide too little evidence, say you could not verify it instead of guessing.
+11. Never claim abilities that are not available in this voice runtime.
+12. If asked what you can do, only mention these capabilities: web_search, web_fetch, get_weather, get_time_date, and memory-aware conversation.
+13. Do not say you can run shell/terminal commands, tmux, GitHub actions, create/deploy agents, control a browser, or control hardware devices unless such tools are explicitly available in this runtime.
+14. If asked about any unavailable capability, clearly say it is not available in this voice runtime and offer one available capability instead.`,
 	}
 
 	// Insert voice directive right after the first system message (if any)
@@ -1065,6 +1069,17 @@ func trimForLog(content string, limit int) string {
 	return content[:limit] + "...(truncated)"
 }
 
+func toolArgsPreview(args map[string]any, limit int) string {
+	if len(args) == 0 {
+		return "{}"
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Sprintf("<unmarshalable args: %v>", err)
+	}
+	return trimForLog(string(raw), limit)
+}
+
 func buildProactiveLLMOptions(base map[string]any) map[string]any {
 	out := cloneOptions(base)
 	if _, ok := out["max_tokens"]; !ok {
@@ -1078,11 +1093,29 @@ func buildProactiveLLMOptions(base map[string]any) map[string]any {
 
 func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc providers.ToolCall) *tools.ToolResult {
 	if ab.tools == nil {
+		logger.WarnCF("livekit", "Tool call blocked: no tool registry available", map[string]any{
+			"tool":         tc.Name,
+			"tool_call_id": tc.ID,
+			"session":      sessionKey,
+		})
 		return tools.ErrorResult("No tools available")
 	}
 	if !ab.isToolAllowed(tc.Name) {
+		logger.WarnCF("livekit", "Tool call blocked by allowlist", map[string]any{
+			"tool":         tc.Name,
+			"tool_call_id": tc.ID,
+			"session":      sessionKey,
+		})
 		return tools.ErrorResult(fmt.Sprintf("tool %q is not allowed in LiveKit voice runtime", tc.Name))
 	}
+	start := time.Now()
+	logger.InfoCF("livekit", "Tool call started", map[string]any{
+		"tool":            tc.Name,
+		"tool_call_id":    tc.ID,
+		"session":         sessionKey,
+		"arguments":       toolArgsPreview(tc.Arguments, 240),
+		"argument_fields": len(tc.Arguments),
+	})
 
 	// Create an async callback that routes completed background tasks to the
 	// asyncEventChan, so the audio pipeline can announce results spontaneously.
@@ -1109,6 +1142,24 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 	})
 
 	result := ab.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, "livekit", sessionKey, asyncCb)
+	durationMS := time.Since(start).Milliseconds()
+	if result == nil {
+		logger.ErrorCF("livekit", "Tool call returned nil result", map[string]any{
+			"tool":         tc.Name,
+			"tool_call_id": tc.ID,
+			"session":      sessionKey,
+			"duration_ms":  durationMS,
+		})
+		return tools.ErrorResult(fmt.Sprintf("tool %q returned nil result", tc.Name))
+	}
+	logger.InfoCF("livekit", "Tool call finished", map[string]any{
+		"tool":         tc.Name,
+		"tool_call_id": tc.ID,
+		"session":      sessionKey,
+		"duration_ms":  durationMS,
+		"is_error":     result.IsError,
+		"llm_preview":  trimForLog(result.ContentForLLM(), 240),
+	})
 	ab.maybeMirrorWorkspaceArtifact(ctx, sessionKey, tc, result)
 	return result
 }

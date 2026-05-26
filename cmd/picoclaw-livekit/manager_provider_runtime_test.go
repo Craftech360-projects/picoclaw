@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 func TestApplyManagerActiveProvidersOverridesLLMAndTTS(t *testing.T) {
@@ -76,5 +77,61 @@ func TestResolveLiveKitProviderConfigForSessionNoManagerURLFallsBackToConfig(t *
 	}
 	if resolved == cfg {
 		t.Fatal("expected cloned config instance, got same pointer")
+	}
+}
+
+func TestApplyManagerLLMProviderCollapsesDuplicateModelNameEntries(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{ModelName: "openrouter", Model: "openrouter/google/gemma-4-31b-it"},
+		{ModelName: "openrouter", Model: "groq/openai/gpt-oss-120b"},
+		{ModelName: "openrouter", Model: "gemini/gemini-2.0-flash"},
+	}
+	cfg.Agents.Defaults.ModelName = "openrouter"
+
+	applyManagerLLMProvider(cfg, managerActiveLLMProvider{
+		ModelName: "openrouter",
+		Model:     "openrouter/google/gemma-4-31b-it",
+		APIBase:   "https://openrouter.ai/api/v1",
+		APIKey:    "key-123",
+	})
+
+	count := 0
+	for _, item := range cfg.ModelList {
+		if item != nil && item.ModelName == "openrouter" {
+			count++
+			if item.Model != "openrouter/google/gemma-4-31b-it" {
+				t.Fatalf("model = %q, want openrouter/google/gemma-4-31b-it", item.Model)
+			}
+			if item.APIBase != "https://openrouter.ai/api/v1" {
+				t.Fatalf("api_base = %q, want https://openrouter.ai/api/v1", item.APIBase)
+			}
+			if item.APIKey() != "key-123" {
+				t.Fatalf("api_key = %q, want key-123", item.APIKey())
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("openrouter model_name entry count = %d, want 1", count)
+	}
+}
+
+func TestApplyManagerLLMProviderEnablesCreateProviderWhenModelListInitiallyEmpty(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = "openrouter"
+
+	applyManagerLLMProvider(cfg, managerActiveLLMProvider{
+		ModelName: "openrouter",
+		Model:     "openrouter/google/gemma-4-31b-it",
+		APIBase:   "https://openrouter.ai/api/v1",
+		APIKey:    "key-xyz",
+	})
+
+	if len(cfg.ModelList) != 1 {
+		t.Fatalf("model_list length = %d, want 1", len(cfg.ModelList))
+	}
+	if _, _, err := providers.CreateProvider(cfg); err != nil {
+		t.Fatalf("CreateProvider() error = %v, want nil", err)
 	}
 }

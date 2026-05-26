@@ -97,7 +97,7 @@ func (f *Factory) GetActiveProvider() (Provider, error) {
 	} else if err != nil {
 		return nil, fmt.Errorf("query active provider: %w", err)
 	} else {
-		logger.InfoCF("livekit", "Found active provider in database", map[string]any{
+		logger.DebugCF("livekit", "Found active provider in database", map[string]any{
 			"provider":    providerName,
 			"model":       model,
 			"has_api_key": len(apiKey) > 0,
@@ -115,7 +115,7 @@ func (f *Factory) GetActiveProvider() (Provider, error) {
 		provider = cfgProvider.WithConfig(apiKey, model)
 	}
 
-	logger.InfoCF("livekit", "Using STT provider from factory", map[string]any{
+	logger.DebugCF("livekit", "Using STT provider from factory", map[string]any{
 		"provider": providerName,
 		"model":    model,
 	})

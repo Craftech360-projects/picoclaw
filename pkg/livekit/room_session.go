@@ -357,6 +357,19 @@ func (rs *RoomSession) handleDataMessage(data []byte) {
 	}
 	msgType, _ := msg["type"].(string)
 	switch msgType {
+	case "ready_for_greeting":
+		sessionID, _ := msg["session_id"].(string)
+		logger.InfoCF("livekit", "Received ready_for_greeting from gateway", map[string]any{
+			"room":       rs.roomInfo.Name,
+			"session_id": strings.TrimSpace(sessionID),
+		})
+		// Greeting is triggered by runtime policy when STT+VAD are fully ready on
+		// track subscription. This control message is accepted for observability.
+		logger.InfoCF("livekit", "Processed ready_for_greeting (greeting controlled by runtime policy)", map[string]any{
+			"room":                rs.roomInfo.Name,
+			"greeting_mode":       strings.TrimSpace(rs.runtime.GreetingMode),
+			"processing_strategy": "runtime_policy_track_subscribe",
+		})
 	case "end_prompt":
 		prompt, _ := msg["prompt"].(string)
 		if prompt == "" {

@@ -168,52 +168,50 @@ func applyManagerLLMProvider(cfg *config.Config, llm managerActiveLLMProvider) {
 		return
 	}
 
-	found := false
-	for i, item := range cfg.ModelList {
-		if item == nil || !strings.EqualFold(strings.TrimSpace(item.ModelName), modelName) {
+	var firstMatch *config.ModelConfig
+	filtered := make([]*config.ModelConfig, 0, len(cfg.ModelList))
+	for _, item := range cfg.ModelList {
+		if item != nil && strings.EqualFold(strings.TrimSpace(item.ModelName), modelName) {
+			if firstMatch == nil {
+				firstMatch = item
+			}
 			continue
 		}
-		replacement := &config.ModelConfig{
-			ModelName:      item.ModelName,
-			Model:          model,
-			APIBase:        item.APIBase,
-			Proxy:          item.Proxy,
-			Fallbacks:      append([]string(nil), item.Fallbacks...),
-			AuthMethod:     item.AuthMethod,
-			ConnectMode:    item.ConnectMode,
-			Workspace:      item.Workspace,
-			RPM:            item.RPM,
-			MaxTokensField: item.MaxTokensField,
-			RequestTimeout: item.RequestTimeout,
-			ThinkingLevel:  item.ThinkingLevel,
-		}
-		if item.ExtraBody != nil {
-			replacement.ExtraBody = make(map[string]any, len(item.ExtraBody))
-			for k, v := range item.ExtraBody {
+		filtered = append(filtered, item)
+	}
+
+	replacement := &config.ModelConfig{
+		ModelName: modelName,
+		Model:     model,
+		APIBase:   strings.TrimSpace(llm.APIBase),
+	}
+
+	if firstMatch != nil {
+		replacement.ModelName = firstMatch.ModelName
+		replacement.APIBase = firstMatch.APIBase
+		replacement.Proxy = firstMatch.Proxy
+		replacement.Fallbacks = append([]string(nil), firstMatch.Fallbacks...)
+		replacement.AuthMethod = firstMatch.AuthMethod
+		replacement.ConnectMode = firstMatch.ConnectMode
+		replacement.Workspace = firstMatch.Workspace
+		replacement.RPM = firstMatch.RPM
+		replacement.MaxTokensField = firstMatch.MaxTokensField
+		replacement.RequestTimeout = firstMatch.RequestTimeout
+		replacement.ThinkingLevel = firstMatch.ThinkingLevel
+		if firstMatch.ExtraBody != nil {
+			replacement.ExtraBody = make(map[string]any, len(firstMatch.ExtraBody))
+			for k, v := range firstMatch.ExtraBody {
 				replacement.ExtraBody[k] = v
 			}
 		}
-		if apiBase := strings.TrimSpace(llm.APIBase); apiBase != "" {
-			replacement.APIBase = apiBase
-		}
-		if key := strings.TrimSpace(llm.APIKey); key != "" {
-			replacement.SetAPIKey(key)
-		}
-		cfg.ModelList[i] = replacement
-		found = true
-		break
 	}
-	if !found {
-		item := &config.ModelConfig{
-			ModelName: modelName,
-			Model:     model,
-			APIBase:   strings.TrimSpace(llm.APIBase),
-		}
-		if key := strings.TrimSpace(llm.APIKey); key != "" {
-			item.SetAPIKey(key)
-		}
-		cfg.ModelList = append(cfg.ModelList, item)
+	if apiBase := strings.TrimSpace(llm.APIBase); apiBase != "" {
+		replacement.APIBase = apiBase
 	}
+	if key := strings.TrimSpace(llm.APIKey); key != "" {
+		replacement.SetAPIKey(key)
+	}
+	cfg.ModelList = append(filtered, replacement)
 	cfg.Agents.Defaults.ModelName = modelName
 }
 

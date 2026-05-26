@@ -180,3 +180,9 @@ func TestReplayWorkspaceSyncOutboxDiscardsLegacyBinaryPayloadOn400(t *testing.T)
 		t.Fatalf("expected empty outbox after discard, got %d entries", len(outbox))
 	}
 }
+
+func TestIsWorkspaceSyncExcluded_DeviceLock(t *testing.T) {
+	if !isWorkspaceSyncExcluded(".picoclaw/device.lock", nil) {
+		t.Fatalf("expected .picoclaw/device.lock to be excluded")
+	}
+}
