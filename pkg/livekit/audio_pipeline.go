@@ -27,6 +27,16 @@ var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel
 var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
 var dynamicGreetingCooldownUntilUnix atomic.Int64
+var shortUtteranceHoldPhrases = map[string]struct{}{
+	"hello": {},
+	"hi":    {},
+	"ok":    {},
+	"okay":  {},
+	"hmm":   {},
+	"yes":   {},
+	"yeah":  {},
+	"yep":   {},
+}
 
 func dynamicGreetingRateLimited() bool {
 	return time.Now().Unix() < dynamicGreetingCooldownUntilUnix.Load()
@@ -73,6 +83,19 @@ func sanitizeVoiceTextForTTS(text string) string {
 
 func normalizeUtteranceForDuplicateCheck(text string) string {
 	return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(text), " ")))
+}
+
+func shouldHoldShortUtterance(text string) bool {
+	normalized := normalizeUtteranceForDuplicateCheck(text)
+	normalized = strings.Trim(normalized, " \t\r\n.,!?;:")
+	if normalized == "" {
+		return false
+	}
+	if _, ok := shortUtteranceHoldPhrases[normalized]; ok {
+		return true
+	}
+	parts := strings.Fields(normalized)
+	return len(parts) == 1 && len([]rune(parts[0])) <= 4
 }
 
 func mergeFinalTranscriptChunk(current, next string) string {
@@ -244,6 +267,16 @@ type turnLatencyMeta struct {
 	TTSFirst  time.Time
 	TTSFinal  time.Time
 	Completed bool
+
+	STTFirstPartialMS      int64
+	STTFirstFinalMS        int64
+	LLMFirstTokenMS        int64
+	LLMFinalTokenMS        int64
+	TTSFirstAudioMS        int64
+	TTSFinalAudioMS        int64
+	TTSFirstAudioFromSTTMS int64
+	TTSFinalAudioFromSTTMS int64
+	TurnTotalE2EMS         int64
 }
 
 func (c *voiceTurnController) Start(parent context.Context, reason string) voiceTurn {
@@ -312,6 +345,37 @@ func (ap *AudioPipeline) logTurnLatency(meta *turnLatencyMeta, marker string, du
 	if meta == nil {
 		return
 	}
+	switch marker {
+	case "stt_first_partial":
+		if meta.STTFirstPartialMS == 0 {
+			meta.STTFirstPartialMS = duration.Milliseconds()
+		}
+	case "stt_first_final":
+		if meta.STTFirstFinalMS == 0 {
+			meta.STTFirstFinalMS = duration.Milliseconds()
+		}
+	case "llm_first_token":
+		if meta.LLMFirstTokenMS == 0 {
+			meta.LLMFirstTokenMS = duration.Milliseconds()
+		}
+	case "llm_final_token":
+		meta.LLMFinalTokenMS = duration.Milliseconds()
+	case "tts_first_audio":
+		if meta.TTSFirstAudioMS == 0 {
+			meta.TTSFirstAudioMS = duration.Milliseconds()
+		}
+	case "tts_final_audio":
+		meta.TTSFinalAudioMS = duration.Milliseconds()
+	case "tts_first_audio_from_stt_start":
+		if meta.TTSFirstAudioFromSTTMS == 0 {
+			meta.TTSFirstAudioFromSTTMS = duration.Milliseconds()
+		}
+	case "tts_final_audio_from_stt_start":
+		meta.TTSFinalAudioFromSTTMS = duration.Milliseconds()
+	case "turn_total_e2e":
+		meta.TurnTotalE2EMS = duration.Milliseconds()
+	}
+
 	fields := map[string]any{
 		"turn_id":      meta.TurnID,
 		"session":      meta.Session,
@@ -336,8 +400,8 @@ func (ap *AudioPipeline) finalizeTurnLatency(meta *turnLatencyMeta, reason strin
 		return
 	}
 	meta.mu.Lock()
-	defer meta.mu.Unlock()
 	if meta.Completed {
+		meta.mu.Unlock()
 		return
 	}
 	meta.Completed = true
@@ -345,9 +409,31 @@ func (ap *AudioPipeline) finalizeTurnLatency(meta *turnLatencyMeta, reason strin
 	if !meta.STTStart.IsZero() {
 		base = meta.STTStart
 	}
+	meta.mu.Unlock()
+
 	if !base.IsZero() {
 		ap.logTurnLatency(meta, "turn_total_e2e", time.Since(base), map[string]any{"finalize_reason": reason})
 	}
+
+	logger.InfoCF("livekit", "Turn latency summary", map[string]any{
+		"turn_id":                        meta.TurnID,
+		"session":                        meta.Session,
+		"path":                           meta.Path,
+		"trigger":                        meta.Trigger,
+		"finalize_reason":                reason,
+		"stt_first_partial_ms":           meta.STTFirstPartialMS,
+		"stt_first_final_ms":             meta.STTFirstFinalMS,
+		"llm_first_token_ms":             meta.LLMFirstTokenMS,
+		"llm_final_token_ms":             meta.LLMFinalTokenMS,
+		"tts_first_audio_ms":             meta.TTSFirstAudioMS,
+		"tts_final_audio_ms":             meta.TTSFinalAudioMS,
+		"tts_first_audio_from_stt_ms":    meta.TTSFirstAudioFromSTTMS,
+		"tts_final_audio_from_stt_ms":    meta.TTSFinalAudioFromSTTMS,
+		"turn_total_e2e_ms":              meta.TurnTotalE2EMS,
+		"missing_stt_final_marker":       meta.STTFirstFinalMS == 0,
+		"missing_llm_first_token_marker": meta.LLMFirstTokenMS == 0,
+		"missing_tts_first_audio_marker": meta.TTSFirstAudioMS == 0,
+	})
 }
 
 func (ap *AudioPipeline) emitRuntimeEvent(kind, sessionKey, cause, errText string, meta map[string]any) {
@@ -897,6 +983,8 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var finalizeTimerC <-chan time.Time
 	var segmentTimer *time.Timer
 	var segmentTimerC <-chan time.Time
+	var shortHoldTimer *time.Timer
+	var shortHoldTimerC <-chan time.Time
 	var lastFlushedText string
 	var lastFlushedAt time.Time
 	var sttSpeechStartAt time.Time
@@ -904,8 +992,16 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var sttFirstFinalAt time.Time
 	var pendingBargeIn bool
 	var hardCapFinalizePending bool
+	var pendingShort *struct {
+		Text         string
+		Trigger      string
+		STTStart     time.Time
+		STTFirstPart time.Time
+		STTFirstFin  time.Time
+	}
 
 	const sttSegmentHardCap = 25 * time.Second
+	const shortUtteranceHoldDelay = 1 * time.Second
 
 	// Get the async event channel from the bridge (may be nil)
 	var asyncEvents <-chan AsyncEvent
@@ -943,6 +1039,36 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		segmentTimerC = nil
 	}
 
+	stopShortHoldTimer := func() {
+		if shortHoldTimer == nil {
+			shortHoldTimerC = nil
+			return
+		}
+		if !shortHoldTimer.Stop() {
+			select {
+			case <-shortHoldTimer.C:
+			default:
+			}
+		}
+		shortHoldTimer = nil
+		shortHoldTimerC = nil
+	}
+
+	startShortHoldTimer := func() {
+		if shortHoldTimer == nil {
+			shortHoldTimer = time.NewTimer(shortUtteranceHoldDelay)
+		} else {
+			if !shortHoldTimer.Stop() {
+				select {
+				case <-shortHoldTimer.C:
+				default:
+				}
+			}
+			shortHoldTimer.Reset(shortUtteranceHoldDelay)
+		}
+		shortHoldTimerC = shortHoldTimer.C
+	}
+
 	startSegmentTimer := func() {
 		if sttSegmentHardCap <= 0 {
 			return
@@ -977,33 +1103,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		finalizeTimerC = finalizeTimer.C
 	}
 
-	flushBufferedUtterance := func(trigger string) {
-		text := strings.TrimSpace(utterance.String())
-		if text == "" {
-			text = strings.TrimSpace(latestTranscript)
-		}
-		utterance.Reset()
-		latestTranscript = ""
-		vadSpeechEnded = false
-		speechActive = false
-		hardCapFinalizePending = false
-		pendingBargeIn = false
-		stopFinalizeTimer()
-		stopSegmentTimer()
-
-		if ap.session != nil && ap.session.participant != nil {
-			ap.session.participant.speaking.Store(false)
-		}
-
-		if text == "" {
-			return
-		}
-		speechStartSnapshot := sttSpeechStartAt
-		firstPartialSnapshot := sttFirstPartialAt
-		firstFinalSnapshot := sttFirstFinalAt
-		sttSpeechStartAt = time.Time{}
-		sttFirstPartialAt = time.Time{}
-		sttFirstFinalAt = time.Time{}
+	dispatchUtterance := func(trigger, text string, speechStartSnapshot, firstPartialSnapshot, firstFinalSnapshot time.Time) {
 		normalizedText := normalizeUtteranceForDuplicateCheck(text)
 		if normalizedText != "" &&
 			normalizedText == lastFlushedText &&
@@ -1052,11 +1152,82 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		}()
 	}
 
+	flushBufferedUtterance := func(trigger string) {
+		text := strings.TrimSpace(utterance.String())
+		if text == "" {
+			text = strings.TrimSpace(latestTranscript)
+		}
+		utterance.Reset()
+		latestTranscript = ""
+		vadSpeechEnded = false
+		speechActive = false
+		hardCapFinalizePending = false
+		pendingBargeIn = false
+		stopFinalizeTimer()
+		stopSegmentTimer()
+
+		if ap.session != nil && ap.session.participant != nil {
+			ap.session.participant.speaking.Store(false)
+		}
+
+		if text == "" {
+			return
+		}
+		speechStartSnapshot := sttSpeechStartAt
+		firstPartialSnapshot := sttFirstPartialAt
+		firstFinalSnapshot := sttFirstFinalAt
+		sttSpeechStartAt = time.Time{}
+		sttFirstPartialAt = time.Time{}
+		sttFirstFinalAt = time.Time{}
+
+		if pendingShort != nil {
+			stopShortHoldTimer()
+			text = mergeFinalTranscriptChunk(pendingShort.Text, text)
+			trigger = pendingShort.Trigger + "+merged"
+			if speechStartSnapshot.IsZero() || (!pendingShort.STTStart.IsZero() && pendingShort.STTStart.Before(speechStartSnapshot)) {
+				speechStartSnapshot = pendingShort.STTStart
+			}
+			if firstPartialSnapshot.IsZero() || (!pendingShort.STTFirstPart.IsZero() && pendingShort.STTFirstPart.Before(firstPartialSnapshot)) {
+				firstPartialSnapshot = pendingShort.STTFirstPart
+			}
+			if firstFinalSnapshot.IsZero() || (!pendingShort.STTFirstFin.IsZero() && pendingShort.STTFirstFin.Before(firstFinalSnapshot)) {
+				firstFinalSnapshot = pendingShort.STTFirstFin
+			}
+			pendingShort = nil
+		}
+
+		if shouldHoldShortUtterance(text) {
+			pendingShort = &struct {
+				Text         string
+				Trigger      string
+				STTStart     time.Time
+				STTFirstPart time.Time
+				STTFirstFin  time.Time
+			}{
+				Text:         text,
+				Trigger:      trigger,
+				STTStart:     speechStartSnapshot,
+				STTFirstPart: firstPartialSnapshot,
+				STTFirstFin:  firstFinalSnapshot,
+			}
+			startShortHoldTimer()
+			logger.InfoCF("livekit", "Holding short utterance before LLM dispatch", map[string]any{
+				"session":       ap.sessionKey(),
+				"text":          text,
+				"hold_delay_ms": shortUtteranceHoldDelay.Milliseconds(),
+			})
+			return
+		}
+
+		dispatchUtterance(trigger, text, speechStartSnapshot, firstPartialSnapshot, firstFinalSnapshot)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			stopFinalizeTimer()
 			stopSegmentTimer()
+			stopShortHoldTimer()
 			return
 
 		case vadEvt, ok := <-ap.vadEvent:
@@ -1173,6 +1344,26 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				}
 				ap.maybeDrainQueuedAnnouncements()
 			}
+
+		case <-shortHoldTimerC:
+			shortHoldTimer = nil
+			shortHoldTimerC = nil
+			if pendingShort == nil {
+				continue
+			}
+			if speechActive || pendingBargeIn {
+				startShortHoldTimer()
+				continue
+			}
+			held := pendingShort
+			pendingShort = nil
+			dispatchUtterance(
+				held.Trigger+"+hold_timeout",
+				held.Text,
+				held.STTStart,
+				held.STTFirstPart,
+				held.STTFirstFin,
+			)
 
 		case <-segmentTimerC:
 			segmentTimer = nil

@@ -13,6 +13,7 @@ import (
 )
 
 const workspaceLockFilePath = ".picoclaw/device.lock"
+const workspaceLockHeartbeatInterval = 2 * time.Second
 
 type workspaceLock struct {
 	path   string
@@ -128,7 +129,7 @@ func (l *workspaceLock) Release() error {
 
 func (l *workspaceLock) heartbeatLoop() {
 	defer close(l.doneCh)
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(workspaceLockHeartbeatInterval)
 	defer ticker.Stop()
 
 	for {

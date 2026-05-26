@@ -113,11 +113,13 @@ func main() {
 	}
 
 	normalizeLiveKitRuntimeConfig(&lkCfg.Runtime)
+	voiceMaxTokens := liveKitVoiceMaxTokens()
 	logger.InfoCF("livekit", "LiveKit runtime policy", map[string]any{
 		"greeting_mode":                     lkCfg.Runtime.GreetingMode,
 		"async_announce_mode":               lkCfg.Runtime.AsyncAnnounceMode,
 		"vad_threshold":                     lkCfg.Runtime.VADThreshold,
 		"vad_endpoint_ms":                   lkCfg.Runtime.VADEndpointMS,
+		"voice_max_tokens":                  voiceMaxTokens,
 		"rate_limit_cooldown_seconds":       lkCfg.Runtime.RateLimitCooldownSeconds,
 		"provider_failure_cooldown_seconds": lkCfg.Runtime.ProviderFailureCooldownSec,
 		"language_lock_enabled":             lkCfg.Runtime.LanguageLockEnabled,
@@ -376,6 +378,8 @@ func main() {
 		if lockTimeout > time.Minute {
 			lockStaleAfter = lockTimeout * 2
 		}
+		reconnectLockTimeout := liveKitWorkspaceReconnectLockTimeout(lkCfg.ManagerAPI)
+		reconnectLockStaleAfter := liveKitWorkspaceReconnectLockStaleAfter(lkCfg.ManagerAPI)
 		lockTTLSeconds := liveKitWorkspaceLockLeaseTTL(lkCfg.ManagerAPI)
 		var wsLock *workspaceLock
 		var managerLockLease *managerWorkspaceLockLease
@@ -456,22 +460,16 @@ func main() {
 				// abandoning this assignment.
 				if ok, hintOwner := livekit.HasRecentWorkspaceReconnectHint(workspace, 2*time.Minute); ok &&
 					strings.TrimSpace(hintOwner) == lockOwner {
-					retryTimeout := lockTimeout
-					if retryTimeout < 20*time.Second {
-						retryTimeout = 20 * time.Second
-					}
-					if retryTimeout > 120*time.Second {
-						retryTimeout = 120 * time.Second
-					}
 					logger.InfoCF("livekit", "Retrying per-device workspace lock acquisition during reconnect handoff", map[string]any{
 						"room":               roomName,
 						"device_mac":         deviceMAC,
 						"workspace":          workspace,
 						"lock_owner":         lockOwner,
-						"retry_timeout_ms":   retryTimeout.Milliseconds(),
+						"retry_timeout_ms":   reconnectLockTimeout.Milliseconds(),
+						"stale_reclaim_ms":   reconnectLockStaleAfter.Milliseconds(),
 						"initial_timeout_ms": lockTimeout.Milliseconds(),
 					})
-					lock, err = acquireWorkspaceLock(workspace, lockOwner, retryTimeout, lockStaleAfter)
+					lock, err = acquireWorkspaceLock(workspace, lockOwner, reconnectLockTimeout, reconnectLockStaleAfter)
 				}
 			}
 			if err != nil {
@@ -700,12 +698,16 @@ func main() {
 			}
 		}
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:              sessionCfg,
-			Provider:            sessionProvider,
-			ModelID:             sessionModelID,
-			AgentInstance:       agentInstance,
-			PreserveWorkspace:   preserveWorkspace,
-			MaxIterations:       sessionCfg.Agents.Defaults.MaxToolIterations,
+			Config:            sessionCfg,
+			Provider:          sessionProvider,
+			ModelID:           sessionModelID,
+			AgentInstance:     agentInstance,
+			PreserveWorkspace: preserveWorkspace,
+			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
+			LLMOptions: map[string]any{
+				"max_tokens":  voiceMaxTokens,
+				"temperature": 0.3,
+			},
 			SessionLanguageName: sessionLanguagePolicy.DisplayName,
 			SessionLanguageCode: sessionLanguagePolicy.RawCode,
 			LanguageLockEnabled: lkCfg.Runtime.LanguageLockEnabled,
@@ -1270,6 +1272,48 @@ func liveKitWorkspaceLockTimeout(cfg config.LiveKitServiceManagerAPIConfig) time
 	return time.Duration(seconds) * time.Second
 }
 
+func liveKitWorkspaceReconnectLockTimeout(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
+	const defaultSeconds = 8
+	timeout := defaultSeconds * time.Second
+	if cfg.WorkspaceSync.LockTimeoutSecond > 0 {
+		seconds := cfg.WorkspaceSync.LockTimeoutSecond
+		if seconds > 0 && seconds < defaultSeconds {
+			timeout = time.Duration(seconds) * time.Second
+		}
+	}
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RECONNECT_LOCK_TIMEOUT_SECONDS"))
+	if raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			timeout = time.Duration(seconds) * time.Second
+		}
+	}
+	if timeout < 3*time.Second {
+		timeout = 3 * time.Second
+	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	return timeout
+}
+
+func liveKitWorkspaceReconnectLockStaleAfter(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
+	const defaultSeconds = 8
+	staleAfter := defaultSeconds * time.Second
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RECONNECT_LOCK_STALE_SECONDS"))
+	if raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			staleAfter = time.Duration(seconds) * time.Second
+		}
+	}
+	if staleAfter < 5*time.Second {
+		staleAfter = 5 * time.Second
+	}
+	if staleAfter > 30*time.Second {
+		staleAfter = 30 * time.Second
+	}
+	return staleAfter
+}
+
 func liveKitWorkspaceSyncInterval(cfg config.LiveKitServiceManagerAPIConfig) time.Duration {
 	const defaultSeconds = 180
 	if cfg.WorkspaceSync.IntervalSeconds > 0 {
@@ -1360,6 +1404,22 @@ func liveKitDrainTimeout() time.Duration {
 		seconds = 3600
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func liveKitVoiceMaxTokens() int {
+	const defaultTokens = 120
+	raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_VOICE_MAX_TOKENS"))
+	if raw == "" {
+		return defaultTokens
+	}
+	tokens, err := strconv.Atoi(raw)
+	if err != nil || tokens <= 0 {
+		return defaultTokens
+	}
+	if tokens > 1024 {
+		tokens = 1024
+	}
+	return tokens
 }
 
 func liveKitWorkspaceBackgroundRestoreEnabled(cfg config.LiveKitServiceManagerAPIConfig) bool {

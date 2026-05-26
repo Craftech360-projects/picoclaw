@@ -38,6 +38,18 @@ func TestSanitizeVoiceTextForTTSDropsThoughtBlocks(t *testing.T) {
 	}
 }
 
+func TestShouldHoldShortUtterance(t *testing.T) {
+	if !shouldHoldShortUtterance("Hello") {
+		t.Fatal("expected Hello to be held")
+	}
+	if !shouldHoldShortUtterance("okay.") {
+		t.Fatal("expected okay to be held")
+	}
+	if shouldHoldShortUtterance("Can you tell me a story?") {
+		t.Fatal("did not expect full sentence to be held")
+	}
+}
+
 func TestRunInboundSuppressesDuplicateSTTSpeechEndAfterVADFlush(t *testing.T) {
 	results := make(chan stt.TranscriptEvent, 4)
 	vadEvents := make(chan interface{}, 1)
