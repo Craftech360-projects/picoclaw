@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,13 @@ const (
 	maxGemini429Retries = 2
 	maxLLMLogContentLen = 1200
 )
+
+var assistantThoughtBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
+
+func stripAssistantThoughtBlocks(text string) string {
+	text = assistantThoughtBlockRE.ReplaceAllString(text, "")
+	return strings.TrimSpace(text)
+}
 
 // PersistedChatMessage is the serialized chat history shape expected by Manager API.
 type PersistedChatMessage struct {
@@ -746,9 +754,9 @@ You are speaking to the user through a voice interface (text-to-speech).
 
 CRITICAL RULES FOR VOICE:
 1. Keep ALL responses SHORT and conversational — 1-3 sentences max.
-2. NEVER read out long content (songs, code, poems, lists, file contents) aloud. Instead, silently write it to a file using tools and tell the user where you saved it.
+2. For stories and creative requests, give a SHORT spoken version (2-3 sentences). Do not try to generate or save long story files unless the user explicitly asks to save.
 3. NEVER use markdown formatting (**, *, #, backticks, bullet points). Speak in plain natural language.
-4. When using tools like write_file or spawn, do NOT narrate or preview the content. Just do it and briefly confirm.
+4. Do not use write_file for normal conversation output. write_file is only for memory updates in USER.md and memory/MEMORY.md.
 5. Avoid reading file paths character by character. Say "I saved it to your workspace" instead.
 6. For weather requests, use get_weather first.
 7. For date/time requests, use get_time_date first.
@@ -980,6 +988,7 @@ func (ab *AgentBridge) callLLMOnce(
 		if err != nil {
 			return nil, err
 		}
+		resp.Content = stripAssistantThoughtBlocks(resp.Content)
 		return resp, nil
 	}
 
@@ -987,6 +996,7 @@ func (ab *AgentBridge) callLLMOnce(
 	if err != nil {
 		return nil, err
 	}
+	resp.Content = stripAssistantThoughtBlocks(resp.Content)
 	if cb != nil && resp.Content != "" {
 		cb(resp.Content)
 	}

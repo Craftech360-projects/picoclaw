@@ -23,6 +23,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
@@ -486,24 +487,70 @@ func (rs *RoomSession) handleEndPrompt(prompt string) {
 	if rs.bridge == nil {
 		return
 	}
-	rs.mu.Lock()
-	participant := rs.participant
-	rs.mu.Unlock()
-	sessionKey := ""
-	if participant != nil {
-		sessionKey = participant.sessionKey
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Build a minimal pipeline just for TTS playback of the goodbye.
+	// IMPORTANT: we do NOT use normal ChatStream here because that persists
+	// the farewell control prompt into session history/memory.
 	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, nil)
-	_, _ = pipeline.HandleUtterance(ctx, sessionKey, prompt, nil)
+	farewellText := rs.generateFarewellTextNoPersist(ctx, prompt)
+	if strings.TrimSpace(farewellText) == "" {
+		farewellText = "It was so much fun talking with you! Take care and see you next time!"
+	}
+	rs.PublishAgentState("listening", "thinking")
+	rs.PublishAgentState("thinking", "speaking")
+	pipeline.publishSpeechCreated()
+	pipeline.synthesizeAndPlay(ctx, farewellText)
+	pipeline.flushSilenceForContext(ctx, 500)
+	rs.PublishAgentState("speaking", "listening")
 
 	// Brief pause so TTS audio finishes flushing before we disconnect.
 	time.Sleep(500 * time.Millisecond)
 	rs.Leave()
+}
+
+func (rs *RoomSession) generateFarewellTextNoPersist(ctx context.Context, prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return ""
+	}
+	if rs == nil || rs.bridge == nil || rs.bridge.provider == nil {
+		return prompt
+	}
+
+	messages := []providers.Message{
+		{
+			Role: "system",
+			Content: "Voice farewell mode. Reply with one short child-friendly goodbye only. " +
+				"Do not include reasoning, analysis, or tool calls.",
+		},
+		{
+			Role:    "user",
+			Content: prompt,
+		},
+	}
+
+	resp, err := rs.bridge.callLLM(
+		ctx,
+		"livekit:system:end_prompt",
+		messages,
+		nil,
+		rs.bridge.optionsForProfile("conversation"),
+		nil,
+	)
+	if err != nil {
+		logger.WarnCF("livekit", "Failed to generate farewell via LLM, falling back to prompt text", map[string]any{
+			"room":  rs.roomInfo.Name,
+			"error": err.Error(),
+		})
+		return prompt
+	}
+	text := strings.TrimSpace(resp.Content)
+	if text == "" {
+		return prompt
+	}
+	return text
 }
 
 // handleShutdownRequest sends an ACK back to the gateway (if requested)

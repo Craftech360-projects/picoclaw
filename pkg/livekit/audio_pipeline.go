@@ -24,6 +24,8 @@ import (
 )
 
 var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
+var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
+var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
 var dynamicGreetingCooldownUntilUnix atomic.Int64
 
 func dynamicGreetingRateLimited() bool {
@@ -47,6 +49,8 @@ func isRateLimitError(err error) bool {
 }
 
 func sanitizeVoiceTextForTTS(text string) string {
+	text = voiceReasoningBlockRE.ReplaceAllString(text, "")
+	text = voiceReasoningLineRE.ReplaceAllString(text, "")
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")
 	text = strings.NewReplacer(
 		"<|channel|>", "",
@@ -55,6 +59,14 @@ func sanitizeVoiceTextForTTS(text string) string {
 		"<|end|>", "",
 		"<|channel>", "",
 		"<channel|>", "",
+		"<think>", "",
+		"</think>", "",
+		"<thought>", "",
+		"</thought>", "",
+		"<reasoning>", "",
+		"</reasoning>", "",
+		"<analysis>", "",
+		"</analysis>", "",
 	).Replace(text)
 	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
 }

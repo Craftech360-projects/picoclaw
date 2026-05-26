@@ -22,6 +22,22 @@ func TestSanitizeVoiceTextForTTSDropsProviderChannelMarkers(t *testing.T) {
 	}
 }
 
+func TestSanitizeVoiceTextForTTSDropsReasoningBlocks(t *testing.T) {
+	got := sanitizeVoiceTextForTTS("<think>I should think first</think>Here is the answer.")
+	want := "Here is the answer."
+	if got != want {
+		t.Fatalf("sanitizeVoiceTextForTTS() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeVoiceTextForTTSDropsThoughtBlocks(t *testing.T) {
+	got := sanitizeVoiceTextForTTS("<thought>internal plan</thought>Sure, here is a short story.")
+	want := "Sure, here is a short story."
+	if got != want {
+		t.Fatalf("sanitizeVoiceTextForTTS() = %q, want %q", got, want)
+	}
+}
+
 func TestRunInboundSuppressesDuplicateSTTSpeechEndAfterVADFlush(t *testing.T) {
 	results := make(chan stt.TranscriptEvent, 4)
 	vadEvents := make(chan interface{}, 1)
