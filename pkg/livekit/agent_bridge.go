@@ -612,17 +612,7 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	normalized := normalizeToolCalls(resp.ToolCalls)
 	if len(normalized) > 0 {
 		for _, tc := range normalized {
-			argsJSON, _ := json.Marshal(tc.Arguments)
-			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, providers.ToolCall{
-				ID:        tc.ID,
-				Type:      "function",
-				Name:      tc.Name,
-				Arguments: tc.Arguments,
-				Function: &providers.FunctionCall{
-					Name:      tc.Name,
-					Arguments: string(argsJSON),
-				},
-			})
+			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, assistantMessageToolCall(tc))
 		}
 	}
 
@@ -1324,6 +1314,45 @@ func normalizeToolCalls(calls []providers.ToolCall) []providers.ToolCall {
 		out = append(out, providers.NormalizeToolCall(tc))
 	}
 	return out
+}
+
+func assistantMessageToolCall(tc providers.ToolCall) providers.ToolCall {
+	toolCall := providers.NormalizeToolCall(tc)
+	toolCall.Type = "function"
+
+	argsJSON, _ := json.Marshal(toolCall.Arguments)
+	if toolCall.Function == nil {
+		toolCall.Function = &providers.FunctionCall{
+			Name:      toolCall.Name,
+			Arguments: string(argsJSON),
+		}
+	} else {
+		toolCall.Function.Name = toolCall.Name
+		toolCall.Function.Arguments = string(argsJSON)
+	}
+
+	// Gemini requires the original thought signature on assistant tool calls
+	// when the next request includes function results.
+	signature := toolCallThoughtSignature(toolCall)
+	toolCall.ThoughtSignature = signature
+	if toolCall.Function.ThoughtSignature == "" {
+		toolCall.Function.ThoughtSignature = signature
+	}
+
+	return toolCall
+}
+
+func toolCallThoughtSignature(toolCall providers.ToolCall) string {
+	if toolCall.ThoughtSignature != "" {
+		return toolCall.ThoughtSignature
+	}
+	if toolCall.Function != nil && toolCall.Function.ThoughtSignature != "" {
+		return toolCall.Function.ThoughtSignature
+	}
+	if toolCall.ExtraContent != nil && toolCall.ExtraContent.Google != nil {
+		return toolCall.ExtraContent.Google.ThoughtSignature
+	}
+	return ""
 }
 
 // maybeSummarize triggers background context summarization when history grows past

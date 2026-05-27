@@ -50,6 +50,26 @@ func TestShouldHoldShortUtterance(t *testing.T) {
 	}
 }
 
+func TestTTSAudioTailSampleCountUsesSessionSampleRate(t *testing.T) {
+	got := ttsAudioTailSampleCount(24000, liveKitTTSAudioTailMs)
+	if got != 6000 {
+		t.Fatalf("tail sample count = %d, want 6000", got)
+	}
+}
+
+func TestTTSAudioTailSampleCountDefaultsToTwentyFourKilohertz(t *testing.T) {
+	got := ttsAudioTailSampleCount(0, liveKitTTSAudioTailMs)
+	if got != 6000 {
+		t.Fatalf("default tail sample count = %d, want 6000", got)
+	}
+}
+
+func TestFinalTransportTailIsReducedForESPBuffering(t *testing.T) {
+	if liveKitFinalTransportTailMs != 250 {
+		t.Fatalf("final transport tail = %dms, want 250ms", liveKitFinalTransportTailMs)
+	}
+}
+
 func TestRunInboundSuppressesDuplicateSTTSpeechEndAfterVADFlush(t *testing.T) {
 	results := make(chan stt.TranscriptEvent, 4)
 	vadEvents := make(chan interface{}, 1)

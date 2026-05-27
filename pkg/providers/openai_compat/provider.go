@@ -259,9 +259,10 @@ func parseStreamResponse(
 
 	// Tool call assembly: OpenAI streams tool calls as incremental deltas
 	type toolAccum struct {
-		id       string
-		name     string
-		argsJSON strings.Builder
+		id               string
+		name             string
+		thoughtSignature string
+		argsJSON         strings.Builder
 	}
 	activeTools := map[int]*toolAccum{}
 
@@ -294,6 +295,11 @@ func parseStreamResponse(
 							Name      string `json:"name"`
 							Arguments string `json:"arguments"`
 						} `json:"function"`
+						ExtraContent *struct {
+							Google *struct {
+								ThoughtSignature string `json:"thought_signature"`
+							} `json:"google"`
+						} `json:"extra_content"`
 					} `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
@@ -341,6 +347,10 @@ func parseStreamResponse(
 					acc.argsJSON.WriteString(tc.Function.Arguments)
 				}
 			}
+			if tc.ExtraContent != nil && tc.ExtraContent.Google != nil &&
+				tc.ExtraContent.Google.ThoughtSignature != "" {
+				acc.thoughtSignature = tc.ExtraContent.Google.ThoughtSignature
+			}
 		}
 
 		if choice.FinishReason != nil {
@@ -367,11 +377,25 @@ func parseStreamResponse(
 				args["raw"] = raw
 			}
 		}
-		toolCalls = append(toolCalls, ToolCall{
+		toolCall := ToolCall{
 			ID:        acc.id,
 			Name:      acc.name,
 			Arguments: args,
-		})
+		}
+		if acc.thoughtSignature != "" {
+			toolCall.ThoughtSignature = acc.thoughtSignature
+			toolCall.ExtraContent = &ExtraContent{
+				Google: &GoogleExtra{
+					ThoughtSignature: acc.thoughtSignature,
+				},
+			}
+			toolCall.Function = &FunctionCall{
+				Name:             acc.name,
+				Arguments:        raw,
+				ThoughtSignature: acc.thoughtSignature,
+			}
+		}
+		toolCalls = append(toolCalls, toolCall)
 	}
 
 	if finishReason == "" {

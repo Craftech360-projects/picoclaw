@@ -502,7 +502,7 @@ func (rs *RoomSession) handleEndPrompt(prompt string) {
 	rs.PublishAgentState("thinking", "speaking")
 	pipeline.publishSpeechCreated()
 	pipeline.synthesizeAndPlay(ctx, farewellText)
-	pipeline.flushSilenceForContext(ctx, 500)
+	pipeline.flushSilenceForContext(ctx, liveKitFinalTransportTailMs)
 	rs.PublishAgentState("speaking", "listening")
 
 	// Brief pause so TTS audio finishes flushing before we disconnect.

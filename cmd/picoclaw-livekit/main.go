@@ -333,11 +333,18 @@ func main() {
 			})
 		}
 		logger.InfoCF("livekit", "Resolved per-session provider selection", map[string]any{
-			"source":       sessionSelectionSource,
-			"llm_model":    sessionModelID,
-			"tts_provider": sessionCfg.LiveKitService.TTS.Provider,
-			"tts_voice_id": sessionCfg.LiveKitService.TTS.VoiceID,
-			"stt_provider": sessionCfg.LiveKitService.STT.Provider,
+			"source":             sessionSelectionSource,
+			"llm_model_name":     sessionCfg.Agents.Defaults.ModelName,
+			"llm_model":          sessionModelID,
+			"llm_api_base":       resolvedModelAPIBase(sessionCfg, sessionCfg.Agents.Defaults.ModelName),
+			"stt_provider":       sessionCfg.LiveKitService.STT.Provider,
+			"stt_model":          sessionCfg.LiveKitService.STT.Model,
+			"stt_language":       sessionCfg.LiveKitService.STT.Language,
+			"tts_provider":       sessionCfg.LiveKitService.TTS.Provider,
+			"tts_model_id":       sessionCfg.LiveKitService.TTS.ModelID,
+			"tts_voice_id":       sessionCfg.LiveKitService.TTS.VoiceID,
+			"tts_output_format":  sessionCfg.LiveKitService.TTS.OutputFormat,
+			"tts_sample_rate_hz": sessionTTSSampleRate,
 		})
 
 		roomName, roomMetadata, metadataSource := resolveLiveKitJobBootstrapContext(job)
@@ -1592,4 +1599,20 @@ func resolveLiveKitJobBootstrapContext(job *livekitproto.Job) (roomName, metadat
 	}
 
 	return roomName, "", "none"
+}
+
+func resolvedModelAPIBase(cfg *config.Config, modelName string) string {
+	if cfg == nil {
+		return ""
+	}
+	name := strings.TrimSpace(modelName)
+	for _, item := range cfg.ModelList {
+		if item == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(item.ModelName), name) {
+			return strings.TrimSpace(item.APIBase)
+		}
+	}
+	return ""
 }

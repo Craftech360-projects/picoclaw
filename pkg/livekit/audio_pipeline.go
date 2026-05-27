@@ -27,6 +27,12 @@ var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel
 var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
 var dynamicGreetingCooldownUntilUnix atomic.Int64
+
+const (
+	liveKitTTSAudioTailMs       = 250
+	liveKitFinalTransportTailMs = 250
+)
+
 var shortUtteranceHoldPhrases = map[string]struct{}{
 	"hello": {},
 	"hi":    {},
@@ -646,7 +652,7 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 		if latencyMeta != nil {
 			ap.logTurnLatency(latencyMeta, "llm_final_token", time.Since(latencyMeta.LLMStart), nil)
 		}
-		ap.flushSilence(500) // add 500ms silence so device buffer doesn't clip the final word
+		ap.flushSilence(liveKitFinalTransportTailMs) // keep a short transport tail for ESP/LiveKit buffers
 		if ap.session != nil {
 			ap.session.PublishAgentState("speaking", "listening")
 		}
@@ -921,7 +927,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 			if meta := latencyMetaFromContext(turn.ctx); meta != nil {
 				ap.logTurnLatency(meta, "llm_final_token", time.Since(meta.LLMStart), nil)
 			}
-			ap.flushSilenceForContext(turn.ctx, 500)
+			ap.flushSilenceForContext(turn.ctx, liveKitFinalTransportTailMs)
 			ap.session.PublishAgentState("speaking", "listening")
 			ap.maybeDrainQueuedAnnouncements()
 			turn.cancel()
@@ -1471,7 +1477,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		}
 		ap.synthesizeAndPlay(turn.ctx, content)
 		if ap.turns.IsActive(turn) && ap.session != nil {
-			ap.flushSilenceForContext(turn.ctx, 500)
+			ap.flushSilenceForContext(turn.ctx, liveKitFinalTransportTailMs)
 			ap.session.PublishAgentState("speaking", "listening")
 		}
 		ap.maybeDrainQueuedAnnouncements()
@@ -1567,7 +1573,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			if meta := latencyMetaFromContext(turn.ctx); meta != nil {
 				ap.logTurnLatency(meta, "llm_final_token", time.Since(meta.LLMStart), nil)
 			}
-			ap.flushSilenceForContext(turn.ctx, 500) // trailing silence for spontaneous replies
+			ap.flushSilenceForContext(turn.ctx, liveKitFinalTransportTailMs) // trailing silence for spontaneous replies
 			if ap.session != nil {
 				ap.session.PublishAgentState("speaking", "listening")
 			}
@@ -1704,6 +1710,9 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 				"samples_written": samplesWritten,
 				"duration_ms":     time.Since(started).Milliseconds(),
 			})
+			if wroteAudio {
+				ap.writeTTSAudioTail(ctx, liveKitTTSAudioTailMs)
+			}
 			return
 		}
 		if err != nil {
@@ -1900,6 +1909,44 @@ func sampleStats(samples media.PCM16Sample) (int16, int16, int) {
 	}
 
 	return minSample, maxSample, int(totalAbs / int64(len(samples)))
+}
+
+func ttsAudioTailSampleCount(sampleRate, durationMs int) int {
+	if sampleRate <= 0 {
+		sampleRate = 24000
+	}
+	if durationMs <= 0 {
+		return 0
+	}
+	return (sampleRate * durationMs) / 1000
+}
+
+func (ap *AudioPipeline) writeTTSAudioTail(ctx context.Context, durationMs int) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+	if ap.session == nil || ap.session.localTrack == nil {
+		return
+	}
+	sampleCount := ttsAudioTailSampleCount(ap.session.sampleRate, durationMs)
+	if sampleCount == 0 {
+		return
+	}
+	if err := ap.session.localTrack.WriteSample(make(media.PCM16Sample, sampleCount)); err != nil {
+		logger.WarnCF("livekit", "TTS audio tail write failed", map[string]any{
+			"session":     ap.sessionKey(),
+			"duration_ms": durationMs,
+			"error":       err.Error(),
+		})
+		return
+	}
+	logger.DebugCF("livekit", "TTS audio tail written", map[string]any{
+		"session":      ap.sessionKey(),
+		"duration_ms":  durationMs,
+		"sample_count": sampleCount,
+	})
 }
 
 // flushSilence pushes empty audio samples to ensure the end of speech is not cut off by network or device buffers.

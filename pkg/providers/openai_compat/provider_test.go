@@ -109,6 +109,43 @@ func TestProviderChat_ParsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestParseStreamResponsePreservesGeminiThoughtSignature(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"location\""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Bangalore\"}"},"extra_content":{"google":{"thought_signature":"sig123"}}}]}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	out, err := parseStreamResponse(t.Context(), strings.NewReader(stream), nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse() error = %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(out.ToolCalls))
+	}
+	tc := out.ToolCalls[0]
+	if tc.ThoughtSignature != "sig123" {
+		t.Fatalf("ThoughtSignature = %q, want sig123", tc.ThoughtSignature)
+	}
+	if tc.ExtraContent == nil || tc.ExtraContent.Google == nil {
+		t.Fatal("ExtraContent.Google is nil")
+	}
+	if tc.ExtraContent.Google.ThoughtSignature != "sig123" {
+		t.Fatalf("ExtraContent.Google.ThoughtSignature = %q, want sig123", tc.ExtraContent.Google.ThoughtSignature)
+	}
+	if tc.Function == nil {
+		t.Fatal("Function is nil")
+	}
+	if tc.Function.ThoughtSignature != "sig123" {
+		t.Fatalf("Function.ThoughtSignature = %q, want sig123", tc.Function.ThoughtSignature)
+	}
+	if tc.Arguments["location"] != "Bangalore" {
+		t.Fatalf("Arguments[location] = %v, want Bangalore", tc.Arguments["location"])
+	}
+}
+
 func TestProviderChat_ParsesToolCallsWithObjectArguments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
