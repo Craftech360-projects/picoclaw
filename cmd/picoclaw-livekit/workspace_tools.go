@@ -101,15 +101,121 @@ func (t *liveKitWriteGuardTool) Description() string {
 }
 
 func (t *liveKitWriteGuardTool) Parameters() map[string]any {
-	return t.delegate.Parameters()
+	params := cloneToolParameters(t.delegate.Parameters())
+	required, _ := params["required"].([]string)
+	if len(required) == 0 {
+		return params
+	}
+	filtered := make([]string, 0, len(required))
+	for _, item := range required {
+		if strings.EqualFold(strings.TrimSpace(item), "path") {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	params["required"] = filtered
+	return params
 }
 
 func (t *liveKitWriteGuardTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	rawPath, _ := args["path"].(string)
+	args = normalizeLiveKitWriteArgs(args, t.workspace)
+	rawPath, _ = args["path"].(string)
 	if !isLiveKitAllowedWritePath(rawPath, t.workspace) {
 		return tools.ErrorResult("write_file blocked in voice runtime: only USER.md and memory/MEMORY.md are writable")
 	}
 	return t.delegate.Execute(ctx, args)
+}
+
+func normalizeLiveKitWriteArgs(args map[string]any, workspace string) map[string]any {
+	if args == nil {
+		return args
+	}
+	rawPath, _ := args["path"].(string)
+	if isLiveKitAllowedWritePath(rawPath, workspace) {
+		return args
+	}
+	if strings.TrimSpace(rawPath) != "" && !looksLikeWorkspaceRootPath(rawPath, workspace) {
+		return args
+	}
+
+	content, _ := args["content"].(string)
+	target := inferLiveKitWritableProfilePath(content)
+	if target == "" {
+		return args
+	}
+
+	normalized := make(map[string]any, len(args))
+	for key, value := range args {
+		normalized[key] = value
+	}
+	normalized["path"] = target
+	return normalized
+}
+
+func cloneToolParameters(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	out := make(map[string]any, len(params))
+	for key, value := range params {
+		switch typed := value.(type) {
+		case []string:
+			out[key] = append([]string(nil), typed...)
+		case []any:
+			out[key] = append([]any(nil), typed...)
+		case map[string]any:
+			nested := make(map[string]any, len(typed))
+			for nestedKey, nestedValue := range typed {
+				nested[nestedKey] = nestedValue
+			}
+			out[key] = nested
+		default:
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func inferLiveKitWritableProfilePath(content string) string {
+	trimmed := strings.TrimSpace(content)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "# user") ||
+		strings.Contains(lower, "## personal information") ||
+		strings.Contains(lower, "## preferences"):
+		return "USER.md"
+	case strings.HasPrefix(lower, "# memory") ||
+		strings.HasPrefix(lower, "# long-term memory"):
+		return "memory/MEMORY.md"
+	default:
+		return ""
+	}
+}
+
+func looksLikeWorkspaceRootPath(rawPath, workspace string) bool {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return false
+	}
+	cleaned := filepath.Clean(path)
+	if cleaned == "/root" || cleaned == "/root/." {
+		return true
+	}
+	base := strings.ToLower(filepath.Base(cleaned))
+	if base == "workspace-" || strings.HasPrefix(base, "workspace-device-") {
+		return true
+	}
+	if workspace != "" {
+		absWorkspace, err := filepath.Abs(workspace)
+		if err == nil {
+			absPath, err := filepath.Abs(path)
+			if err == nil && absPath == absWorkspace {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func enforceLiveKitWritePathGuard(agentInstance *agent.AgentInstance) {

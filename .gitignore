@@ -81,3 +81,6 @@ livekit-agent.out.log
 tmp/*.tar
 
 tmp/
+web
+web/
+picoclaw-livekit-linux-amd64

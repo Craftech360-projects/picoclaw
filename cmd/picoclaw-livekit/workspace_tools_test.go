@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -129,5 +130,109 @@ func TestEnsureLiveKitWorkspaceFileToolsAllowsOnlyMemoryAndUserFiles(t *testing.
 		if !result.IsError {
 			t.Fatalf("write_file should block path %q", path)
 		}
+	}
+}
+
+func TestLiveKitWriteGuardNormalizesMalformedUserProfilePath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	defaults := cfg.Agents.Defaults
+
+	deviceWorkspace := t.TempDir()
+	instance := &agent.AgentInstance{
+		Workspace: deviceWorkspace,
+		Tools:     tools.NewToolRegistry(),
+	}
+	ensureLiveKitWorkspaceFileTools(instance, &defaults, cfg)
+
+	writeTool, ok := instance.Tools.Get("write_file")
+	if !ok {
+		t.Fatal("write_file should be registered")
+	}
+
+	content := "# User\n\n## Personal Information\n\n- Name: Rahul\n"
+	result := writeTool.Execute(context.Background(), map[string]any{
+		"path":      "/root/picoclaw/workspace-",
+		"content":   content,
+		"overwrite": true,
+	})
+	if result.IsError {
+		t.Fatalf("write_file should normalize malformed profile path, got error: %s", result.ForLLM)
+	}
+
+	got, err := os.ReadFile(filepath.Join(deviceWorkspace, "USER.md"))
+	if err != nil {
+		t.Fatalf("USER.md should be written: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("USER.md content = %q, want %q", string(got), content)
+	}
+}
+
+func TestLiveKitWriteGuardInfersMemoryPathWhenPathMissing(t *testing.T) {
+	cfg := config.DefaultConfig()
+	defaults := cfg.Agents.Defaults
+
+	deviceWorkspace := t.TempDir()
+	instance := &agent.AgentInstance{
+		Workspace: deviceWorkspace,
+		Tools:     tools.NewToolRegistry(),
+	}
+	ensureLiveKitWorkspaceFileTools(instance, &defaults, cfg)
+
+	writeTool, ok := instance.Tools.Get("write_file")
+	if !ok {
+		t.Fatal("write_file should be registered")
+	}
+
+	content := "# Long-term Memory\n\n## User Information\n\n- Name: Rahul\n"
+	result := writeTool.Execute(context.Background(), map[string]any{
+		"content":   content,
+		"overwrite": true,
+	})
+	if result.IsError {
+		t.Fatalf("write_file should infer memory path, got error: %s", result.ForLLM)
+	}
+
+	got, err := os.ReadFile(filepath.Join(deviceWorkspace, "memory", "MEMORY.md"))
+	if err != nil {
+		t.Fatalf("memory/MEMORY.md should be written: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("memory/MEMORY.md content = %q, want %q", string(got), content)
+	}
+}
+
+func TestLiveKitWriteGuardNormalizesRootDotMemoryPath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	defaults := cfg.Agents.Defaults
+
+	deviceWorkspace := t.TempDir()
+	instance := &agent.AgentInstance{
+		Workspace: deviceWorkspace,
+		Tools:     tools.NewToolRegistry(),
+	}
+	ensureLiveKitWorkspaceFileTools(instance, &defaults, cfg)
+
+	writeTool, ok := instance.Tools.Get("write_file")
+	if !ok {
+		t.Fatal("write_file should be registered")
+	}
+
+	content := "# Long-term Memory\n\n## User Information\n\n- Name: Rahul\n"
+	result := writeTool.Execute(context.Background(), map[string]any{
+		"path":      "/root/.",
+		"content":   content,
+		"overwrite": true,
+	})
+	if result.IsError {
+		t.Fatalf("write_file should normalize /root/. memory path, got error: %s", result.ForLLM)
+	}
+
+	got, err := os.ReadFile(filepath.Join(deviceWorkspace, "memory", "MEMORY.md"))
+	if err != nil {
+		t.Fatalf("memory/MEMORY.md should be written: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("memory/MEMORY.md content = %q, want %q", string(got), content)
 	}
 }
