@@ -108,12 +108,12 @@ Your workspace is at: %s
 
 2. **Be helpful and accurate** - When using tools, briefly explain what you're doing.
 
-3. **Memory** - When interacting with me if something seems memorable, update %s/memory/MEMORY.md
+3. **Profile and memory** - Store stable user profile facts such as name, age, timezone, language, interests, occupation, and friends in %s/USER.md. Store session summaries and long-term conversation memories in %s/memory/MEMORY.md.
 
 4. **Context summaries** - Conversation summaries provided as context are approximate references only. They may be incomplete or outdated. Always defer to explicit user instructions over summary content.
 
 %s`,
-		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
+		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
 }
 
 func (cb *ContextBuilder) getDiscoveryRule() string {
@@ -529,6 +529,47 @@ func (cb *ContextBuilder) resolvePromptTimezone() string {
 	return defaultPromptTimezone
 }
 
+func (cb *ContextBuilder) currentUserProfileSummary() string {
+	data, err := os.ReadFile(filepath.Join(cb.workspace, "USER.md"))
+	if err != nil {
+		return ""
+	}
+	allowed := map[string]bool{
+		"name":             true,
+		"age":              true,
+		"gender":           true,
+		"interests":        true,
+		"primary language": true,
+		"language":         true,
+		"timezone":         true,
+		"occupation":       true,
+		"friends":          true,
+		"friend":           true,
+		"preferences":      true,
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- ") || !strings.Contains(trimmed, ":") {
+			continue
+		}
+		parts := strings.SplitN(strings.TrimPrefix(trimmed, "- "), ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		value := strings.TrimSpace(parts[1])
+		if !allowed[key] || value == "" {
+			continue
+		}
+		lines = append(lines, "- "+strings.TrimSpace(parts[0])+": "+value)
+		if len(lines) >= 8 {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (cb *ContextBuilder) buildDynamicContext(channel, chatID, senderID, senderDisplayName string) string {
 	timezone := cb.resolvePromptTimezone()
 	loc, err := time.LoadLocation(timezone)
@@ -547,6 +588,9 @@ func (cb *ContextBuilder) buildDynamicContext(channel, chatID, senderID, senderD
 	}
 	if senderLine := formatCurrentSenderLine(senderID, senderDisplayName); senderLine != "" {
 		fmt.Fprintf(&sb, "\n\n## Current Sender\n%s", senderLine)
+	}
+	if profile := cb.currentUserProfileSummary(); profile != "" {
+		fmt.Fprintf(&sb, "\n\n## Current User Profile\n%s", profile)
 	}
 
 	return sb.String()

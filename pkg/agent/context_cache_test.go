@@ -225,6 +225,25 @@ func TestBuildMessages_CurrentTimeUsesUserTimezoneOrFallback(t *testing.T) {
 	}
 }
 
+func TestBuildMessages_CurrentUserProfileSummarizesUserMarkdown(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"AGENT.md": "# Agent\nTest agent.",
+		"USER.md":  "# User\n\n## User Information\n\n- Name: Rahul\n- Age: 15 years old\n- Interests: space, stories, cricket\n- Timezone: Asia/Kolkata\n",
+	})
+	defer os.RemoveAll(tmpDir)
+
+	cb := NewContextBuilder(tmpDir)
+	msgs := cb.BuildMessages(nil, "", "Do you know me?", nil, "livekit", "chat1", "", "")
+	sys := msgs[0].Content
+
+	if !strings.Contains(sys, "## Current User Profile") {
+		t.Fatalf("system prompt missing current user profile:\n%s", sys)
+	}
+	if !strings.Contains(sys, "- Name: Rahul") || !strings.Contains(sys, "- Age: 15 years old") {
+		t.Fatalf("system prompt missing profile details:\n%s", sys)
+	}
+}
+
 // TestMtimeAutoInvalidation verifies that the cache detects source file changes
 // via mtime without requiring explicit InvalidateCache().
 // Fix: original implementation had no auto-invalidation — edits to bootstrap files,

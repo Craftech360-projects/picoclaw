@@ -100,6 +100,7 @@ func (p *Provider) buildRequestBody(
 	messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) map[string]any {
 	model = normalizeModel(model, p.apiBase)
+	messages = stripThoughtSignaturesFromMessages(messages)
 
 	requestBody := map[string]any{
 		"model":    model,
@@ -154,6 +155,41 @@ func (p *Provider) buildRequestBody(
 	}
 
 	return requestBody
+}
+
+func stripThoughtSignaturesFromMessages(messages []Message) []Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	out := make([]Message, len(messages))
+	for i, msg := range messages {
+		cloned := msg
+		if len(msg.ToolCalls) > 0 {
+			clonedCalls := make([]ToolCall, len(msg.ToolCalls))
+			for j, tc := range msg.ToolCalls {
+				clonedTC := tc
+				clonedTC.ThoughtSignature = ""
+				if tc.Function != nil {
+					fn := *tc.Function
+					fn.ThoughtSignature = ""
+					clonedTC.Function = &fn
+				}
+				if tc.ExtraContent != nil {
+					extra := *tc.ExtraContent
+					if tc.ExtraContent.Google != nil {
+						g := *tc.ExtraContent.Google
+						g.ThoughtSignature = ""
+						extra.Google = &g
+					}
+					clonedTC.ExtraContent = &extra
+				}
+				clonedCalls[j] = clonedTC
+			}
+			cloned.ToolCalls = clonedCalls
+		}
+		out[i] = cloned
+	}
+	return out
 }
 
 func (p *Provider) Chat(

@@ -615,6 +615,16 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, assistantMessageToolCall(tc))
 		}
 	}
+	if len(normalized) == 0 && strings.TrimSpace(assistantMsg.Content) == "" {
+		assistantMsg.Content = emptyAssistantVoiceFallback()
+		logger.WarnCF("livekit", "LLM returned empty final response; using voice fallback", map[string]any{
+			"session": sessionKey,
+			"profile": profile,
+		})
+		if cb != nil {
+			cb(assistantMsg.Content)
+		}
+	}
 
 	messages = append(messages, assistantMsg)
 	ab.recordTranscript(chatTypeAssistant, assistantMsg.Content)
@@ -746,7 +756,7 @@ CRITICAL RULES FOR VOICE:
 1. Keep ALL responses SHORT and conversational — 1-3 sentences max.
 2. For stories and creative requests, give a SHORT spoken version (2-3 sentences). Do not try to generate or save long story files unless the user explicitly asks to save.
 3. NEVER use markdown formatting (**, *, #, backticks, bullet points). Speak in plain natural language.
-4. Do not use write_file for normal conversation output. write_file is only for memory updates in USER.md and memory/MEMORY.md.
+4. Do not use write_file for normal conversation output. Use USER.md for user profile facts like name, age, language, timezone, interests, occupation, and friends. Use memory/MEMORY.md for durable conversation memories and session summaries.
 5. Avoid reading file paths character by character. Say "I saved it to your workspace" instead.
 6. For weather requests, use get_weather first.
 7. For date/time requests, use get_time_date first.
@@ -1353,6 +1363,10 @@ func toolCallThoughtSignature(toolCall providers.ToolCall) string {
 		return toolCall.ExtraContent.Google.ThoughtSignature
 	}
 	return ""
+}
+
+func emptyAssistantVoiceFallback() string {
+	return "Sorry, I got a little stuck. Please say that again."
 }
 
 // maybeSummarize triggers background context summarization when history grows past
