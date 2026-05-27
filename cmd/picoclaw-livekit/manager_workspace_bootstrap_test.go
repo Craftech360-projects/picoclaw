@@ -242,12 +242,12 @@ func TestFormatManagerMemoryContentKeepsMemoryCurated(t *testing.T) {
 
 	got := formatManagerMemoryContent(bootstrap)
 
-	for _, want := range []string{"## Stable Memory", "Rahul is the child using this device", "## Recent Session Summaries", "2026-04-24", "12 messages"} {
+	for _, want := range []string{"## Recent Session Summaries", "2026-04-24", "12 messages"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("memory content missing %q:\n%s", want, got)
 		}
 	}
-	for _, bad := range []string{"Transcript excerpt", "[System Event]", "ended started", "Session summary:\nBad raw text", "Last session highlights"} {
+	for _, bad := range []string{"Transcript excerpt", "[System Event]", "ended started", "Session summary:\nBad raw text", "Last session highlights", "Rahul is the child using this device"} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("memory content contains noisy text %q:\n%s", bad, got)
 		}

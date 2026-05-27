@@ -321,6 +321,10 @@ func formatManagerUserContent(bootstrap managerWorkspaceBootstrap) string {
 
 func formatManagerMemoryContent(bootstrap managerWorkspaceBootstrap) string {
 	const maxStableMemoryItems = 30
+	childName := ""
+	if bootstrap.ChildProfile != nil {
+		childName = bootstrap.ChildProfile.Name
+	}
 
 	var sb strings.Builder
 	stableLines := make([]string, 0, maxStableMemoryItems)
@@ -329,6 +333,9 @@ func formatManagerMemoryContent(bootstrap managerWorkspaceBootstrap) string {
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line == "" {
+				continue
+			}
+			if isChildIdentityMemoryLine(line, childName) {
 				continue
 			}
 			key := strings.ToLower(strings.TrimPrefix(line, "- "))
@@ -449,6 +456,7 @@ func isManagerMemoryNoiseLine(line string) bool {
 	return lower == "overall memory:" ||
 		lower == "session summary:" ||
 		lower == "transcript excerpt:" ||
+		strings.Contains(lower, "is the child using this device") ||
 		strings.HasPrefix(lower, "last session highlights:") ||
 		strings.HasPrefix(lower, "good follow-up topics:") ||
 		strings.HasPrefix(lower, "user:") ||
@@ -458,6 +466,21 @@ func isManagerMemoryNoiseLine(line string) bool {
 		strings.Contains(lower, "[system event]") ||
 		strings.Contains(lower, "successfully connected to the room") ||
 		strings.Contains(lower, "you must end this conversation now")
+}
+
+func isChildIdentityMemoryLine(line, childName string) bool {
+	name := strings.ToLower(strings.TrimSpace(childName))
+	if name == "" {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "- ")))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, name+" is the child using this device") ||
+		strings.Contains(lower, name+" is the child") ||
+		strings.Contains(lower, "child name: "+name) ||
+		strings.HasPrefix(lower, "name: "+name)
 }
 
 func writeManagerSessionSummaries(sb *strings.Builder, summaries []managerWorkspaceSessionSummary) {

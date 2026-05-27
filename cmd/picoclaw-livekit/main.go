@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,14 @@ func main() {
 		os.Exit(1)
 	}
 	logger.SetLevelFromString(*logLevel)
+	if changed, originalWorkspace, normalizedWorkspace, reason := normalizeLiveKitStartupWorkspace(cfg); changed {
+		logger.WarnCF("livekit", "Normalized startup workspace path for current OS", map[string]any{
+			"reason":               reason,
+			"original_workspace":   originalWorkspace,
+			"normalized_workspace": normalizedWorkspace,
+			"goos":                 runtime.GOOS,
+		})
+	}
 	configureLiveKitSDKLogger()
 	configureGoogleCredentials(cfg, cfgPath)
 
@@ -916,6 +925,56 @@ func defaultConfigPath() string {
 		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
 	}
 	return filepath.Join(home, "config.json")
+}
+
+func normalizeLiveKitStartupWorkspace(cfg *config.Config) (changed bool, originalWorkspace, normalizedWorkspace, reason string) {
+	return normalizeLiveKitStartupWorkspaceForGOOS(cfg, runtime.GOOS)
+}
+
+func normalizeLiveKitStartupWorkspaceForGOOS(cfg *config.Config, goos string) (changed bool, originalWorkspace, normalizedWorkspace, reason string) {
+	if cfg == nil {
+		return false, "", "", ""
+	}
+	originalWorkspace = strings.TrimSpace(cfg.Agents.Defaults.Workspace)
+	workspace := originalWorkspace
+
+	if workspace == "" {
+		normalizedWorkspace = defaultWorkspacePathForStartup()
+		cfg.Agents.Defaults.Workspace = normalizedWorkspace
+		return true, originalWorkspace, normalizedWorkspace, "empty_workspace"
+	}
+
+	if goos != "windows" && looksLikeWindowsAbsolutePath(workspace) {
+		normalizedWorkspace = defaultWorkspacePathForStartup()
+		cfg.Agents.Defaults.Workspace = normalizedWorkspace
+		return true, originalWorkspace, normalizedWorkspace, "windows_absolute_path_on_non_windows"
+	}
+
+	return false, originalWorkspace, workspace, ""
+}
+
+func defaultWorkspacePathForStartup() string {
+	home := strings.TrimSpace(os.Getenv(config.EnvHome))
+	if home == "" {
+		userHome, _ := os.UserHomeDir()
+		home = filepath.Join(userHome, pkg.DefaultPicoClawHome)
+	}
+	return filepath.Join(home, pkg.WorkspaceName)
+}
+
+func looksLikeWindowsAbsolutePath(path string) bool {
+	if len(path) < 3 {
+		return false
+	}
+	drive := path[0]
+	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
+		return false
+	}
+	if path[1] != ':' {
+		return false
+	}
+	sep := path[2]
+	return sep == '\\' || sep == '/'
 }
 
 func liveKitStrictConfigEnabled() bool {

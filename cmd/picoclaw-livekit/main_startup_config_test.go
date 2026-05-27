@@ -8,6 +8,72 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+func TestNormalizeLiveKitStartupWorkspaceForGOOS_EmptyWorkspaceGetsDefault(t *testing.T) {
+	t.Setenv(config.EnvHome, "/tmp/picoclaw-home")
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = ""
+
+	changed, original, normalized, reason := normalizeLiveKitStartupWorkspaceForGOOS(cfg, "linux")
+	if !changed {
+		t.Fatalf("expected workspace normalization for empty workspace")
+	}
+	if original != "" {
+		t.Fatalf("original workspace = %q, want empty", original)
+	}
+	want := filepath.Join("/tmp/picoclaw-home", "workspace")
+	if normalized != want {
+		t.Fatalf("normalized workspace = %q, want %q", normalized, want)
+	}
+	if cfg.Agents.Defaults.Workspace != want {
+		t.Fatalf("cfg workspace = %q, want %q", cfg.Agents.Defaults.Workspace, want)
+	}
+	if reason != "empty_workspace" {
+		t.Fatalf("reason = %q, want %q", reason, "empty_workspace")
+	}
+}
+
+func TestNormalizeLiveKitStartupWorkspaceForGOOS_WindowsPathOnLinuxGetsDefault(t *testing.T) {
+	t.Setenv(config.EnvHome, "/tmp/picoclaw-home")
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = `C:\\Users\\rahul\\.picoclaw\\workspace`
+
+	changed, original, normalized, reason := normalizeLiveKitStartupWorkspaceForGOOS(cfg, "linux")
+	if !changed {
+		t.Fatalf("expected workspace normalization for Windows path on linux")
+	}
+	if original != `C:\\Users\\rahul\\.picoclaw\\workspace` {
+		t.Fatalf("original workspace = %q", original)
+	}
+	want := filepath.Join("/tmp/picoclaw-home", "workspace")
+	if normalized != want {
+		t.Fatalf("normalized workspace = %q, want %q", normalized, want)
+	}
+	if cfg.Agents.Defaults.Workspace != want {
+		t.Fatalf("cfg workspace = %q, want %q", cfg.Agents.Defaults.Workspace, want)
+	}
+	if reason != "windows_absolute_path_on_non_windows" {
+		t.Fatalf("reason = %q, want %q", reason, "windows_absolute_path_on_non_windows")
+	}
+}
+
+func TestNormalizeLiveKitStartupWorkspaceForGOOS_LinuxPathUnchanged(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = "/var/lib/picoclaw/workspace"
+
+	changed, original, normalized, reason := normalizeLiveKitStartupWorkspaceForGOOS(cfg, "linux")
+	if changed {
+		t.Fatalf("did not expect workspace normalization")
+	}
+	if original != "/var/lib/picoclaw/workspace" || normalized != "/var/lib/picoclaw/workspace" {
+		t.Fatalf("original=%q normalized=%q", original, normalized)
+	}
+	if reason != "" {
+		t.Fatalf("reason = %q, want empty", reason)
+	}
+}
+
 func TestValidateLiveKitStartupConfigFilesStrictSuccess(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.json")

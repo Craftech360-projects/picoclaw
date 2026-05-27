@@ -118,13 +118,20 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 		}
 	}
 
+	userPath := filepath.Join(workspace, "USER.md")
 	userContent := strings.TrimSpace(opts.UserContent)
 	if userContent != "" {
-		if err := writeFileIfMissingOrBlank(filepath.Join(workspace, "USER.md"), ensureTrailingNewline(userContent), 0o644); err != nil {
-			return result, err
+		if shouldRefresh, _ := shouldRefreshUserFromMetadata(userPath, false); shouldRefresh {
+			if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
+				return result, err
+			}
+		} else {
+			if err := writeFileIfMissingOrBlank(userPath, ensureTrailingNewline(userContent), 0o644); err != nil {
+				return result, err
+			}
 		}
 	} else {
-		if err := writeFileIfMissingOrBlank(filepath.Join(workspace, "USER.md"), "# User\n\nNo user profile override has been hydrated for this session.\n", 0o644); err != nil {
+		if err := writeFileIfMissingOrBlank(userPath, "# User\n\nNo user profile override has been hydrated for this session.\n", 0o644); err != nil {
 			return result, err
 		}
 	}
@@ -804,10 +811,14 @@ func syncUserTimezoneInFile(userPath, desiredTimezone string) (bool, string, err
 }
 
 func formatRoomMetadataMemoryContent(md roomMetadata) string {
+	childName := strings.TrimSpace(md.ChildProfile.Name)
 	var sb strings.Builder
 	for _, memory := range md.LongTermMemories {
 		memory = strings.TrimSpace(memory)
 		if memory == "" {
+			continue
+		}
+		if isChildIdentityMemoryLine(memory, childName) {
 			continue
 		}
 		sb.WriteString("- ")
