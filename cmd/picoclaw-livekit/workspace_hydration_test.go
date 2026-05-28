@@ -318,6 +318,92 @@ func TestHydrateLiveKitWorkspaceSkeletonSeedsCoreFilesFromTemplateSources(t *tes
 	assertFileEquals("memory/MEMORY.md", "# Memory\n\nTemplate memory.\n")
 }
 
+func TestHydrateLiveKitWorkspaceSkeletonFirstTimeOverwritesTemplateUserWithMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	templateWorkspace := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(templateWorkspace, "USER.md"), "# User\n\n- Name: Template Kid\n- Age: 8 years old\n")
+
+	_, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs:   []string{templateWorkspace},
+		FirstTimeWorkspace:   true,
+		UserContent:          "# User\n\n- Name: Rahul\n- Age: 6 years old\n- Interests: science\n",
+		IdentityContent:      "# Identity\n\nRoom profile",
+		SessionContextContent: "",
+	})
+	if err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+
+	userData, err := os.ReadFile(filepath.Join(workspace, "USER.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(USER.md) error = %v", err)
+	}
+	userText := string(userData)
+	if !strings.Contains(userText, "Name: Rahul") {
+		t.Fatalf("USER.md should include room metadata name, got %q", userText)
+	}
+	if strings.Contains(userText, "Template Kid") {
+		t.Fatalf("USER.md should not keep template user on first-time workspace, got %q", userText)
+	}
+}
+
+func TestHydrateLiveKitWorkspaceSkeletonFirstTimeRendersTemplateUserAndKeepsSections(t *testing.T) {
+	workspace := t.TempDir()
+	templateWorkspace := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(templateWorkspace, "USER.md"), `# User
+
+Information about the user goes here.
+
+## User Information
+{{ if .ChildProfile.Name }}- Name: {{ .ChildProfile.Name }}{{ end }}
+{{ if .ChildProfile.Age }}- Age: {{ .ChildProfile.Age }} years old{{ end }}
+{{ if .ChildProfile.Interests }}- Interests: {{ .ChildProfile.Interests }}{{ end }}
+
+## Preferences
+- Communication style: (casual/formal)
+
+## Learning Goals
+- What the user wants to learn from AI
+`)
+
+	_, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs: []string{templateWorkspace},
+		FirstTimeWorkspace: true,
+		UserContent:        "# User\n\n- Name: Fallback\n",
+		ChildProfile: roomMetadataChildProfile{
+			Name:      "Shriyansh",
+			Age:       4,
+			Interests: "space, stories, cricket",
+		},
+	})
+	if err != nil {
+		t.Fatalf("hydrateLiveKitWorkspaceSkeleton returned error: %v", err)
+	}
+
+	userData, err := os.ReadFile(filepath.Join(workspace, "USER.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(USER.md) error = %v", err)
+	}
+	userText := string(userData)
+	for _, want := range []string{
+		"Information about the user goes here.",
+		"## Preferences",
+		"## Learning Goals",
+		"- Name: Shriyansh",
+		"- Age: 4 years old",
+		"- Interests: space, stories, cricket",
+	} {
+		if !strings.Contains(userText, want) {
+			t.Fatalf("USER.md missing %q: %q", want, userText)
+		}
+	}
+	if strings.Contains(userText, "{{") {
+		t.Fatalf("USER.md should not keep template markers: %q", userText)
+	}
+}
+
 func TestHydrateLiveKitWorkspaceSkeletonRendersMemoryTemplateFromChildProfile(t *testing.T) {
 	workspace := t.TempDir()
 	templateWorkspace := t.TempDir()
@@ -551,8 +637,8 @@ func TestShouldRefreshUserFromMetadata(t *testing.T) {
 	if should, reason := shouldRefreshUserFromMetadata(userPath, false); !should || reason != "missing_child_profile_fields" {
 		t.Fatalf("sparse file = (%v, %q), want (true, missing_child_profile_fields)", should, reason)
 	}
-	if should, reason := shouldRefreshUserFromMetadata(userPath, true); should || reason != "existing_user_md_first_time" {
-		t.Fatalf("first time existing file = (%v, %q), want (false, existing_user_md_first_time)", should, reason)
+	if should, reason := shouldRefreshUserFromMetadata(userPath, true); !should || reason != "first_time_workspace_existing_user_md" {
+		t.Fatalf("first time existing file = (%v, %q), want (true, first_time_workspace_existing_user_md)", should, reason)
 	}
 
 	if err := os.WriteFile(userPath, []byte("# User\n\n- Name: Rahul\n- Primary language: en\n"), 0o644); err != nil {

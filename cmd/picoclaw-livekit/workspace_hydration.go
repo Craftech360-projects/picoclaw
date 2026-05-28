@@ -21,6 +21,7 @@ type liveKitWorkspaceHydrationOptions struct {
 	UserContent           string
 	MemoryContent         string
 	ChildProfile          roomMetadataChildProfile
+	FirstTimeWorkspace    bool
 	SessionContextContent string
 	TemplateSourceDir     string
 	TemplateSourceDirs    []string
@@ -121,8 +122,14 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 	userPath := filepath.Join(workspace, "USER.md")
 	userContent := strings.TrimSpace(opts.UserContent)
 	if userContent != "" {
-		if shouldRefresh, _ := shouldRefreshUserFromMetadata(userPath, false); shouldRefresh {
-			if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(userContent)), 0o644); err != nil {
+		if shouldRefresh, _ := shouldRefreshUserFromMetadata(userPath, opts.FirstTimeWorkspace); shouldRefresh {
+			contentToWrite := ensureTrailingNewline(userContent)
+			if existingUser, err := os.ReadFile(userPath); err == nil && hasTemplateMarkers(string(existingUser)) {
+				if rendered, ok := renderUserTemplateWithChildProfile(string(existingUser), opts.ChildProfile); ok {
+					contentToWrite = ensureTrailingNewline(rendered)
+				}
+			}
+			if err := os.WriteFile(userPath, []byte(contentToWrite), 0o644); err != nil {
 				return result, err
 			}
 		} else {
@@ -467,6 +474,47 @@ func renderMemoryTemplateWithChildProfile(
 	return rendered, true
 }
 
+func renderUserTemplateWithChildProfile(
+	content string,
+	child roomMetadataChildProfile,
+) (string, bool) {
+	if strings.TrimSpace(content) == "" || !hasTemplateMarkers(content) {
+		return "", false
+	}
+
+	tmplText := normalizeMemoryTemplateSyntax(content)
+	tmpl, err := template.New("user").Option("missingkey=zero").Parse(tmplText)
+	if err != nil {
+		return "", false
+	}
+
+	ctx := struct {
+		ChildName      string
+		ChildAge       int
+		ChildGender    string
+		ChildInterests string
+		ChildTimezone  string
+		ChildProfile   roomMetadataChildProfile
+	}{
+		ChildName:      strings.TrimSpace(child.Name),
+		ChildAge:       child.Age,
+		ChildGender:    strings.TrimSpace(child.Gender),
+		ChildInterests: strings.TrimSpace(child.Interests),
+		ChildTimezone:  strings.TrimSpace(child.Timezone),
+		ChildProfile:   child,
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, ctx); err != nil {
+		return "", false
+	}
+	rendered := strings.TrimSpace(out.String())
+	if rendered == "" {
+		return "", false
+	}
+	return rendered, true
+}
+
 func ensureTrailingNewline(content string) string {
 	if strings.HasSuffix(content, "\n") {
 		return content
@@ -728,11 +776,10 @@ func shouldRefreshUserFromMetadata(userPath string, firstTimeWorkspace bool) (bo
 	if strings.Contains(trimmed, "No user profile override has been hydrated") {
 		return true, "placeholder_user_md"
 	}
-	// If USER.md already exists on disk (typically restored from manager DB),
-	// treat it as authoritative on first-time ephemeral workspace boot and avoid
-	// overwriting with room metadata.
+	// On first-time workspace boot, USER.md usually comes from a generic template.
+	// Refresh with current room metadata so kid profile fields are present immediately.
 	if firstTimeWorkspace {
-		return false, "existing_user_md_first_time"
+		return true, "first_time_workspace_existing_user_md"
 	}
 	if !userProfileHasChildDetails(trimmed) {
 		return true, "missing_child_profile_fields"

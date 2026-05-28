@@ -560,6 +560,11 @@ func main() {
 			)
 		}
 		if workspace != "" {
+			firstTimeWorkspace := false
+			if _, err := os.Stat(filepath.Join(workspace, "USER.md")); os.IsNotExist(err) {
+				firstTimeWorkspace = true
+			}
+			hydrationOptions.FirstTimeWorkspace = firstTimeWorkspace
 			hydration, err := hydrateLiveKitWorkspaceSkeleton(
 				workspace,
 				hydrationOptions,
