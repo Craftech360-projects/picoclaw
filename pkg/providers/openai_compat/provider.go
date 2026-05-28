@@ -100,7 +100,11 @@ func (p *Provider) buildRequestBody(
 	messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) map[string]any {
 	model = normalizeModel(model, p.apiBase)
-	messages = stripThoughtSignaturesFromMessages(messages)
+	// Gemini requires thought signatures to be preserved across tool-call turns.
+	// Strip only for non-Gemini OpenAI-compatible providers that reject this field.
+	if !isGeminiModelID(model) {
+		messages = stripThoughtSignaturesFromMessages(messages)
+	}
 
 	requestBody := map[string]any{
 		"model":    model,
@@ -407,11 +411,18 @@ func parseStreamResponse(
 		}
 		args := make(map[string]any)
 		raw := acc.argsJSON.String()
+		argsValid := true
 		if raw != "" {
-			if err := json.Unmarshal([]byte(raw), &args); err != nil {
-				log.Printf("openai_compat stream: failed to decode tool call arguments for %q: %v", acc.name, err)
-				args["raw"] = raw
+			parsed, ok := parseToolArgsBestEffort(raw)
+			if !ok {
+				argsValid = false
+				log.Printf("openai_compat stream: dropping malformed tool call for %q (invalid arguments JSON)", acc.name)
+			} else {
+				args = parsed
 			}
+		}
+		if !argsValid {
+			continue
 		}
 		toolCall := ToolCall{
 			ID:        acc.id,
@@ -444,6 +455,37 @@ func parseStreamResponse(
 		FinishReason: finishReason,
 		Usage:        usage,
 	}, nil
+}
+
+func parseToolArgsBestEffort(raw string) (map[string]any, bool) {
+	out := make(map[string]any)
+	if strings.TrimSpace(raw) == "" {
+		return out, true
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err == nil {
+		return out, true
+	}
+	fixed := strings.TrimSpace(raw)
+	// Common streamed truncation case: missing trailing braces.
+	if strings.HasPrefix(fixed, "{") {
+		openCount := strings.Count(fixed, "{")
+		closeCount := strings.Count(fixed, "}")
+		if closeCount < openCount {
+			fixed += strings.Repeat("}", openCount-closeCount)
+			if err := json.Unmarshal([]byte(fixed), &out); err == nil {
+				return out, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func isGeminiModelID(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" {
+		return false
+	}
+	return strings.HasPrefix(lower, "gemini/") || strings.Contains(lower, "gemini-")
 }
 
 func normalizeModel(model, apiBase string) string {

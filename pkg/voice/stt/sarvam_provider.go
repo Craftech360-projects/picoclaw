@@ -141,10 +141,18 @@ func (s *sarvamStreamAdapter) Close() error {
 	return nil
 }
 
-func (s *sarvamStreamAdapter) transcribeLocked() error {
+func (s *sarvamStreamAdapter) transcribeLocked() (err error) {
 	if len(s.audioBuffer) == 0 {
 		return nil
 	}
+	// Do not carry failed audio into the next segment. If this transcription
+	// attempt fails for any reason (provider rejects long audio, network/API
+	// error, decode failure), drop the buffered segment.
+	defer func() {
+		if err != nil {
+			s.audioBuffer = s.audioBuffer[:0]
+		}
+	}()
 
 	wavData, err := createWAVFromPCM(s.audioBuffer, s.sampleRate)
 	if err != nil {

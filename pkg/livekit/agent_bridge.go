@@ -582,7 +582,21 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	defer releaseLLMSlot()
 
 	callStarted := time.Now()
-	resp, err := ab.callLLM(ctx, sessionKey, messages, toolDefs, ab.optionsForProfile(profile), cb)
+	llmOpts := ab.optionsForProfile(profile)
+	ensureToolCallTokenBudget(ab.modelID, llmOpts, len(toolDefs))
+	logger.InfoCF("livekit", "LLM request config", map[string]any{
+		"session":      sessionKey,
+		"profile":      profile,
+		"model_id":     ab.modelID,
+		"provider":     modelProtocol(ab.modelID),
+		"messages":     len(messages),
+		"tools":        len(toolDefs),
+		"max_tokens":   llmOptionValue(llmOpts, "max_tokens"),
+		"temperature":  llmOptionValue(llmOpts, "temperature"),
+		"streaming":    ab.streamProvider != nil,
+		"rate_retry_429": ab.shouldRetryGeminiRateLimit(),
+	})
+	resp, err := ab.callLLM(ctx, sessionKey, messages, toolDefs, llmOpts, cb)
 	if err != nil {
 		ab.EmitRuntimeEvent(RuntimeEvent{
 			Kind:       "turn_error",
@@ -1069,6 +1083,72 @@ func cloneOptions(src map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func llmOptionValue(options map[string]any, key string) any {
+	if options == nil {
+		return nil
+	}
+	v, ok := options[key]
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+func ensureToolCallTokenBudget(modelID string, options map[string]any, toolCount int) {
+	if options == nil || toolCount <= 0 {
+		return
+	}
+	current := optionInt(options["max_tokens"])
+	minTokens := 0
+	lower := strings.ToLower(strings.TrimSpace(modelID))
+	switch {
+	case strings.Contains(lower, "gpt-5-nano"):
+		minTokens = 420
+	case strings.Contains(lower, "gpt-4.1-nano"):
+		minTokens = 380
+	case strings.Contains(lower, "gpt-4.1-mini"):
+		minTokens = 320
+	default:
+		minTokens = 260
+	}
+	if current < minTokens {
+		options["max_tokens"] = minTokens
+	}
+}
+
+func optionInt(v any) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case float32:
+		return int(t)
+	case json.Number:
+		n, err := t.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func modelProtocol(modelID string) string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) < 2 {
+		return "unknown"
+	}
+	return strings.ToLower(parts[0])
 }
 
 func trimForLog(content string, limit int) string {
