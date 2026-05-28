@@ -646,6 +646,7 @@ func formatRoomMetadataIdentityContent(md roomMetadata) string {
 func formatRoomMetadataUserContent(md roomMetadata) string {
 	var sb strings.Builder
 	sb.WriteString("# User\n\n")
+	sb.WriteString("## User Information\n\n")
 	if name := strings.TrimSpace(md.ChildProfile.Name); name != "" {
 		sb.WriteString("- Name: ")
 		sb.WriteString(name)
@@ -654,11 +655,7 @@ func formatRoomMetadataUserContent(md roomMetadata) string {
 	if md.ChildProfile.Age > 0 {
 		sb.WriteString("- Age: ")
 		sb.WriteString(strconv.Itoa(md.ChildProfile.Age))
-		sb.WriteString("\n")
-	}
-	if gender := strings.TrimSpace(md.ChildProfile.Gender); gender != "" {
-		sb.WriteString("- Gender: ")
-		sb.WriteString(gender)
+		sb.WriteString(" years old")
 		sb.WriteString("\n")
 	}
 	if interests := strings.TrimSpace(md.ChildProfile.Interests); interests != "" {
@@ -666,9 +663,9 @@ func formatRoomMetadataUserContent(md roomMetadata) string {
 		sb.WriteString(interests)
 		sb.WriteString("\n")
 	}
-	if language := strings.TrimSpace(md.PrimaryLanguage); language != "" {
-		sb.WriteString("- Primary language: ")
-		sb.WriteString(language)
+	if gender := strings.TrimSpace(md.ChildProfile.Gender); gender != "" {
+		sb.WriteString("- Gender: ")
+		sb.WriteString(gender)
 		sb.WriteString("\n")
 	}
 	timezone := strings.TrimSpace(md.ChildProfile.Timezone)
@@ -678,6 +675,11 @@ func formatRoomMetadataUserContent(md roomMetadata) string {
 	sb.WriteString("- Timezone: ")
 	sb.WriteString(timezone)
 	sb.WriteString("\n")
+	if language := strings.TrimSpace(md.PrimaryLanguage); language != "" {
+		sb.WriteString("- Primary language: ")
+		sb.WriteString(language)
+		sb.WriteString("\n")
+	}
 	if notes := strings.TrimSpace(md.AdditionalNotes); notes != "" {
 		sb.WriteString("\n## Additional Notes\n\n")
 		sb.WriteString(notes)
