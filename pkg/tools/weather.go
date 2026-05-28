@@ -27,6 +27,15 @@ type GetWeatherTool struct {
 	wttrURL     string
 }
 
+type openMeteoGeoResult struct {
+	Name      string  `json:"name"`
+	Country   string  `json:"country"`
+	Admin1    string  `json:"admin1"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Timezone  string  `json:"timezone"`
+}
+
 func NewGetWeatherTool() *GetWeatherTool {
 	return NewGetWeatherToolWithConfig(nil, "", "", "")
 }
@@ -111,29 +120,10 @@ func (t *GetWeatherTool) Execute(ctx context.Context, args map[string]any) *Tool
 }
 
 func (t *GetWeatherTool) fetchOpenMeteo(ctx context.Context, location, unit string) (*ToolResult, error) {
-	geoURL := t.geocodeURL + "?name=" + url.QueryEscape(location) + "&count=1&language=en&format=json"
-	geoBody, err := t.httpGet(ctx, geoURL)
+	match, err := t.resolveOpenMeteoLocation(ctx, location)
 	if err != nil {
-		return nil, fmt.Errorf("geocode request failed: %w", err)
-	}
-
-	var geoResp struct {
-		Results []struct {
-			Name      string  `json:"name"`
-			Country   string  `json:"country"`
-			Admin1    string  `json:"admin1"`
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
-			Timezone  string  `json:"timezone"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(geoBody, &geoResp); err != nil {
-		return nil, fmt.Errorf("geocode decode failed: %w", err)
-	}
-	if len(geoResp.Results) == 0 {
 		return nil, fmt.Errorf("location not found")
 	}
-	match := geoResp.Results[0]
 
 	tempUnit := "celsius"
 	windUnit := "kmh"
@@ -213,6 +203,47 @@ func (t *GetWeatherTool) fetchOpenMeteo(ctx context.Context, location, unit stri
 			windUnit,
 		),
 	}, nil
+}
+
+func (t *GetWeatherTool) resolveOpenMeteoLocation(ctx context.Context, location string) (*openMeteoGeoResult, error) {
+	results, err := t.geocodeOpenMeteo(ctx, location)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("location not found")
+	}
+	match := results[0]
+	if shouldUseBengaluruAlias(location, match.Country) {
+		aliasResults, aliasErr := t.geocodeOpenMeteo(ctx, "Bengaluru")
+		if aliasErr == nil && len(aliasResults) > 0 {
+			match = aliasResults[0]
+		}
+	}
+	return &match, nil
+}
+
+func (t *GetWeatherTool) geocodeOpenMeteo(ctx context.Context, location string) ([]openMeteoGeoResult, error) {
+	geoURL := t.geocodeURL + "?name=" + url.QueryEscape(location) + "&count=1&language=en&format=json"
+	geoBody, err := t.httpGet(ctx, geoURL)
+	if err != nil {
+		return nil, fmt.Errorf("geocode request failed: %w", err)
+	}
+	var geoResp struct {
+		Results []openMeteoGeoResult `json:"results"`
+	}
+	if err := json.Unmarshal(geoBody, &geoResp); err != nil {
+		return nil, fmt.Errorf("geocode decode failed: %w", err)
+	}
+	return geoResp.Results, nil
+}
+
+func shouldUseBengaluruAlias(location, country string) bool {
+	key := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(location)), " "))
+	if strings.Contains(key, ",") {
+		return false
+	}
+	return key == "bangalore" && !strings.EqualFold(strings.TrimSpace(country), "India")
 }
 
 func (t *GetWeatherTool) fetchWttr(ctx context.Context, location string) (*ToolResult, error) {
