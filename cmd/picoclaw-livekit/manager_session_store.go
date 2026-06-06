@@ -67,7 +67,6 @@ func managerSessionStoreEnabled(cfg config.LiveKitServiceManagerAPIConfig) bool 
 
 func managerAPIBaseURL(cfg config.LiveKitServiceManagerAPIConfig) string {
 	for _, value := range []string{
-		os.Getenv("PICOCLAW_LIVEKIT_MANAGER_API_URL"),
 		os.Getenv("MANAGER_API_URL"),
 		cfg.BaseURL,
 	} {

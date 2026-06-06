@@ -1,0 +1,42 @@
+FROM golang:1.25-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    libc++-dev \
+    libc++abi-dev \
+    libopus-dev \
+    libopusfile-dev \
+    libsoxr-dev \
+    pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CGO_LDFLAGS="-lc++ -lc++abi -lm" \
+    go build -trimpath -ldflags="-s -w" -o /out/picoclaw-livekit ./cmd/picoclaw-livekit
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libc++1 \
+    libc++abi1 \
+    libopus0 \
+    libopusfile0 \
+    libsoxr0 \
+    libunwind8 \
+    tzdata \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /out/picoclaw-livekit /usr/local/bin/picoclaw-livekit
+COPY third_party/ten-vad/lib/Linux/x64/libten_vad.so /usr/local/third_party/ten-vad/lib/Linux/x64/libten_vad.so
+COPY workspace-template /usr/local/bin/workspace-template
+COPY prompts/cheeko.tmpl ./prompts/cheeko.tmpl
+
+EXPOSE 8192
+ENTRYPOINT ["picoclaw-livekit"]

@@ -8,7 +8,7 @@ import (
 
 func TestBuildManagerSessionStoreUsesEnvEnablementFallback(t *testing.T) {
 	t.Setenv("PICOCLAW_LIVEKIT_MANAGER_SESSION_STORE_ENABLED", "true")
-	t.Setenv("PICOCLAW_LIVEKIT_MANAGER_API_URL", "http://manager.test/toy")
+	t.Setenv("MANAGER_API_URL", "http://manager.test/toy")
 	t.Setenv("MANAGER_API_SECRET", "test-secret")
 
 	store := buildManagerSessionStore(
@@ -71,8 +71,7 @@ func TestBuildManagerSessionStoreRequiresDeviceMACAndSessionID(t *testing.T) {
 }
 
 func TestManagerAPIBaseURLPrefersEnvOverConfig(t *testing.T) {
-	t.Setenv("PICOCLAW_LIVEKIT_MANAGER_API_URL", "http://env-primary.test/toy")
-	t.Setenv("MANAGER_API_URL", "http://env-secondary.test/toy")
+	t.Setenv("MANAGER_API_URL", "http://env-primary.test/toy")
 
 	got := managerAPIBaseURL(config.LiveKitServiceManagerAPIConfig{
 		BaseURL: "http://config.test/toy",

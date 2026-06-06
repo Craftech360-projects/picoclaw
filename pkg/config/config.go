@@ -865,7 +865,7 @@ type LiveKitServiceSTTConfig struct {
 // standalone LiveKit voice agent service. Service credentials are intentionally
 // read from environment variables by the worker, not persisted in config.json.
 type LiveKitServiceManagerAPIConfig struct {
-	BaseURL             string                        `json:"base_url,omitempty"              env:"PICOCLAW_LIVEKIT_MANAGER_API_URL"`
+	BaseURL             string                        `json:"base_url,omitempty"              env:"MANAGER_API_URL"`
 	SessionStoreEnabled bool                          `json:"session_store_enabled,omitempty" env:"PICOCLAW_LIVEKIT_MANAGER_SESSION_STORE_ENABLED"`
 	RecentLimit         int                           `json:"recent_limit,omitempty"          env:"PICOCLAW_LIVEKIT_MANAGER_RECENT_LIMIT"`
 	WorkspaceSync       LiveKitWorkspaceSyncConfig    `json:"workspace_sync,omitempty"    envPrefix:"PICOCLAW_LIVEKIT_WORKSPACE_SYNC_"`

@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">HPA scaling with minReplicas set to 1</title>
+  <desc id="desc">Visual explanation of Kubernetes HPA scaling from one warm LiveKit agent pod using MAX_SESSIONS 20 and HPA target 50 percent.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fffaf0"/>
+      <stop offset="55%" stop-color="#f4e7c9"/>
+      <stop offset="100%" stop-color="#e7d3a4"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2f7d55"/>
+      <stop offset="100%" stop-color="#8cbf4c"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f3ca69"/>
+      <stop offset="100%" stop-color="#e7a72f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#392b14" flood-opacity="0.18"/>
+    </filter>
+    <style>
+      .title { font: 800 68px Georgia, Cambria, serif; letter-spacing: -3px; fill: #172018; }
+      .subtitle { font: 500 26px Aptos, Bahnschrift, Segoe UI, sans-serif; fill: #5f6f60; }
+      .h2 { font: 800 31px Aptos, Bahnschrift, Segoe UI, sans-serif; fill: #172018; }
+      .h3 { font: 800 24px Aptos, Bahnschrift, Segoe UI, sans-serif; fill: #172018; }
+      .body { font: 500 21px Aptos, Bahnschrift, Segoe UI, sans-serif; fill: #5f6f60; }
+      .small { font: 600 18px Aptos, Bahnschrift, Segoe UI, sans-serif; fill: #5f6f60; }
+      .white { fill: #fff8e8; }
+      .dark { fill: #172018; }
+      .muted { fill: #5f6f60; }
+      .card { fill: rgba(255, 252, 242, 0.86); stroke: rgba(23, 32, 24, 0.14); stroke-width: 2; }
+      .pill { fill: rgba(47, 125, 85, 0.12); stroke: rgba(47, 125, 85, 0.26); stroke-width: 2; }
+      .arrow { stroke: #172018; stroke-width: 7; stroke-linecap: round; fill: none; }
+      .dash { stroke: #d95f59; stroke-width: 5; stroke-linecap: round; stroke-dasharray: 12 14; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1040" fill="url(#bg)"/>
+  <circle cx="180" cy="120" r="260" fill="#e7a72f" opacity="0.18"/>
+  <circle cx="1420" cy="90" r="280" fill="#2f7d55" opacity="0.16"/>
+
+  <rect x="70" y="58" width="1460" height="196" rx="42" class="card" filter="url(#shadow)"/>
+  <rect x="104" y="92" width="382" height="42" rx="21" class="pill"/>
+  <text x="125" y="121" class="small" fill="#195b3b">Picoclaw LiveKit HPA model</text>
+  <text x="104" y="188" class="title">What if minReplicas = 1?</text>
+  <text x="825" y="153" class="subtitle">HPA can scale, but it reacts after load appears.</text>
+  <text x="825" y="190" class="subtitle">Gradual growth is okay. Sudden spikes create cold-start risk.</text>
+
+  <rect x="70" y="296" width="450" height="300" rx="36" class="card" filter="url(#shadow)"/>
+  <text x="106" y="350" class="h2">1. Start state</text>
+  <text x="106" y="392" class="body">Only one Go LiveKit worker pod</text>
+  <text x="106" y="424" class="body">is warm and ready.</text>
+  <rect x="112" y="470" width="120" height="88" rx="26" fill="url(#green)"/>
+  <text x="172" y="508" text-anchor="middle" class="h3 white">P1</text>
+  <text x="172" y="537" text-anchor="middle" class="small white">warm</text>
+  <text x="268" y="504" class="h3">minReplicas=1</text>
+  <text x="268" y="536" class="small">lowest cost, least warm capacity</text>
+
+  <rect x="575" y="296" width="450" height="300" rx="36" class="card" filter="url(#shadow)"/>
+  <text x="611" y="350" class="h2">2. HPA target</text>
+  <text x="611" y="392" class="body">MAX_SESSIONS=12 and target=50%</text>
+  <text x="611" y="424" class="body">means 6 sessions per pod is the test target.</text>
+  <rect x="616" y="468" width="360" height="42" rx="21" fill="#172018" opacity="0.12"/>
+  <rect x="616" y="468" width="180" height="42" rx="21" fill="url(#green)"/>
+  <text x="796" y="550" text-anchor="middle" class="h3">6 sessions = 50%</text>
+  <text x="796" y="580" text-anchor="middle" class="small">Observe before scaling</text>
+
+  <rect x="1080" y="296" width="450" height="300" rx="36" class="card" filter="url(#shadow)"/>
+  <text x="1116" y="350" class="h2">3. New pod is cold first</text>
+  <text x="1116" y="392" class="body">Kubernetes creates the pod, then the</text>
+  <text x="1116" y="424" class="body">agent must start and register with LiveKit.</text>
+  <rect x="1120" y="470" width="96" height="82" rx="24" fill="url(#green)"/>
+  <text x="1168" y="507" text-anchor="middle" class="h3 white">P1</text>
+  <text x="1168" y="534" text-anchor="middle" class="small white">warm</text>
+  <rect x="1248" y="470" width="96" height="82" rx="24" fill="url(#amber)" stroke="#172018" stroke-dasharray="8 8" stroke-width="2"/>
+  <text x="1296" y="507" text-anchor="middle" class="h3 dark">P2</text>
+  <text x="1296" y="534" text-anchor="middle" class="small dark">cold</text>
+  <text x="1374" y="508" class="h3">wait</text>
+  <text x="1374" y="538" class="small">until ready</text>
+
+  <path d="M530 446 C555 446 550 446 570 446" class="arrow"/>
+  <polygon points="570,446 548,432 548,460" fill="#172018"/>
+  <path d="M1035 446 C1060 446 1055 446 1075 446" class="arrow"/>
+  <polygon points="1075,446 1053,432 1053,460" fill="#172018"/>
+
+  <rect x="70" y="650" width="705" height="300" rx="36" class="card" filter="url(#shadow)"/>
+  <text x="106" y="704" class="h2">Pods needed at 50% target</text>
+  <text x="106" y="744" class="body">single-node test: maxReplicas = 1</text>
+  <g transform="translate(108 790)">
+    <text x="0" y="0" class="small">3 users</text>
+    <rect x="122" y="-22" width="448" height="30" rx="15" fill="#172018" opacity="0.1"/>
+    <rect x="122" y="-22" width="112" height="30" rx="15" fill="url(#green)"/>
+    <text x="594" y="1" class="h3">1 pod</text>
+  </g>
+  <g transform="translate(108 842)">
+    <text x="0" y="0" class="small">6 users</text>
+    <rect x="122" y="-22" width="448" height="30" rx="15" fill="#172018" opacity="0.1"/>
+    <rect x="122" y="-22" width="224" height="30" rx="15" fill="url(#green)"/>
+    <text x="594" y="1" class="h3">1 pod</text>
+  </g>
+  <g transform="translate(108 894)">
+    <text x="0" y="0" class="small">12 users</text>
+    <rect x="122" y="-22" width="448" height="30" rx="15" fill="#172018" opacity="0.1"/>
+    <rect x="122" y="-22" width="448" height="30" rx="15" fill="url(#green)"/>
+    <text x="594" y="1" class="h3">hard max</text>
+  </g>
+
+  <rect x="825" y="650" width="705" height="300" rx="36" class="card" filter="url(#shadow)"/>
+  <text x="861" y="704" class="h2">User 13 and beyond</text>
+  <rect x="865" y="750" width="286" height="134" rx="28" fill="#3d73b9" opacity="0.12" stroke="#3d73b9" stroke-width="2"/>
+  <text x="1008" y="794" text-anchor="middle" class="h3">Slow ramp</text>
+  <text x="1008" y="833" text-anchor="middle" class="body">usually fine if pods</text>
+  <text x="1008" y="864" text-anchor="middle" class="body">are already warm</text>
+  <rect x="1195" y="750" width="286" height="134" rx="28" fill="#d95f59" opacity="0.12" stroke="#d95f59" stroke-width="2"/>
+  <text x="1338" y="794" text-anchor="middle" class="h3">Sudden spike</text>
+  <text x="1338" y="833" text-anchor="middle" class="body">may wait or timeout</text>
+  <text x="1338" y="864" text-anchor="middle" class="body">while pods start</text>
+
+  <path d="M820 614 C785 612 745 620 720 650" class="dash"/>
+  <text x="800" y="622" text-anchor="middle" class="small" fill="#d95f59">node capacity also required</text>
+  <text x="800" y="1000" text-anchor="middle" class="body">Current test: 1 pod on 1 m7i.xlarge. For 20+ users, add node capacity and replicas first.</text>
+</svg>

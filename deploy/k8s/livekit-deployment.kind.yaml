@@ -26,7 +26,7 @@ spec:
         - name: livekit
           image: picoclaw-livekit:local
           imagePullPolicy: IfNotPresent
-          args: ["--agent-name", "cheeko-picoclaw", "--config", "/etc/picoclaw/config.json"]
+          args: ["--agent-name", "cheeko-agent1", "--config", "/etc/picoclaw/config.json"]
           ports:
             - name: health
               containerPort: 8192
@@ -36,6 +36,8 @@ spec:
               value: "true"
             - name: PICOCLAW_LIVEKIT_DRAIN_TIMEOUT_SECONDS
               value: "120"
+            - name: PICOCLAW_LIVEKIT_MAX_SESSIONS
+              value: "10"
             - name: PICOCLAW_AGENTS_DEFAULTS_WORKSPACE
               value: /opt/picoclaw/workspace-template
             - name: MANAGER_API_URL
@@ -72,11 +74,11 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "1500m"
+              memory: "3Gi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "4000m"
+              memory: "8Gi"
           volumeMounts:
             - name: cfg
               mountPath: /etc/picoclaw/config.json

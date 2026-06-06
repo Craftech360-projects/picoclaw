@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HPA With minReplicas=1 - Picoclaw LiveKit</title>
+  <style>
+    :root {
+      --ink: #172018;
+      --muted: #5f6f60;
+      --paper: #fff8e8;
+      --paper-2: #f5ead0;
+      --leaf: #2f7d55;
+      --leaf-dark: #195b3b;
+      --amber: #e7a72f;
+      --rose: #d95f59;
+      --blue: #3d73b9;
+      --line: rgba(23, 32, 24, 0.14);
+      --shadow: 0 24px 70px rgba(57, 43, 20, 0.18);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Aptos", "Bahnschrift", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(231, 167, 47, 0.28), transparent 30rem),
+        radial-gradient(circle at 86% 18%, rgba(47, 125, 85, 0.24), transparent 28rem),
+        linear-gradient(135deg, #fffaf0 0%, #efe2c5 100%);
+      min-height: 100vh;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 44px 22px 56px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 34px;
+      padding: 42px;
+      background: rgba(255, 248, 232, 0.82);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -90px;
+      top: -110px;
+      width: 310px;
+      height: 310px;
+      border-radius: 999px;
+      background: repeating-linear-gradient(45deg, rgba(47, 125, 85, 0.14) 0 14px, transparent 14px 28px);
+      transform: rotate(-8deg);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--leaf-dark);
+      background: rgba(47, 125, 85, 0.11);
+      border: 1px solid rgba(47, 125, 85, 0.18);
+    }
+
+    h1 {
+      position: relative;
+      max-width: 880px;
+      margin: 18px 0 12px;
+      font-family: "Georgia", "Cambria", serif;
+      font-size: clamp(40px, 7vw, 82px);
+      line-height: 0.95;
+      letter-spacing: -0.055em;
+    }
+
+    .hero p {
+      position: relative;
+      max-width: 780px;
+      margin: 0;
+      color: var(--muted);
+      font-size: clamp(17px, 2.3vw, 22px);
+      line-height: 1.55;
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .grid.two {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      padding: 24px;
+      background: rgba(255, 252, 242, 0.82);
+      box-shadow: 0 16px 44px rgba(57, 43, 20, 0.1);
+    }
+
+    .card h2,
+    .card h3 {
+      margin: 0 0 10px;
+      letter-spacing: -0.03em;
+    }
+
+    .card h2 {
+      font-size: 26px;
+    }
+
+    .card h3 {
+      font-size: 20px;
+    }
+
+    .metric {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .metric strong {
+      font-size: 38px;
+      letter-spacing: -0.05em;
+    }
+
+    .metric span,
+    .small {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .formula {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      align-items: center;
+      gap: 12px;
+      margin: 26px 0;
+      padding: 22px;
+      border-radius: 24px;
+      background: #172018;
+      color: #fff8e8;
+    }
+
+    .formula .box {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      text-align: center;
+    }
+
+    .formula b {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+    }
+
+    .formula span {
+      display: block;
+      margin-top: 6px;
+      color: rgba(255, 248, 232, 0.72);
+      font-size: 13px;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .step {
+      position: relative;
+      min-height: 198px;
+      padding: 18px;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 252, 242, 0.95), rgba(245, 234, 208, 0.8));
+    }
+
+    .step-number {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: #fff;
+      background: var(--leaf);
+      font-weight: 800;
+    }
+
+    .step h3 {
+      margin: 14px 0 8px;
+      font-size: 18px;
+    }
+
+    .pod-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .pod {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 800;
+      color: #fff;
+      background: var(--leaf);
+      box-shadow: 0 8px 16px rgba(47, 125, 85, 0.18);
+    }
+
+    .pod.cold {
+      color: var(--ink);
+      background: #f3c86d;
+      border: 1px dashed rgba(23, 32, 24, 0.32);
+      box-shadow: none;
+    }
+
+    .pod.pending {
+      background: var(--rose);
+    }
+
+    .bar-chart {
+      display: grid;
+      gap: 13px;
+      margin-top: 14px;
+    }
+
+    .bar-line {
+      display: grid;
+      grid-template-columns: 86px 1fr 64px;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+    }
+
+    .track {
+      position: relative;
+      overflow: hidden;
+      height: 28px;
+      border-radius: 999px;
+      background: rgba(23, 32, 24, 0.08);
+    }
+
+    .fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--leaf), #8cbf4c);
+    }
+
+    .fill.warn {
+      background: linear-gradient(90deg, var(--amber), #e06c45);
+    }
+
+    .fill.danger {
+      background: linear-gradient(90deg, var(--rose), #9f3d44);
+    }
+
+    .scenario {
+      position: relative;
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 16px;
+      align-items: start;
+      margin-top: 18px;
+      padding: 18px;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.48);
+    }
+
+    .badge {
+      display: inline-flex;
+      justify-content: center;
+      padding: 10px 12px;
+      border-radius: 16px;
+      color: #fff;
+      background: var(--blue);
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .badge.warn {
+      background: var(--amber);
+      color: var(--ink);
+    }
+
+    .callout {
+      border-left: 8px solid var(--rose);
+      background: rgba(217, 95, 89, 0.09);
+    }
+
+    .node-table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 18px;
+      margin-top: 12px;
+      font-size: 15px;
+    }
+
+    .node-table th,
+    .node-table td {
+      padding: 13px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+    }
+
+    .node-table th {
+      background: rgba(47, 125, 85, 0.1);
+      color: var(--leaf-dark);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 6px;
+      background: var(--leaf);
+    }
+
+    .dot.cold {
+      background: var(--amber);
+    }
+
+    .dot.pending {
+      background: var(--rose);
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .footer-note {
+      margin: 26px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      text-align: center;
+    }
+
+    @media (max-width: 860px) {
+      main {
+        padding: 24px 14px 36px;
+      }
+
+      .hero {
+        padding: 28px;
+      }
+
+      .grid.three,
+      .grid.two,
+      .timeline {
+        grid-template-columns: 1fr;
+      }
+
+      .formula {
+        grid-template-columns: 1fr;
+      }
+
+      .formula .operator {
+        text-align: center;
+      }
+
+      .scenario {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .card,
+      .step,
+      .hero {
+        animation: rise 520ms ease-out both;
+      }
+
+      .step:nth-child(2) { animation-delay: 80ms; }
+      .step:nth-child(3) { animation-delay: 160ms; }
+      .step:nth-child(4) { animation-delay: 240ms; }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(16px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">Picoclaw LiveKit scaling model</div>
+      <h1>What happens if minReplicas stays at 1?</h1>
+      <p>
+        HPA can scale from one warm agent pod to many pods, but it reacts after load appears.
+        That works for gradual traffic. For a sudden crowd, users can wait while cold pods start.
+      </p>
+    </section>
+
+    <section class="grid three">
+      <article class="card">
+        <h2>One warm pod</h2>
+        <p class="small">With <b>minReplicas=1</b>, only one Go LiveKit worker is already running before users arrive.</p>
+        <div class="metric"><strong>1</strong><span>warm pod</span></div>
+      </article>
+      <article class="card">
+        <h2>Target load</h2>
+        <p class="small">With <b>MAX_SESSIONS=12</b> and HPA target <b>50%</b>, the observation target is 6 sessions per pod.</p>
+        <div class="metric"><strong>6</strong><span>sessions per pod</span></div>
+      </article>
+      <article class="card">
+        <h2>Hard capacity</h2>
+        <p class="small">One pod should stop being treated as comfortable long before it reaches 12 active sessions.</p>
+        <div class="metric"><strong>12</strong><span>max sessions per pod</span></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>HPA math</h2>
+      <div class="formula" aria-label="Desired pods equals active users divided by target sessions per pod">
+        <div class="box"><b>desired pods</b><span>what HPA wants</span></div>
+        <div class="operator">=</div>
+        <div class="box"><b>active users</b><span>current sessions</span></div>
+        <div class="operator">/</div>
+        <div class="box"><b>6</b><span>12 sessions x 50%</span></div>
+      </div>
+      <p class="small">
+        Current plan: one fixed <b>m7i.xlarge</b> node with <b>1 running pod</b>.
+        HPA metrics are kept for observation, but maxReplicas is capped at 1 during this test.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Gradual traffic: scaling works nicely</h2>
+      <div class="timeline">
+        <article class="step">
+          <div class="step-number">1</div>
+          <h3>Idle</h3>
+          <p class="small">Only the minimum pod is warm.</p>
+          <div class="pod-row"><span class="pod">P1</span></div>
+        </article>
+        <article class="step">
+          <div class="step-number">2</div>
+          <h3>Load reaches 50%</h3>
+          <p class="small">Around 6 sessions on one pod, HPA sees target pressure.</p>
+          <div class="pod-row"><span class="pod">P1</span></div>
+        </article>
+        <article class="step">
+          <div class="step-number">3</div>
+          <h3>Observe pressure</h3>
+          <p class="small">For this test, pod 2 is not created. We watch latency and CPU first.</p>
+          <div class="pod-row"><span class="pod">P1</span><span class="pod cold">P2</span></div>
+        </article>
+        <article class="step">
+          <div class="step-number">4</div>
+          <h3>Scale later</h3>
+          <p class="small">If the test is good, add node autoscaling before raising maxReplicas.</p>
+          <div class="pod-row"><span class="pod">P1</span></div>
+        </article>
+      </div>
+      <div class="legend">
+        <span class="legend-item"><span class="dot"></span>Warm and ready</span>
+        <span class="legend-item"><span class="dot cold"></span>Starting, not ready yet</span>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <article class="card">
+        <h2>How many pods HPA wants</h2>
+        <div class="bar-chart">
+          <div class="bar-line"><span>3 users</span><div class="track"><div class="fill" style="width: 25%;"></div></div><b>1 pod</b></div>
+          <div class="bar-line"><span>6 users</span><div class="track"><div class="fill" style="width: 50%;"></div></div><b>1 pod</b></div>
+          <div class="bar-line"><span>10 users</span><div class="track"><div class="fill" style="width: 83%;"></div></div><b>test range</b></div>
+          <div class="bar-line"><span>12 users</span><div class="track"><div class="fill warn" style="width: 100%;"></div></div><b>hard max</b></div>
+          <div class="bar-line"><span>20 users</span><div class="track"><div class="fill warn" style="width: 100%;"></div></div><b>needs scale</b></div>
+        </div>
+        <p class="small">Today HPA maxReplicas is 1. For 20+ concurrent users, add node capacity and then raise maxReplicas.</p>
+      </article>
+
+      <article class="card">
+        <h2>Sudden spike: where delay happens</h2>
+        <svg viewBox="0 0 720 360" role="img" aria-label="Sudden spike diagram showing users waiting while new pods start">
+          <defs>
+            <linearGradient id="podGradient" x1="0" x2="1">
+              <stop offset="0%" stop-color="#2f7d55"/>
+              <stop offset="100%" stop-color="#8cbf4c"/>
+            </linearGradient>
+            <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#392b14" flood-opacity="0.18"/>
+            </filter>
+          </defs>
+          <rect x="20" y="30" width="190" height="96" rx="28" fill="url(#podGradient)" filter="url(#softShadow)"/>
+          <text x="115" y="72" text-anchor="middle" fill="#fff8e8" font-size="24" font-weight="800">1 warm pod</text>
+          <text x="115" y="101" text-anchor="middle" fill="#fff8e8" font-size="16">ready now</text>
+
+          <path d="M230 78 C290 78 310 78 370 78" stroke="#172018" stroke-width="5" stroke-linecap="round" fill="none"/>
+          <polygon points="370,78 350,66 350,90" fill="#172018"/>
+
+          <rect x="390" y="30" width="300" height="96" rx="28" fill="#d95f59" filter="url(#softShadow)"/>
+          <text x="540" y="72" text-anchor="middle" fill="#fff8e8" font-size="24" font-weight="800">12 users arrive</text>
+          <text x="540" y="101" text-anchor="middle" fill="#fff8e8" font-size="16">too fast for one pod</text>
+
+          <rect x="44" y="195" width="128" height="92" rx="22" fill="#2f7d55"/>
+          <text x="108" y="232" text-anchor="middle" fill="#fff8e8" font-size="18" font-weight="800">served</text>
+          <text x="108" y="258" text-anchor="middle" fill="#fff8e8" font-size="14">first users</text>
+
+          <rect x="214" y="195" width="128" height="92" rx="22" fill="#e7a72f"/>
+          <text x="278" y="232" text-anchor="middle" fill="#172018" font-size="18" font-weight="800">waiting</text>
+          <text x="278" y="258" text-anchor="middle" fill="#172018" font-size="14">cold start</text>
+
+          <rect x="384" y="195" width="128" height="92" rx="22" fill="#e7a72f"/>
+          <text x="448" y="232" text-anchor="middle" fill="#172018" font-size="18" font-weight="800">pending</text>
+          <text x="448" y="258" text-anchor="middle" fill="#172018" font-size="14">if no node room</text>
+
+          <rect x="554" y="195" width="128" height="92" rx="22" fill="#2f7d55"/>
+          <text x="618" y="232" text-anchor="middle" fill="#fff8e8" font-size="18" font-weight="800">ready</text>
+          <text x="618" y="258" text-anchor="middle" fill="#fff8e8" font-size="14">after startup</text>
+
+          <path d="M172 241 L214 241" stroke="#172018" stroke-width="4" stroke-linecap="round"/>
+          <path d="M342 241 L384 241" stroke="#172018" stroke-width="4" stroke-linecap="round"/>
+          <path d="M512 241 L554 241" stroke="#172018" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+      </article>
+    </section>
+
+    <section class="grid two">
+      <article class="card">
+        <h2>User 13 and beyond</h2>
+        <div class="scenario">
+          <div class="badge">slow ramp</div>
+          <div>
+            <h3>Usually fine</h3>
+            <p class="small">If test load stays under 10-12 users and latency is good, the single pod may be acceptable for beta traffic.</p>
+          </div>
+        </div>
+        <div class="scenario">
+          <div class="badge warn">sudden spike</div>
+          <div>
+            <h3>May wait or timeout</h3>
+            <p class="small">User 13 and beyond are outside the configured single-pod ceiling. Add pods and nodes before planning that traffic.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card callout">
+        <h2>The hidden requirement: node capacity</h2>
+        <p class="small">
+          HPA creates pods. Nodes run pods. Current test uses one <b>m7i.xlarge</b> and one Picoclaw LiveKit pod.
+        </p>
+        <table class="node-table">
+          <thead>
+            <tr>
+              <th>Goal</th>
+              <th>Needed capacity</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>6 users at 50%</td>
+              <td>1 pod</td>
+            </tr>
+            <tr>
+              <td>Pods per m7i.xlarge</td>
+              <td>1 production pod</td>
+            </tr>
+            <tr>
+              <td>Required nodes</td>
+              <td>1 m7i.xlarge node</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="small">Without enough nodes, extra pods stay Pending and cannot accept LiveKit jobs.</p>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>Recommended meaning of minReplicas=1</h2>
+      <p class="small">
+        <b>minReplicas=1</b> and <b>maxReplicas=1</b> are okay for this one-node test.
+        For a 20-, 50-, or 100-user event, increase node capacity and maxReplicas before the event instead of waiting for traffic to force it.
+      </p>
+    </section>
+
+    <p class="footer-note">Model used: MAX_SESSIONS=12, HPA session target=50%, one observation slot equals 6 sessions per pod. Autoscaling is capped at 1 replica for the current test.</p>
+  </main>
+</body>
+</html>

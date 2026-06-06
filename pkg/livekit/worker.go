@@ -149,6 +149,7 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	pingCtx, pingCancel := context.WithCancel(ctx)
 	defer pingCancel()
 	go w.pingLoop(pingCtx)
+	go w.workerStatusLoop(pingCtx)
 
 	for {
 		_, data, err := conn.ReadMessage()
@@ -177,6 +178,7 @@ func (w *Worker) handleServerMessage(ctx context.Context, msg *livekit.ServerMes
 				"worker_id": w.workerID,
 				"agent":     w.agentName,
 			})
+			w.sendWorkerStatus()
 		}
 	case *livekit.ServerMessage_Availability:
 		w.handleAvailability(m.Availability)
@@ -219,6 +221,9 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 			Availability: &livekit.AvailabilityResponse{
 				JobId:     req.Job.Id,
 				Available: available,
+				ParticipantAttributes: map[string]string{
+					"lk.agent.name": w.agentName,
+				},
 			},
 		},
 	}
@@ -331,6 +336,13 @@ func (w *Worker) sendRegister() error {
 				AgentName:    w.agentName,
 				Version:      "picoclaw-livekit",
 				PingInterval: 10,
+				AllowedPermissions: &livekit.ParticipantPermission{
+					CanPublish:        true,
+					CanSubscribe:      true,
+					CanPublishData:    true,
+					CanUpdateMetadata: true,
+					Agent:             true,
+				},
 			},
 		},
 	}
@@ -367,6 +379,55 @@ func (w *Worker) pingLoop(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+func (w *Worker) workerStatusLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.sendWorkerStatus()
+		}
+	}
+}
+
+func (w *Worker) workerStatusMessage() *livekit.WorkerMessage {
+	w.mu.RLock()
+	activeJobs := len(w.jobs)
+	maxSessions := w.maxSessions
+	draining := w.draining
+	w.mu.RUnlock()
+
+	status := livekit.WorkerStatus_WS_AVAILABLE
+	if draining || (maxSessions > 0 && activeJobs >= maxSessions) {
+		status = livekit.WorkerStatus_WS_FULL
+	}
+
+	load := float32(0)
+	if maxSessions > 0 {
+		load = float32(activeJobs) / float32(maxSessions)
+	}
+
+	return &livekit.WorkerMessage{
+		Message: &livekit.WorkerMessage_UpdateWorker{
+			UpdateWorker: &livekit.UpdateWorkerStatus{
+				Load:     load,
+				Status:   &status,
+				JobCount: uint32(activeJobs),
+			},
+		},
+	}
+}
+
+func (w *Worker) sendWorkerStatus() {
+	if err := w.sendProto(w.workerStatusMessage()); err != nil {
+		logger.WarnCF("livekit", "Worker status update failed", map[string]any{
+			"error": err.Error(),
+		})
 	}
 }
 
