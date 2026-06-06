@@ -3,6 +3,7 @@ package livekit
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -685,6 +686,62 @@ func (p *rateLimitedStreamingProvider) ChatStream(
 }
 
 func (p *rateLimitedStreamingProvider) GetDefaultModel() string { return "test" }
+
+func TestPCM16ByteAssemblerCarriesSplitSampleAcrossChunks(t *testing.T) {
+	assembler := &pcm16ByteAssembler{}
+
+	first := assembler.Push([]byte{0x01, 0x02, 0x03})
+	if got, want := first, []byte{0x01, 0x02}; !slices.Equal(got, want) {
+		t.Fatalf("first chunk = %v, want %v", got, want)
+	}
+	if got := assembler.PendingLen(); got != 1 {
+		t.Fatalf("pending len after first chunk = %d, want 1", got)
+	}
+
+	second := assembler.Push([]byte{0x04, 0x05, 0x06})
+	if got, want := second, []byte{0x03, 0x04, 0x05, 0x06}; !slices.Equal(got, want) {
+		t.Fatalf("second chunk = %v, want %v", got, want)
+	}
+	if got := assembler.PendingLen(); got != 0 {
+		t.Fatalf("pending len after second chunk = %d, want 0", got)
+	}
+
+	samples := bytesToPCM16(append(first, second...))
+	if got, want := samples, []int16{0x0201, 0x0403, 0x0605}; !slices.Equal(got, want) {
+		t.Fatalf("samples = %v, want %v", got, want)
+	}
+}
+
+func TestPCM16ByteAssemblerHandlesSingleByteChunks(t *testing.T) {
+	assembler := &pcm16ByteAssembler{}
+
+	if got := assembler.Push([]byte{0x01}); len(got) != 0 {
+		t.Fatalf("first single-byte chunk = %v, want empty", got)
+	}
+	if got := assembler.PendingLen(); got != 1 {
+		t.Fatalf("pending len after first single-byte chunk = %d, want 1", got)
+	}
+
+	second := assembler.Push([]byte{0x02})
+	if got, want := second, []byte{0x01, 0x02}; !slices.Equal(got, want) {
+		t.Fatalf("second single-byte chunk = %v, want %v", got, want)
+	}
+	if got := assembler.PendingLen(); got != 0 {
+		t.Fatalf("pending len after second single-byte chunk = %d, want 0", got)
+	}
+}
+
+func TestPCM16ByteAssemblerKeepsEvenChunks(t *testing.T) {
+	assembler := &pcm16ByteAssembler{}
+
+	chunk := []byte{0x01, 0x02, 0x03, 0x04}
+	if got := assembler.Push(chunk); !slices.Equal(got, chunk) {
+		t.Fatalf("even chunk = %v, want %v", got, chunk)
+	}
+	if got := assembler.PendingLen(); got != 0 {
+		t.Fatalf("pending len after even chunk = %d, want 0", got)
+	}
+}
 
 func expectProviderCall(t *testing.T, calls <-chan string, want string) {
 	t.Helper()

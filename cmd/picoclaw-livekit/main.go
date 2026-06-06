@@ -260,16 +260,20 @@ func main() {
 	}
 
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
-	logger.InfoCF("livekit", "Configured TTS provider", map[string]any{
-		"provider":           lkCfg.TTS.Provider,
-		"voice_id":           lkCfg.TTS.VoiceID,
-		"model_id":           lkCfg.TTS.ModelID,
-		"sample_rate_hz":     ttsSampleRate,
-		"has_inworld_key":    strings.TrimSpace(lkCfg.InworldAPIKey()) != "",
-		"has_cartesia_key":   strings.TrimSpace(lkCfg.CartesiaAPIKey()) != "",
-		"has_elevenlabs_key": strings.TrimSpace(cfg.Voice.ElevenLabsAPIKey) != "",
-		"tts_enabled":        ttsProvider != nil,
+	managerAPIConfigured := strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != ""
+	logger.InfoCF("livekit", "Configured fallback TTS provider", map[string]any{
+		"fallback_provider":             lkCfg.TTS.Provider,
+		"fallback_voice_id":             lkCfg.TTS.VoiceID,
+		"fallback_model_id":             lkCfg.TTS.ModelID,
+		"fallback_sample_rate_hz":       ttsSampleRate,
+		"manager_api_configured":        managerAPIConfigured,
+		"manager_api_overrides_session": managerAPIConfigured,
+		"has_inworld_key":               strings.TrimSpace(lkCfg.InworldAPIKey()) != "",
+		"has_cartesia_key":              strings.TrimSpace(lkCfg.CartesiaAPIKey()) != "",
+		"has_elevenlabs_key":            strings.TrimSpace(cfg.Voice.ElevenLabsAPIKey) != "",
+		"fallback_tts_enabled":          ttsProvider != nil,
 	})
+	logStartupManagerActiveTTSProvider(lkCfg)
 	type roomRuntimeSelection struct {
 		ttsProvider   tts.Provider
 		ttsSampleRate int
@@ -1249,6 +1253,47 @@ func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tt
 	factory.Register("cartesia", cartesia_tts.NewBuilder())
 
 	return factory.Create(cfg, lkCfg)
+}
+
+func logStartupManagerActiveTTSProvider(lkCfg config.LiveKitServiceConfig) {
+	if strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	active, err := fetchManagerActiveProviders(ctx, lkCfg.ManagerAPI, managerAPIServiceKey())
+	if err != nil {
+		logger.WarnCF("livekit", "Manager active TTS provider lookup failed", map[string]any{
+			"source": "manager_api",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	liveKitActiveProvidersCache.mu.Lock()
+	liveKitActiveProvidersCache.data = active
+	liveKitActiveProvidersCache.expiresAt = time.Now().Add(liveKitProviderCacheTTL())
+	liveKitActiveProvidersCache.hasData = true
+	liveKitActiveProvidersCache.mu.Unlock()
+
+	if strings.TrimSpace(active.TTS.Provider) == "" {
+		logger.WarnCF("livekit", "Manager active TTS provider is empty", map[string]any{
+			"source": "manager_api",
+		})
+		return
+	}
+
+	logger.InfoCF("livekit", "Manager active TTS provider", map[string]any{
+		"source":             "manager_api",
+		"tts_provider":       active.TTS.Provider,
+		"tts_model_id":       active.TTS.ModelID,
+		"tts_voice_id":       active.TTS.VoiceID,
+		"tts_output_format":  active.TTS.OutputFormat,
+		"tts_sample_rate_hz": active.TTS.SampleRateHz,
+		"tts_api_key_set":    strings.TrimSpace(active.TTS.APIKey) != "",
+	})
 }
 
 func summarizeDBURL(raw string) (host, user string) {

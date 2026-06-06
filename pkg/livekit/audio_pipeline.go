@@ -1658,6 +1658,17 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 		return
 	}
 	defer stream.Close()
+	audioCapture := newTTSAudioRecorder(ap.sessionKey(), ap.session.sampleRate)
+	defer audioCapture.Finalize("stream_closed")
+	pcmBytes := &pcm16ByteAssembler{}
+	defer func() {
+		if pcmBytes.PendingLen() > 0 {
+			logger.WarnCF("livekit", "Dropped trailing incomplete PCM16 byte at TTS stream end", map[string]any{
+				"session":       ap.sessionKey(),
+				"pending_bytes": pcmBytes.PendingLen(),
+			})
+		}
+	}()
 
 	logger.DebugCF("livekit", "Audio stream started", map[string]any{
 		"session":   ap.sessionKey(),
@@ -1739,7 +1750,14 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 			continue
 		}
 
-		samples := bytesToPCM16(chunk)
+		alignedChunk := pcmBytes.Push(chunk)
+		if len(alignedChunk) == 0 {
+			continue
+		}
+
+		audioCapture.AppendPCM(alignedChunk)
+
+		samples := bytesToPCM16(alignedChunk)
 		if len(samples) == 0 {
 			continue
 		}
@@ -1888,6 +1906,38 @@ func bytesToPCM16(b []byte) media.PCM16Sample {
 		out[i] = int16(binary.LittleEndian.Uint16(b[off : off+2]))
 	}
 	return out
+}
+
+type pcm16ByteAssembler struct {
+	pending []byte
+}
+
+func (a *pcm16ByteAssembler) Push(chunk []byte) []byte {
+	if a == nil || len(chunk) == 0 {
+		return nil
+	}
+
+	if len(a.pending) > 0 {
+		combined := make([]byte, 0, len(a.pending)+len(chunk))
+		combined = append(combined, a.pending...)
+		combined = append(combined, chunk...)
+		chunk = combined
+		a.pending = nil
+	}
+
+	if len(chunk)%2 == 0 {
+		return chunk
+	}
+
+	a.pending = append(a.pending[:0], chunk[len(chunk)-1])
+	return chunk[:len(chunk)-1]
+}
+
+func (a *pcm16ByteAssembler) PendingLen() int {
+	if a == nil {
+		return 0
+	}
+	return len(a.pending)
 }
 
 func sampleStats(samples media.PCM16Sample) (int16, int16, int) {
