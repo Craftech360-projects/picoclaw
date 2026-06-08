@@ -151,7 +151,7 @@ func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
 		"audio": map[string]any{
 			"data":        base64.StdEncoding.EncodeToString(pcm),
 			"sample_rate": s.sampleRate,
-			"encoding":    "pcm_s16le",
+			"encoding":    "audio/wav",
 		},
 	}
 	data, err := json.Marshal(msg)
@@ -253,6 +253,7 @@ func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 			Transcript   string `json:"transcript"`
 			LanguageCode string `json:"language_code"`
 			SignalType   string `json:"signal_type"`
+			Message      string `json:"message"`
 			Metrics      struct {
 				AudioDuration     float64 `json:"audio_duration"`
 				ProcessingLatency float64 `json:"processing_latency"`
@@ -317,7 +318,7 @@ func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 	case "error":
 		logger.ErrorCF("livekit", "Sarvam STT error response", map[string]any{
 			"provider": "sarvam",
-			"error":    firstNonEmpty(msg.Error, msg.Message),
+			"error":    firstNonEmpty(msg.Error, msg.Message, msg.Data.Message),
 			"raw":      string(data),
 		})
 		return TranscriptEvent{}, false

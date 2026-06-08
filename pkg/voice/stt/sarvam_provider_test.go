@@ -83,8 +83,8 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 		if audioMsg.Audio.SampleRate != 16000 {
 			errCh <- fmt.Errorf("audio sample_rate = %d, want 16000", audioMsg.Audio.SampleRate)
 		}
-		if audioMsg.Audio.Encoding != "pcm_s16le" {
-			errCh <- fmt.Errorf("audio encoding = %q, want pcm_s16le", audioMsg.Audio.Encoding)
+		if audioMsg.Audio.Encoding != "audio/wav" {
+			errCh <- fmt.Errorf("audio encoding = %q, want audio/wav", audioMsg.Audio.Encoding)
 		}
 
 		_, flushData, err := conn.ReadMessage()
