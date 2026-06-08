@@ -91,6 +91,24 @@ func TestValidateLiveKitStartupConfigFilesStrictSuccess(t *testing.T) {
 	}
 }
 
+func TestApplyLiveKitRuntimeEnvOverrides(t *testing.T) {
+	t.Setenv("PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD", "0.72")
+	t.Setenv("PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS", "800")
+
+	rt := config.LiveKitServiceRuntimeConfig{
+		VADThreshold:  0.68,
+		VADEndpointMS: 500,
+	}
+	applyLiveKitRuntimeEnvOverrides(&rt)
+
+	if rt.VADThreshold != 0.72 {
+		t.Fatalf("VADThreshold = %v, want 0.72", rt.VADThreshold)
+	}
+	if rt.VADEndpointMS != 800 {
+		t.Fatalf("VADEndpointMS = %d, want 800", rt.VADEndpointMS)
+	}
+}
+
 func TestValidateLiveKitStartupConfigFilesMissingSecurity(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.json")

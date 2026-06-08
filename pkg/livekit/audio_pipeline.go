@@ -31,6 +31,7 @@ var dynamicGreetingCooldownUntilUnix atomic.Int64
 const (
 	liveKitTTSAudioTailMs       = 250
 	liveKitFinalTransportTailMs = 250
+	bargeInDuplicateWindow      = 1500 * time.Millisecond
 )
 
 var shortUtteranceHoldPhrases = map[string]struct{}{
@@ -102,6 +103,19 @@ func shouldHoldShortUtterance(text string) bool {
 	}
 	parts := strings.Fields(normalized)
 	return len(parts) == 1 && len([]rune(parts[0])) <= 4
+}
+
+func shouldSuppressBargeInTranscript(text, lastText string, lastAt, now time.Time, pendingShortText string) bool {
+	normalized := strings.Trim(normalizeUtteranceForDuplicateCheck(text), " \t\r\n.,!?;:")
+	if normalized == "" || !shouldHoldShortUtterance(normalized) {
+		return false
+	}
+	if pendingShortText != "" &&
+		normalized == strings.Trim(normalizeUtteranceForDuplicateCheck(pendingShortText), " \t\r\n.,!?;:") {
+		return true
+	}
+	lastNormalized := strings.Trim(normalizeUtteranceForDuplicateCheck(lastText), " \t\r\n.,!?;:")
+	return lastNormalized == normalized && !lastAt.IsZero() && now.Sub(lastAt) < bargeInDuplicateWindow
 }
 
 func mergeFinalTranscriptChunk(current, next string) string {
@@ -309,6 +323,12 @@ func (c *voiceTurnController) Cancel(reason string) {
 	}
 	c.active.reason = reason
 	c.active.cancel()
+}
+
+func (c *voiceTurnController) ActiveReason() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active.reason
 }
 
 func (c *voiceTurnController) IsActive(turn voiceTurn) bool {
@@ -998,6 +1018,8 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var sttFirstPartialAt time.Time
 	var sttFirstFinalAt time.Time
 	var pendingBargeIn bool
+	var lastBargeInText string
+	var lastBargeInAt time.Time
 	var hardCapFinalizePending bool
 	var pendingShort *struct {
 		Text         string
@@ -1303,12 +1325,29 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 					sttFirstPartialAt = time.Now()
 				}
 				if pendingBargeIn {
-					logger.InfoCF("livekit", "Transcript confirmed user speech; interrupting active agent audio if present", map[string]any{
-						"session": ap.sessionKey(),
-						"text":    evt.Text,
-					})
-					ap.cancelTTS("stt_transcript_after_vad")
-					ap.turns.Cancel("stt_transcript_after_vad")
+					now := time.Now()
+					pendingShortText := ""
+					if pendingShort != nil {
+						pendingShortText = pendingShort.Text
+					}
+					if shouldSuppressBargeInTranscript(evt.Text, lastBargeInText, lastBargeInAt, now, pendingShortText) {
+						logger.InfoCF("livekit", "Suppressing duplicate short barge-in transcript", map[string]any{
+							"session":      ap.sessionKey(),
+							"text":         evt.Text,
+							"window_ms":    bargeInDuplicateWindow.Milliseconds(),
+							"last_text":    lastBargeInText,
+							"pending_text": pendingShortText,
+						})
+					} else {
+						logger.InfoCF("livekit", "Transcript confirmed user speech; interrupting active agent audio if present", map[string]any{
+							"session": ap.sessionKey(),
+							"text":    evt.Text,
+						})
+						ap.cancelTTS("stt_transcript_after_vad")
+						ap.turns.Cancel("stt_transcript_after_vad")
+						lastBargeInText = evt.Text
+						lastBargeInAt = now
+					}
 					pendingBargeIn = false
 				}
 			}
@@ -1858,12 +1897,18 @@ func (ap *AudioPipeline) setTTSCancel(cancel context.CancelFunc) {
 
 func (ap *AudioPipeline) currentTTSCancelReason() string {
 	if ap.session == nil || ap.session.participant == nil {
+		if ap.turns.ActiveReason() != "" {
+			return ap.turns.ActiveReason()
+		}
 		return ""
 	}
 	ps := ap.session.participant
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	return ps.ttsCancelReason
+	if ps.ttsCancelReason != "" {
+		return ps.ttsCancelReason
+	}
+	return ap.turns.ActiveReason()
 }
 
 func isContextCanceled(ctx context.Context, err error) bool {

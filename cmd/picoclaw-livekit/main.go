@@ -103,6 +103,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: livekit_service.server_url is required")
 		os.Exit(1)
 	}
+	applyLiveKitRuntimeEnvOverrides(&lkCfg.Runtime)
 	startupProvider, startupModelID, err := providers.CreateProvider(cfg)
 	if err != nil {
 		if strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
@@ -1169,6 +1170,32 @@ func normalizeLiveKitRuntimeConfig(rt *config.LiveKitServiceRuntimeConfig) {
 	}
 	if rt.ProviderFailureCooldownSec <= 0 {
 		rt.ProviderFailureCooldownSec = 30
+	}
+}
+
+func applyLiveKitRuntimeEnvOverrides(rt *config.LiveKitServiceRuntimeConfig) {
+	if rt == nil {
+		return
+	}
+	if raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD")); raw != "" {
+		if value, err := strconv.ParseFloat(raw, 64); err == nil {
+			rt.VADThreshold = value
+		} else {
+			logger.WarnCF("livekit", "Invalid runtime VAD threshold env override", map[string]any{
+				"value": raw,
+				"error": err.Error(),
+			})
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil {
+			rt.VADEndpointMS = value
+		} else {
+			logger.WarnCF("livekit", "Invalid runtime VAD endpoint env override", map[string]any{
+				"value": raw,
+				"error": err.Error(),
+			})
+		}
 	}
 }
 

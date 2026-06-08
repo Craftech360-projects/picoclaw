@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +49,28 @@ func TestShouldHoldShortUtterance(t *testing.T) {
 	}
 	if shouldHoldShortUtterance("Can you tell me a story?") {
 		t.Fatal("did not expect full sentence to be held")
+	}
+}
+
+func TestShouldSuppressDuplicateShortBargeInTranscript(t *testing.T) {
+	now := time.Now()
+	if !shouldSuppressBargeInTranscript("Hello.", "hello", now.Add(-500*time.Millisecond), now, "") {
+		t.Fatal("expected duplicate short barge-in transcript to be suppressed")
+	}
+	if shouldSuppressBargeInTranscript("Please tell me the weather", "hello", now.Add(-500*time.Millisecond), now, "") {
+		t.Fatal("did not expect full utterance to be suppressed")
+	}
+	if shouldSuppressBargeInTranscript("Hello", "hello", now.Add(-2*time.Second), now, "") {
+		t.Fatal("did not expect old duplicate short utterance to be suppressed")
+	}
+}
+
+func TestShouldSuppressPendingShortBargeInTranscript(t *testing.T) {
+	if !shouldSuppressBargeInTranscript("Okay.", "", time.Time{}, time.Now(), "okay") {
+		t.Fatal("expected duplicate pending short utterance to be suppressed")
+	}
+	if shouldSuppressBargeInTranscript("Okay, tell me more", "", time.Time{}, time.Now(), "okay") {
+		t.Fatal("did not expect expanded utterance to be suppressed")
 	}
 }
 
@@ -272,6 +295,53 @@ func TestRunInboundCancelsTTSWhenTranscriptArrivesAfterVADStart(t *testing.T) {
 	}
 	if !cancelled {
 		t.Fatal("TTS was not cancelled after transcript text arrived")
+	}
+}
+
+func TestRunInboundSuppressesRepeatedShortBargeInTranscript(t *testing.T) {
+	results := make(chan stt.TranscriptEvent, 2)
+	vadEvents := make(chan interface{})
+	stream := &fakeTranscriptionStream{results: results}
+	var cancelCount atomic.Int32
+	participant := &ParticipantState{
+		identity:   "device-a",
+		sessionKey: "livekit:device:a",
+		ttsCancel:  func() { cancelCount.Add(1) },
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: participant,
+	}, nil, nil, vadEvents)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.RunInbound(ctx, stream)
+		close(done)
+	}()
+
+	vadEvents <- vad.VADEvent{SpeechStart: true, Probability: 0.80}
+	results <- stt.TranscriptEvent{Text: "Hello", IsFinal: false}
+	waitForCancelCount(t, &cancelCount, 1)
+
+	participant.mu.Lock()
+	participant.ttsCancel = func() { cancelCount.Add(1) }
+	participant.mu.Unlock()
+
+	vadEvents <- vad.VADEvent{SpeechStart: true, Probability: 0.82}
+	results <- stt.TranscriptEvent{Text: "Hello.", IsFinal: false}
+
+	time.Sleep(150 * time.Millisecond)
+	if got := cancelCount.Load(); got != 1 {
+		t.Fatalf("duplicate short barge-in canceled TTS %d times, want 1", got)
+	}
+
+	close(results)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunInbound did not exit after results channel closed")
 	}
 }
 
@@ -753,4 +823,16 @@ func expectProviderCall(t *testing.T, calls <-chan string, want string) {
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for agent call %q", want)
 	}
+}
+
+func waitForCancelCount(t *testing.T, counter *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if counter.Load() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("cancel count = %d, want %d", counter.Load(), want)
 }
