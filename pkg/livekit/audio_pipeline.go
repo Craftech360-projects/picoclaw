@@ -981,6 +981,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	if sttStream == nil {
 		return
 	}
+	runSessionKey := ap.sessionKey()
 	var utterance strings.Builder
 	var vadSpeechEnded bool
 	var speechActive bool
@@ -1253,11 +1254,11 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 						ap.session.participant.speaking.Store(true)
 					}
 					logger.DebugCF("livekit", "VAD Speech start", map[string]any{
-						"session":     ap.sessionKey(),
+						"session":     runSessionKey,
 						"probability": evt.Probability,
 					})
 					logger.DebugCF("livekit", "VAD speech start detected; waiting for transcript before interrupting agent audio", map[string]any{
-						"session":     ap.sessionKey(),
+						"session":     runSessionKey,
 						"probability": evt.Probability,
 					})
 					pendingBargeIn = true
@@ -1275,12 +1276,12 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 					hardCapFinalizePending = false
 					stopSegmentTimer()
 					logger.DebugCF("livekit", "VAD Speech end, finalizing STT stream", map[string]any{
-						"session":     ap.sessionKey(),
+						"session":     runSessionKey,
 						"probability": evt.Probability,
 					})
 					if err := sttStream.Finalize(); err != nil {
 						logger.ErrorCF("livekit", "Failed to finalize STT stream", map[string]any{
-							"session": ap.sessionKey(),
+							"session": runSessionKey,
 							"error":   err.Error(),
 						})
 					}
@@ -1291,7 +1292,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		case evt, ok := <-sttStream.Results():
 			if !ok {
 				logger.WarnCF("livekit", "STT stream closed, exiting RunInbound", map[string]any{
-					"session": ap.sessionKey(),
+					"session": runSessionKey,
 				})
 				return
 			}

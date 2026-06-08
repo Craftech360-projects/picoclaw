@@ -9,25 +9,30 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 const defaultDeepgramURL = "wss://api.deepgram.com/v1/listen"
+const defaultDeepgramKeepAliveInterval = 5 * time.Second
 
 // DeepgramTranscriber opens streaming transcription sessions against Deepgram.
 type DeepgramTranscriber struct {
-	apiKey  string
-	baseURL string
-	dialer  *websocket.Dialer
+	apiKey            string
+	baseURL           string
+	dialer            *websocket.Dialer
+	keepAliveInterval time.Duration
 }
 
 // NewDeepgramTranscriber creates a Deepgram streaming transcriber.
 func NewDeepgramTranscriber(apiKey string) *DeepgramTranscriber {
 	return &DeepgramTranscriber{
-		apiKey:  apiKey,
-		baseURL: defaultDeepgramURL,
-		dialer:  websocket.DefaultDialer,
+		apiKey:            apiKey,
+		baseURL:           defaultDeepgramURL,
+		dialer:            websocket.DefaultDialer,
+		keepAliveInterval: defaultDeepgramKeepAliveInterval,
 	}
 }
 
@@ -81,21 +86,37 @@ func (d *DeepgramTranscriber) OpenStream(opts StreamOpts) (TranscriptionStream, 
 	}
 
 	stream := &deepgramStream{
-		conn:    conn,
-		results: make(chan TranscriptEvent, 32),
-		closed:  make(chan struct{}),
+		conn:              conn,
+		results:           make(chan TranscriptEvent, 32),
+		closed:            make(chan struct{}),
+		keepAliveInterval: d.keepAliveInterval,
+	}
+	if stream.keepAliveInterval <= 0 {
+		stream.keepAliveInterval = defaultDeepgramKeepAliveInterval
 	}
 
+	logger.DebugCF("livekit", "Deepgram websocket opened", map[string]any{
+		"provider":             "deepgram",
+		"model":                cfg.Model,
+		"language":             cfg.Language,
+		"sample_rate":          cfg.SampleRate,
+		"channels":             cfg.Channels,
+		"endpointing_ms":       cfg.EndpointingMS,
+		"keepalive_interval_s": int(stream.keepAliveInterval.Seconds()),
+	})
+
 	go stream.readLoop()
+	go stream.keepAliveLoop()
 	return stream, nil
 }
 
 type deepgramStream struct {
-	conn    *websocket.Conn
-	results chan TranscriptEvent
-	closed  chan struct{}
-	mu      sync.Mutex
-	once    sync.Once
+	conn              *websocket.Conn
+	results           chan TranscriptEvent
+	closed            chan struct{}
+	keepAliveInterval time.Duration
+	mu                sync.Mutex
+	once              sync.Once
 
 	speaking bool
 }
@@ -120,21 +141,12 @@ func (s *deepgramStream) SendAudio(pcm []byte) error {
 }
 
 func (s *deepgramStream) Finalize() error {
-	select {
-	case <-s.closed:
-		return errors.New("deepgram stream closed")
-	default:
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	finalizeMsg := map[string]string{"type": "Finalize"}
 	data, err := json.Marshal(finalizeMsg)
 	if err != nil {
 		return err
 	}
-	return s.conn.WriteMessage(websocket.TextMessage, data)
+	return s.sendTextMessage(data)
 }
 
 func (s *deepgramStream) Close() error {
@@ -158,6 +170,14 @@ func (s *deepgramStream) readLoop() {
 	for {
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
+			select {
+			case <-s.closed:
+			default:
+				logger.WarnCF("livekit", "Deepgram websocket read ended", map[string]any{
+					"provider": "deepgram",
+					"error":    err.Error(),
+				})
+			}
 			return
 		}
 
@@ -176,7 +196,7 @@ func (s *deepgramStream) readLoop() {
 		}
 
 		evt := TranscriptEvent{
-			Text:    text,
+			Text: text,
 			// Some Deepgram responses can carry speech_final=true even when is_final=false.
 			// Treat those as final so the pipeline can flush utterance text on turn end.
 			IsFinal: resp.IsFinal || resp.SpeechFinal || resp.FromFinalize,
@@ -213,6 +233,39 @@ func (s *deepgramStream) readLoop() {
 			return
 		}
 	}
+}
+
+func (s *deepgramStream) keepAliveLoop() {
+	ticker := time.NewTicker(s.keepAliveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-ticker.C:
+			if err := s.sendTextMessage([]byte(`{"type":"KeepAlive"}`)); err != nil {
+				logger.WarnCF("livekit", "Deepgram keepalive failed; closing stream", map[string]any{
+					"provider": "deepgram",
+					"error":    err.Error(),
+				})
+				_ = s.Close()
+				return
+			}
+		}
+	}
+}
+
+func (s *deepgramStream) sendTextMessage(data []byte) error {
+	select {
+	case <-s.closed:
+		return errors.New("deepgram stream closed")
+	default:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func normalizeStreamOpts(opts StreamOpts) StreamOpts {

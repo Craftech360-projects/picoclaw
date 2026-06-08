@@ -664,6 +664,8 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		vad:          vadPipe,
 		vadEvent:     vadEventChan,
 		providerName: rs.stt.Name(),
+		sessionKey:   ps.sessionKey,
+		room:         rs.roomName(),
 	}
 	pcmTrack, err := lkmedia.NewPCMRemoteTrack(track, writer, lkmedia.WithTargetSampleRate(16000), lkmedia.WithTargetChannels(1))
 	if err != nil {
@@ -789,6 +791,8 @@ type sttStreamWriter struct {
 	vadEvent chan vad.VADEvent
 
 	providerName string
+	sessionKey   string
+	room         string
 	sendErrCount int
 }
 
@@ -807,6 +811,22 @@ func (w *sttStreamWriter) WriteSample(sample media.PCM16Sample) error {
 
 		events := w.vad.Push(int16Samples)
 		for _, evt := range events {
+			if evt.SpeechStart {
+				logger.InfoCF("livekit", "TEN VAD speech start detected", map[string]any{
+					"provider":    w.providerName,
+					"session":     w.sessionKey,
+					"room":        w.room,
+					"probability": evt.Probability,
+				})
+			}
+			if evt.SpeechEnd {
+				logger.InfoCF("livekit", "TEN VAD speech end detected", map[string]any{
+					"provider":    w.providerName,
+					"session":     w.sessionKey,
+					"room":        w.room,
+					"probability": evt.Probability,
+				})
+			}
 			if w.vadEvent != nil {
 				select {
 				case w.vadEvent <- evt:
