@@ -1,22 +1,25 @@
 package stt
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
-const sarvamSTTURL = "https://api.sarvam.ai/speech-to-text"
+const sarvamSTTWebsocketURL = "wss://api.sarvam.ai/speech-to-text/ws"
 
-// sarvamProvider implements STT using Sarvam REST API.
+// sarvamProvider implements STT using Sarvam's streaming WebSocket API.
 type sarvamProvider struct {
 	apiKey string
 	model  string
@@ -46,7 +49,7 @@ func (p *sarvamProvider) Capabilities() ProviderCapabilities {
 			"as-IN", "ur-IN", "ne-IN", "kok-IN", "ks-IN", "sd-IN", "sa-IN", "sat-IN", "mni-IN", "brx-IN", "mai-IN", "doi-IN",
 		},
 		Models:               []string{"saaras:v3", "saarika:v2.5"},
-		SupportsStreaming:    false,
+		SupportsStreaming:    true,
 		SupportsDiarization:  false,
 		SupportsMultilingual: true,
 	}
@@ -69,49 +72,98 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 		model = "saaras:v3"
 	}
 
-	sampleRate := opts.SampleRate
-	if sampleRate <= 0 {
-		sampleRate = 16000
+	sampleRate := normalizeSarvamSampleRate(opts.SampleRate)
+	language := normalizeSarvamLang(opts.Language)
+	mode := normalizeSarvamMode(os.Getenv("SARVAM_STT_MODE"))
+	wsURL := sarvamStreamingURL()
+
+	q := url.Values{}
+	q.Set("language-code", language)
+	q.Set("model", model)
+	q.Set("mode", mode)
+	q.Set("sample_rate", strconv.Itoa(sampleRate))
+	q.Set("input_audio_codec", "pcm_s16le")
+	q.Set("flush_signal", "true")
+	q.Set("vad_signals", "true")
+	if endpointMS := opts.EndpointingMS; endpointMS > 0 && endpointMS <= 700 {
+		q.Set("high_vad_sensitivity", "true")
 	}
 
-	return &sarvamStreamAdapter{
-		apiKey:      apiKey,
-		model:       model,
-		language:    normalizeSarvamLang(opts.Language),
-		sampleRate:  sampleRate,
-		audioBuffer: make([]byte, 0, sampleRate*2),
-		resultChan:  make(chan TranscriptEvent, 10),
-		ctx:         ctx,
-		httpClient: &http.Client{
-			Timeout: 45 * time.Second,
-		},
-	}, nil
+	connURL := wsURL + "?" + q.Encode()
+	header := http.Header{}
+	header.Set("Api-Subscription-Key", apiKey)
+
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, connURL, header)
+	if err != nil {
+		if resp != nil {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			if len(bodyBytes) > 0 {
+				return nil, fmt.Errorf("sarvam websocket dial failed: %w (status=%s body=%s)", err, resp.Status, strings.TrimSpace(string(bodyBytes)))
+			}
+			return nil, fmt.Errorf("sarvam websocket dial failed: %w (status=%s)", err, resp.Status)
+		}
+		return nil, fmt.Errorf("sarvam websocket dial failed: %w", err)
+	}
+
+	stream := &sarvamStreamAdapter{
+		conn:       conn,
+		resultChan: make(chan TranscriptEvent, 32),
+		closed:     make(chan struct{}),
+		language:   language,
+		sampleRate: sampleRate,
+	}
+
+	logger.DebugCF("livekit", "Sarvam STT websocket opened", map[string]any{
+		"provider":    "sarvam",
+		"model":       model,
+		"mode":        mode,
+		"language":    language,
+		"sample_rate": sampleRate,
+	})
+
+	go stream.readLoop()
+	return stream, nil
 }
 
 type sarvamStreamAdapter struct {
-	apiKey      string
-	model       string
-	language    string
-	sampleRate  int
-	audioBuffer []byte
-	resultChan  chan TranscriptEvent
-	ctx         context.Context
-	httpClient  *http.Client
-	mu          sync.Mutex
-	closed      bool
+	conn       *websocket.Conn
+	resultChan chan TranscriptEvent
+	closed     chan struct{}
+	language   string
+	sampleRate int
+	mu         sync.Mutex
+	closeOnce  sync.Once
+	speaking   bool
 }
 
 func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return fmt.Errorf("stream is closed")
-	}
 	if len(pcm) == 0 {
 		return nil
 	}
-	s.audioBuffer = append(s.audioBuffer, pcm...)
+	select {
+	case <-s.closed:
+		return fmt.Errorf("sarvam stream closed")
+	default:
+	}
+
+	msg := map[string]any{
+		"audio": map[string]any{
+			"data":        base64.StdEncoding.EncodeToString(pcm),
+			"sample_rate": s.sampleRate,
+			"encoding":    "pcm_s16le",
+		},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("sarvam: marshal audio message: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		return fmt.Errorf("sarvam: send audio: %w", err)
+	}
 	return nil
 }
 
@@ -120,118 +172,183 @@ func (s *sarvamStreamAdapter) Results() <-chan TranscriptEvent {
 }
 
 func (s *sarvamStreamAdapter) Finalize() error {
+	select {
+	case <-s.closed:
+		return fmt.Errorf("sarvam stream closed")
+	default:
+	}
+
+	data, err := json.Marshal(map[string]string{"type": "flush"})
+	if err != nil {
+		return fmt.Errorf("sarvam: marshal flush message: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.closed {
-		return fmt.Errorf("stream is closed")
+	if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		return fmt.Errorf("sarvam: send flush: %w", err)
 	}
-	return s.transcribeLocked()
-}
-
-func (s *sarvamStreamAdapter) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	close(s.resultChan)
+	logger.DebugCF("livekit", "Sarvam flush sent", map[string]any{"provider": "sarvam"})
 	return nil
 }
 
-func (s *sarvamStreamAdapter) transcribeLocked() (err error) {
-	if len(s.audioBuffer) == 0 {
-		return nil
-	}
-	// Do not carry failed audio into the next segment. If this transcription
-	// attempt fails for any reason (provider rejects long audio, network/API
-	// error, decode failure), drop the buffered segment.
+func (s *sarvamStreamAdapter) Close() error {
+	var retErr error
+	s.closeOnce.Do(func() {
+		close(s.closed)
+
+		s.mu.Lock()
+		_ = s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		retErr = s.conn.Close()
+		s.mu.Unlock()
+
+		close(s.resultChan)
+	})
+	return retErr
+}
+
+func (s *sarvamStreamAdapter) readLoop() {
 	defer func() {
-		if err != nil {
-			s.audioBuffer = s.audioBuffer[:0]
-		}
+		_ = s.Close()
 	}()
 
-	wavData, err := createWAVFromPCM(s.audioBuffer, s.sampleRate)
-	if err != nil {
-		return fmt.Errorf("sarvam: create WAV: %w", err)
-	}
+	for {
+		select {
+		case <-s.closed:
+			return
+		default:
+		}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	filePart, err := writer.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return fmt.Errorf("sarvam: create multipart file: %w", err)
-	}
-	if _, err := filePart.Write(wavData); err != nil {
-		return fmt.Errorf("sarvam: write multipart file: %w", err)
-	}
-	if err := writer.WriteField("model", s.model); err != nil {
-		return fmt.Errorf("sarvam: write model field: %w", err)
-	}
-	if s.language != "" {
-		if err := writer.WriteField("language_code", s.language); err != nil {
-			return fmt.Errorf("sarvam: write language field: %w", err)
+		_, data, err := s.conn.ReadMessage()
+		if err != nil {
+			select {
+			case <-s.closed:
+			default:
+				logger.WarnCF("livekit", "Sarvam STT read error", map[string]any{
+					"provider": "sarvam",
+					"error":    err.Error(),
+				})
+			}
+			return
+		}
+
+		evt, ok := s.parseMessage(data)
+		if !ok {
+			continue
+		}
+
+		select {
+		case s.resultChan <- evt:
+		case <-s.closed:
+			return
 		}
 	}
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("sarvam: finalize multipart body: %w", err)
-	}
+}
 
-	req, err := http.NewRequestWithContext(s.ctx, http.MethodPost, sarvamSTTURL, &body)
-	if err != nil {
-		return fmt.Errorf("sarvam: create request: %w", err)
-	}
-	req.Header.Set("api-subscription-key", s.apiKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("sarvam: transcription request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respData, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("sarvam: transcription failed: %s - %s", resp.Status, string(respData))
-	}
-
-	var out struct {
+func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) {
+	var msg struct {
+		Type string `json:"type"`
+		Data struct {
+			RequestID    string `json:"request_id"`
+			Transcript   string `json:"transcript"`
+			LanguageCode string `json:"language_code"`
+			SignalType   string `json:"signal_type"`
+			Metrics      struct {
+				AudioDuration     float64 `json:"audio_duration"`
+				ProcessingLatency float64 `json:"processing_latency"`
+			} `json:"metrics"`
+		} `json:"data"`
 		Transcript   string `json:"transcript"`
 		LanguageCode string `json:"language_code"`
+		Error        string `json:"error"`
+		Message      string `json:"message"`
+		SignalType   string `json:"signal_type"`
 	}
-	if err := json.Unmarshal(respData, &out); err != nil {
-		return fmt.Errorf("sarvam: decode response: %w", err)
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return TranscriptEvent{}, false
 	}
 
-	text := strings.TrimSpace(out.Transcript)
-	if text != "" {
-		lang := strings.TrimSpace(out.LanguageCode)
+	switch strings.ToLower(strings.TrimSpace(msg.Type)) {
+	case "speech_start":
+		s.speaking = true
+		return TranscriptEvent{SpeechStart: true, Language: s.language}, true
+	case "speech_end":
+		s.speaking = false
+		return TranscriptEvent{IsFinal: true, SpeechEnd: true, Language: s.language}, true
+	case "events":
+		switch strings.ToUpper(firstNonEmpty(msg.Data.SignalType, msg.SignalType)) {
+		case "START_SPEECH":
+			s.speaking = true
+			return TranscriptEvent{SpeechStart: true, Language: s.language}, true
+		case "END_SPEECH":
+			s.speaking = false
+			return TranscriptEvent{IsFinal: true, SpeechEnd: true, Language: s.language}, true
+		default:
+			return TranscriptEvent{}, false
+		}
+	case "data", "transcript":
+		text := strings.TrimSpace(msg.Data.Transcript)
+		if text == "" {
+			text = strings.TrimSpace(msg.Transcript)
+		}
+		if text == "" {
+			return TranscriptEvent{}, false
+		}
+		lang := strings.TrimSpace(msg.Data.LanguageCode)
+		if lang == "" {
+			lang = strings.TrimSpace(msg.LanguageCode)
+		}
 		if lang == "" {
 			lang = s.language
 		}
+
 		evt := TranscriptEvent{
 			Text:      text,
 			IsFinal:   true,
 			SpeechEnd: true,
 			Language:  lang,
-			Duration:  s.calculateDuration(),
+			Duration:  msg.Data.Metrics.AudioDuration,
 		}
-		select {
-		case s.resultChan <- evt:
-		default:
+		if !s.speaking {
+			evt.SpeechStart = true
 		}
+		s.speaking = false
+		return evt, true
+	case "error":
+		logger.ErrorCF("livekit", "Sarvam STT error response", map[string]any{
+			"provider": "sarvam",
+			"error":    firstNonEmpty(msg.Error, msg.Message),
+			"raw":      string(data),
+		})
+		return TranscriptEvent{}, false
+	default:
+		return TranscriptEvent{}, false
 	}
-
-	s.audioBuffer = s.audioBuffer[:0]
-	return nil
 }
 
-func (s *sarvamStreamAdapter) calculateDuration() float64 {
-	numSamples := len(s.audioBuffer) / 2
-	return float64(numSamples) / float64(s.sampleRate)
+func sarvamStreamingURL() string {
+	if override := strings.TrimSpace(os.Getenv("SARVAM_STT_STREAMING_URL")); override != "" {
+		return override
+	}
+	return sarvamSTTWebsocketURL
+}
+
+func normalizeSarvamSampleRate(sampleRate int) int {
+	switch sampleRate {
+	case 8000, 16000:
+		return sampleRate
+	default:
+		return 16000
+	}
+}
+
+func normalizeSarvamMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "translate", "verbatim", "translit", "codemix":
+		return strings.TrimSpace(strings.ToLower(mode))
+	default:
+		return "transcribe"
+	}
 }
 
 func normalizeSarvamLang(lang string) string {
@@ -264,8 +381,18 @@ func normalizeSarvamLang(lang string) string {
 	default:
 		// Pass through valid BCP-47 style values (e.g. hi-IN, en-IN, ur-IN).
 		if strings.Contains(lang, "-") {
-			return strings.TrimSpace(lang)
+			parts := strings.SplitN(lang, "-", 2)
+			return strings.ToLower(parts[0]) + "-" + strings.ToUpper(parts[1])
 		}
 		return "unknown"
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
