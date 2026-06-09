@@ -135,6 +135,7 @@ func main() {
 		"language_lock_enabled":             lkCfg.Runtime.LanguageLockEnabled,
 		"detailed_trace_enabled":            lkCfg.Runtime.DetailedTraceEnabled,
 		"trace_sample_rate":                 lkCfg.Runtime.TraceSampleRate,
+		"turn_timeout_seconds":              lkCfg.Runtime.TurnTimeoutSeconds,
 	})
 
 	// Initialize STT factory with PostgreSQL
@@ -1175,6 +1176,17 @@ func normalizeLiveKitRuntimeConfig(rt *config.LiveKitServiceRuntimeConfig) {
 	if rt.ProviderFailureCooldownSec <= 0 {
 		rt.ProviderFailureCooldownSec = 30
 	}
+	if rt.TurnTimeoutSeconds <= 0 {
+		rt.TurnTimeoutSeconds = 45
+	}
+	if rt.TurnTimeoutSeconds < 5 {
+		logger.WarnCF("livekit", "Runtime turn timeout too low; clamped to 5 seconds", map[string]any{"value": rt.TurnTimeoutSeconds})
+		rt.TurnTimeoutSeconds = 5
+	}
+	if rt.TurnTimeoutSeconds > 180 {
+		logger.WarnCF("livekit", "Runtime turn timeout too high; clamped to 180 seconds", map[string]any{"value": rt.TurnTimeoutSeconds})
+		rt.TurnTimeoutSeconds = 180
+	}
 	if rt.TraceSampleRate < 0 {
 		logger.WarnCF("livekit", "Runtime trace sample rate too low; clamped to 0", map[string]any{"value": rt.TraceSampleRate})
 		rt.TraceSampleRate = 0
@@ -1224,6 +1236,16 @@ func applyLiveKitRuntimeEnvOverrides(rt *config.LiveKitServiceRuntimeConfig) {
 			rt.TraceSampleRate = value
 		} else {
 			logger.WarnCF("livekit", "Invalid runtime trace sample rate env override", map[string]any{
+				"value": raw,
+				"error": err.Error(),
+			})
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RUNTIME_TURN_TIMEOUT_SECONDS")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil {
+			rt.TurnTimeoutSeconds = value
+		} else {
+			logger.WarnCF("livekit", "Invalid runtime turn timeout env override", map[string]any{
 				"value": raw,
 				"error": err.Error(),
 			})

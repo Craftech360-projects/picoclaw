@@ -900,6 +900,7 @@ type LiveKitServiceRuntimeConfig struct {
 	LanguageLockEnabled        bool    `json:"language_lock_enabled,omitempty"             env:"PICOCLAW_LIVEKIT_RUNTIME_LANGUAGE_LOCK_ENABLED"`
 	DetailedTraceEnabled       bool    `json:"detailed_trace_enabled,omitempty"            env:"PICOCLAW_LIVEKIT_RUNTIME_DETAILED_TRACE_ENABLED"`
 	TraceSampleRate            float64 `json:"trace_sample_rate,omitempty"                 env:"PICOCLAW_LIVEKIT_RUNTIME_TRACE_SAMPLE_RATE"`
+	TurnTimeoutSeconds         int     `json:"turn_timeout_seconds,omitempty"              env:"PICOCLAW_LIVEKIT_RUNTIME_TURN_TIMEOUT_SECONDS"`
 }
 
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.

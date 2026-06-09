@@ -596,6 +596,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	if rs.stt == nil {
 		logger.WarnC("livekit", "STT provider not configured")
+		rs.speakSTTUnavailableFallback(errors.New("stt provider not configured"))
 		return
 	}
 
@@ -629,6 +630,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 			"provider": rs.stt.Name(),
 			"error":    err.Error(),
 		})
+		rs.speakSTTUnavailableFallback(err)
 		return
 	}
 
@@ -706,6 +708,44 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	default:
 		go pipeline.TriggerGreeting(rs.ctx, pipeline.sessionKey())
 	}
+}
+
+func sttUnavailableFallbackPhrase() string {
+	return "I'm having trouble hearing you right now. Please reconnect and try again."
+}
+
+func (rs *RoomSession) speakSTTUnavailableFallback(cause error) {
+	if rs == nil || rs.tts == nil || rs.localTrack == nil || rs.participant == nil {
+		return
+	}
+	parent := rs.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, liveKitTimeoutFallbackMax)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	errText := ""
+	if cause != nil {
+		errText = cause.Error()
+	}
+	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, nil)
+	pipeline.emitRuntimeEvent("fallback_used", pipeline.sessionKey(), "stt_unavailable", errText, nil)
+	logger.WarnCF("livekit", "STT unavailable; playing fallback", map[string]any{
+		"room":    rs.roomName(),
+		"session": pipeline.sessionKey(),
+		"error":   errText,
+	})
+	pipeline.setTTSCancel(cancel)
+	pipeline.publishState("listening", "speaking")
+	pipeline.publishSpeechCreated()
+	pipeline.synthesizeAndPlay(ctx, sttUnavailableFallbackPhrase())
+	pipeline.publishState("speaking", "listening")
 }
 
 func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant) {

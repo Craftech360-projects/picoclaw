@@ -96,6 +96,7 @@ func TestApplyLiveKitRuntimeEnvOverrides(t *testing.T) {
 	t.Setenv("PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS", "800")
 	t.Setenv("PICOCLAW_LIVEKIT_RUNTIME_DETAILED_TRACE_ENABLED", "true")
 	t.Setenv("PICOCLAW_LIVEKIT_RUNTIME_TRACE_SAMPLE_RATE", "0.25")
+	t.Setenv("PICOCLAW_LIVEKIT_RUNTIME_TURN_TIMEOUT_SECONDS", "30")
 
 	rt := config.LiveKitServiceRuntimeConfig{
 		VADThreshold:  0.68,
@@ -114,6 +115,9 @@ func TestApplyLiveKitRuntimeEnvOverrides(t *testing.T) {
 	}
 	if rt.TraceSampleRate != 0.25 {
 		t.Fatalf("TraceSampleRate = %v, want 0.25", rt.TraceSampleRate)
+	}
+	if rt.TurnTimeoutSeconds != 30 {
+		t.Fatalf("TurnTimeoutSeconds = %d, want 30", rt.TurnTimeoutSeconds)
 	}
 }
 

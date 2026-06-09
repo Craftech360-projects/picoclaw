@@ -3,6 +3,7 @@ package livekit
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -10,9 +11,12 @@ import (
 	"time"
 
 	livekitproto "github.com/livekit/protocol/livekit"
+	protoLogger "github.com/livekit/protocol/logger"
+	lkmedia "github.com/livekit/server-sdk-go/v2/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
 )
 
@@ -419,6 +423,67 @@ func TestHandleUtteranceDoesNotRetryCanceledChatStream(t *testing.T) {
 	}
 }
 
+func TestHandleUtteranceForTurnResetsStateOnLLMTimeout(t *testing.T) {
+	provider := newBlockingStreamingProvider()
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	localTrack, err := lkmedia.NewPCMLocalTrack(24000, 1, protoLogger.GetLogger())
+	if err != nil {
+		t.Fatalf("NewPCMLocalTrack error = %v", err)
+	}
+	defer localTrack.Close()
+	ttsProvider := &capturingTTSProvider{}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+		localTrack:  localTrack,
+		sampleRate:  24000,
+	}, bridge, ttsProvider, nil)
+	pipeline.turnTimeout = 25 * time.Millisecond
+
+	var states []string
+	pipeline.publishAgentState = func(oldState, newState string) {
+		states = append(states, oldState+"->"+newState)
+	}
+
+	turn := pipeline.startTurn(context.Background(), "test_timeout")
+	_, err = pipeline.HandleUtteranceForTurn(turn, "livekit:device:a", "hello")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("HandleUtteranceForTurn error = %v, want deadline exceeded", err)
+	}
+	if !slices.Contains(states, "listening->thinking") {
+		t.Fatalf("state transitions = %v, want listening->thinking", states)
+	}
+	if !slices.Contains(states, "thinking->listening") {
+		t.Fatalf("state transitions = %v, want timeout reset to listening", states)
+	}
+	if got, want := ttsProvider.LastText(), pipeline.retryFallbackPhrase(); got != want {
+		t.Fatalf("timeout fallback TTS text = %q, want %q", got, want)
+	}
+}
+
+func TestReadAudioChunkReturnsOnContextCancelAndClosesStream(t *testing.T) {
+	stream := &blockingAudioStream{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	_, err := readAudioChunk(ctx, stream)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("readAudioChunk error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-stream.closed:
+	case <-time.After(time.Second):
+		t.Fatal("readAudioChunk did not close stream after context cancellation")
+	}
+}
+
 func TestTriggerGreetingPublishesSpeechCreatedOnFirstChunk(t *testing.T) {
 	dynamicGreetingCooldownUntilUnix.Store(0)
 	provider := &countingStreamingProvider{calls: make(chan string, 4)}
@@ -756,6 +821,58 @@ func (p *rateLimitedStreamingProvider) ChatStream(
 }
 
 func (p *rateLimitedStreamingProvider) GetDefaultModel() string { return "test" }
+
+type blockingAudioStream struct {
+	once        sync.Once
+	readStarted chan struct{}
+	closed      chan struct{}
+}
+
+func (s *blockingAudioStream) Read() ([]byte, error) {
+	s.once.Do(func() {
+		close(s.readStarted)
+	})
+	<-s.closed
+	return nil, io.EOF
+}
+
+func (s *blockingAudioStream) Close() error {
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
+type capturingTTSProvider struct {
+	mu    sync.Mutex
+	texts []string
+}
+
+func (p *capturingTTSProvider) Synthesize(ctx context.Context, text string) (tts.AudioStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	p.texts = append(p.texts, text)
+	p.mu.Unlock()
+	return emptyAudioStream{}, nil
+}
+
+func (p *capturingTTSProvider) LastText() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.texts) == 0 {
+		return ""
+	}
+	return p.texts[len(p.texts)-1]
+}
+
+type emptyAudioStream struct{}
+
+func (emptyAudioStream) Read() ([]byte, error) { return nil, io.EOF }
+func (emptyAudioStream) Close() error          { return nil }
 
 func TestPCM16ByteAssemblerCarriesSplitSampleAcrossChunks(t *testing.T) {
 	assembler := &pcm16ByteAssembler{}
