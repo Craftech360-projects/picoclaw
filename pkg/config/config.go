@@ -898,6 +898,8 @@ type LiveKitServiceRuntimeConfig struct {
 	RateLimitCooldownSeconds   int     `json:"rate_limit_cooldown_seconds,omitempty"      env:"PICOCLAW_LIVEKIT_RUNTIME_RATE_LIMIT_COOLDOWN_SECONDS"`
 	ProviderFailureCooldownSec int     `json:"provider_failure_cooldown_seconds,omitempty" env:"PICOCLAW_LIVEKIT_RUNTIME_PROVIDER_FAILURE_COOLDOWN_SECONDS"`
 	LanguageLockEnabled        bool    `json:"language_lock_enabled,omitempty"             env:"PICOCLAW_LIVEKIT_RUNTIME_LANGUAGE_LOCK_ENABLED"`
+	DetailedTraceEnabled       bool    `json:"detailed_trace_enabled,omitempty"            env:"PICOCLAW_LIVEKIT_RUNTIME_DETAILED_TRACE_ENABLED"`
+	TraceSampleRate            float64 `json:"trace_sample_rate,omitempty"                 env:"PICOCLAW_LIVEKIT_RUNTIME_TRACE_SAMPLE_RATE"`
 }
 
 // LiveKitServiceConfig configures the standalone LiveKit voice agent service.

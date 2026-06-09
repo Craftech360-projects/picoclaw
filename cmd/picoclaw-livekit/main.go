@@ -133,6 +133,8 @@ func main() {
 		"rate_limit_cooldown_seconds":       lkCfg.Runtime.RateLimitCooldownSeconds,
 		"provider_failure_cooldown_seconds": lkCfg.Runtime.ProviderFailureCooldownSec,
 		"language_lock_enabled":             lkCfg.Runtime.LanguageLockEnabled,
+		"detailed_trace_enabled":            lkCfg.Runtime.DetailedTraceEnabled,
+		"trace_sample_rate":                 lkCfg.Runtime.TraceSampleRate,
 	})
 
 	// Initialize STT factory with PostgreSQL
@@ -734,12 +736,14 @@ func main() {
 				"max_tokens":  voiceMaxTokens,
 				"temperature": 0.3,
 			},
-			SessionLanguageName: sessionLanguagePolicy.DisplayName,
-			SessionLanguageCode: sessionLanguagePolicy.RawCode,
-			LanguageLockEnabled: lkCfg.Runtime.LanguageLockEnabled,
-			AllowedToolNames:    liveKitVoiceToolAllowlist(),
-			WorkspaceArtifacts:  artifactStore,
-			MCPManager:          nil,
+			SessionLanguageName:  sessionLanguagePolicy.DisplayName,
+			SessionLanguageCode:  sessionLanguagePolicy.RawCode,
+			LanguageLockEnabled:  lkCfg.Runtime.LanguageLockEnabled,
+			DetailedTraceEnabled: lkCfg.Runtime.DetailedTraceEnabled,
+			TraceSampleRate:      lkCfg.Runtime.TraceSampleRate,
+			AllowedToolNames:     liveKitVoiceToolAllowlist(),
+			WorkspaceArtifacts:   artifactStore,
+			MCPManager:           nil,
 			OnClose: func() {
 				stopWorkspaceSyncLoop()
 				if cronService != nil {
@@ -1171,6 +1175,14 @@ func normalizeLiveKitRuntimeConfig(rt *config.LiveKitServiceRuntimeConfig) {
 	if rt.ProviderFailureCooldownSec <= 0 {
 		rt.ProviderFailureCooldownSec = 30
 	}
+	if rt.TraceSampleRate < 0 {
+		logger.WarnCF("livekit", "Runtime trace sample rate too low; clamped to 0", map[string]any{"value": rt.TraceSampleRate})
+		rt.TraceSampleRate = 0
+	}
+	if rt.TraceSampleRate > 1 {
+		logger.WarnCF("livekit", "Runtime trace sample rate too high; clamped to 1", map[string]any{"value": rt.TraceSampleRate})
+		rt.TraceSampleRate = 1
+	}
 }
 
 func applyLiveKitRuntimeEnvOverrides(rt *config.LiveKitServiceRuntimeConfig) {
@@ -1192,6 +1204,26 @@ func applyLiveKitRuntimeEnvOverrides(rt *config.LiveKitServiceRuntimeConfig) {
 			rt.VADEndpointMS = value
 		} else {
 			logger.WarnCF("livekit", "Invalid runtime VAD endpoint env override", map[string]any{
+				"value": raw,
+				"error": err.Error(),
+			})
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RUNTIME_DETAILED_TRACE_ENABLED")); raw != "" {
+		if value, err := strconv.ParseBool(raw); err == nil {
+			rt.DetailedTraceEnabled = value
+		} else {
+			logger.WarnCF("livekit", "Invalid runtime detailed trace env override", map[string]any{
+				"value": raw,
+				"error": err.Error(),
+			})
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_RUNTIME_TRACE_SAMPLE_RATE")); raw != "" {
+		if value, err := strconv.ParseFloat(raw, 64); err == nil {
+			rt.TraceSampleRate = value
+		} else {
+			logger.WarnCF("livekit", "Invalid runtime trace sample rate env override", map[string]any{
 				"value": raw,
 				"error": err.Error(),
 			})

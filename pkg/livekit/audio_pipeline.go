@@ -590,6 +590,32 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 	return ap
 }
 
+func (ap *AudioPipeline) logTextPreview(sessionKey, text string, limit int) string {
+	if ap != nil && ap.bridge != nil {
+		return ap.bridge.logContentPreview(sessionKey, text, limit)
+	}
+	if ap != nil && ap.session != nil {
+		return newLogContentPolicy(
+			ap.session.runtime.DetailedTraceEnabled,
+			ap.session.runtime.TraceSampleRate,
+		).contentPreview(sessionKey, text, limit)
+	}
+	return redactedLogValue
+}
+
+func (ap *AudioPipeline) logTextRedacted(sessionKey string) bool {
+	if ap != nil && ap.bridge != nil {
+		return !ap.bridge.logContentPolicy.enabledForSession(sessionKey)
+	}
+	if ap != nil && ap.session != nil {
+		return !newLogContentPolicy(
+			ap.session.runtime.DetailedTraceEnabled,
+			ap.session.runtime.TraceSampleRate,
+		).enabledForSession(sessionKey)
+	}
+	return true
+}
+
 // HandleUtterance processes a complete user utterance: calls the agent and speaks the response.
 func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string, text string, onDone func()) (bool, error) {
 	if strings.TrimSpace(text) == "" {
@@ -1133,14 +1159,17 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	}
 
 	dispatchUtterance := func(trigger, text string, speechStartSnapshot, firstPartialSnapshot, firstFinalSnapshot time.Time) {
+		sessionKey := ap.sessionKey()
 		normalizedText := normalizeUtteranceForDuplicateCheck(text)
 		if normalizedText != "" &&
 			normalizedText == lastFlushedText &&
 			time.Since(lastFlushedAt) < 2*time.Second {
 			logger.DebugCF("livekit", "Suppressing duplicate speech end with same text", map[string]any{
-				"session": ap.sessionKey(),
-				"text":    text,
-				"trigger": trigger,
+				"session":       sessionKey,
+				"text":          ap.logTextPreview(sessionKey, text, 240),
+				"text_len":      len(text),
+				"text_redacted": ap.logTextRedacted(sessionKey),
+				"trigger":       trigger,
 			})
 			return
 		}
@@ -1148,12 +1177,13 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		lastFlushedAt = time.Now()
 
 		logger.DebugCF("livekit", "Speech end with text", map[string]any{
-			"session": ap.sessionKey(),
-			"text":    text,
-			"trigger": trigger,
+			"session":       sessionKey,
+			"text":          ap.logTextPreview(sessionKey, text, 240),
+			"text_len":      len(text),
+			"text_redacted": ap.logTextRedacted(sessionKey),
+			"trigger":       trigger,
 		})
 
-		sessionKey := ap.sessionKey()
 		if sessionKey == "" {
 			return
 		}
@@ -1240,9 +1270,12 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				STTFirstFin:  firstFinalSnapshot,
 			}
 			startShortHoldTimer()
+			sessionKey := ap.sessionKey()
 			logger.InfoCF("livekit", "Holding short utterance before LLM dispatch", map[string]any{
 				"session":       ap.sessionKey(),
-				"text":          text,
+				"text":          ap.logTextPreview(sessionKey, text, 240),
+				"text_len":      len(text),
+				"text_redacted": ap.logTextRedacted(sessionKey),
 				"hold_delay_ms": shortUtteranceHoldDelay.Milliseconds(),
 			})
 			return
@@ -1331,17 +1364,23 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 						pendingShortText = pendingShort.Text
 					}
 					if shouldSuppressBargeInTranscript(evt.Text, lastBargeInText, lastBargeInAt, now, pendingShortText) {
+						sessionKey := ap.sessionKey()
 						logger.InfoCF("livekit", "Suppressing duplicate short barge-in transcript", map[string]any{
-							"session":      ap.sessionKey(),
-							"text":         evt.Text,
-							"window_ms":    bargeInDuplicateWindow.Milliseconds(),
-							"last_text":    lastBargeInText,
-							"pending_text": pendingShortText,
+							"session":       ap.sessionKey(),
+							"text":          ap.logTextPreview(sessionKey, evt.Text, 240),
+							"text_len":      len(evt.Text),
+							"window_ms":     bargeInDuplicateWindow.Milliseconds(),
+							"last_text":     ap.logTextPreview(sessionKey, lastBargeInText, 240),
+							"pending_text":  ap.logTextPreview(sessionKey, pendingShortText, 240),
+							"text_redacted": ap.logTextRedacted(sessionKey),
 						})
 					} else {
+						sessionKey := ap.sessionKey()
 						logger.InfoCF("livekit", "Transcript confirmed user speech; interrupting active agent audio if present", map[string]any{
-							"session": ap.sessionKey(),
-							"text":    evt.Text,
+							"session":       sessionKey,
+							"text":          ap.logTextPreview(sessionKey, evt.Text, 240),
+							"text_len":      len(evt.Text),
+							"text_redacted": ap.logTextRedacted(sessionKey),
 						})
 						ap.cancelTTS("stt_transcript_after_vad")
 						ap.turns.Cancel("stt_transcript_after_vad")
@@ -1843,9 +1882,13 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 
 func (ap *AudioPipeline) synthesizeDeduped(ctx context.Context, deduper *speechChunkDeduper, text string) {
 	if deduper != nil && !deduper.ShouldSpeak(text) {
+		sessionKey := ap.sessionKey()
+		cleanText := sanitizeVoiceTextForTTS(text)
 		logger.InfoCF("livekit", "Suppressing duplicate assistant speech chunk", map[string]any{
-			"session": ap.sessionKey(),
-			"text":    sanitizeVoiceTextForTTS(text),
+			"session":       sessionKey,
+			"text":          ap.logTextPreview(sessionKey, cleanText, 240),
+			"text_len":      len(cleanText),
+			"text_redacted": ap.logTextRedacted(sessionKey),
 		})
 		return
 	}

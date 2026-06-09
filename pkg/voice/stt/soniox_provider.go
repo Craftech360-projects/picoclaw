@@ -284,7 +284,8 @@ func (s *sonioxRealtimeStream) readLoop() {
 		case s.resultChan <- evt:
 			logger.DebugCF("livekit", "Soniox transcript event emitted", map[string]any{
 				"provider":    "soniox",
-				"text":        finalText,
+				"text":        "[redacted]",
+				"text_len":    len(finalText),
 				"is_final":    hasFinal,
 				"speech_end":  hasFinMarker,
 				"confidence":  conf,

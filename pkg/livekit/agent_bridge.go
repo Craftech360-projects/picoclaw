@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"regexp"
 	"sort"
@@ -48,6 +49,7 @@ const (
 	maxToolDefsForLLM   = 20
 	maxGemini429Retries = 2
 	maxLLMLogContentLen = 1200
+	redactedLogValue    = "[redacted]"
 
 	defaultLiveKitToolExecutionTimeout = 20 * time.Second
 )
@@ -133,6 +135,7 @@ type AgentBridge struct {
 	contextBuilder       *agent.ContextBuilder
 	maxIterations        int
 	toolExecutionTimeout time.Duration
+	logContentPolicy     logContentPolicy
 	llmOptions           map[string]any
 	proactiveLLMOptions  map[string]any
 	asyncEventChan       chan AsyncEvent // receives background task completions
@@ -177,6 +180,8 @@ type AgentBridgeConfig struct {
 	OnAfterClose         func()
 	MaxIterations        int
 	ToolExecutionTimeout time.Duration
+	DetailedTraceEnabled bool
+	TraceSampleRate      float64
 	LLMOptions           map[string]any
 	AsyncEventChan       chan AsyncEvent // optional channel for background task results
 	RuntimeEventChan     chan RuntimeEvent
@@ -233,6 +238,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		contextBuilder:            cfg.AgentInstance.ContextBuilder,
 		maxIterations:             cfg.MaxIterations,
 		toolExecutionTimeout:      toolTimeout,
+		logContentPolicy:          newLogContentPolicy(cfg.DetailedTraceEnabled, cfg.TraceSampleRate),
 		llmOptions:                cfg.LLMOptions,
 		proactiveLLMOptions:       buildProactiveLLMOptions(cfg.LLMOptions),
 		asyncEventChan:            asyncChan,
@@ -625,11 +631,12 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		Content: resp.Content,
 	}
 	logger.InfoCF("livekit", "LLM response received", map[string]any{
-		"session":         sessionKey,
-		"profile":         profile,
-		"content":         trimForLog(resp.Content, maxLLMLogContentLen),
-		"content_len":     len(resp.Content),
-		"tool_call_count": len(resp.ToolCalls),
+		"session":          sessionKey,
+		"profile":          profile,
+		"content":          ab.logContentPreview(sessionKey, resp.Content, maxLLMLogContentLen),
+		"content_len":      len(resp.Content),
+		"content_redacted": !ab.logContentPolicy.enabledForSession(sessionKey),
+		"tool_call_count":  len(resp.ToolCalls),
 	})
 
 	normalized := normalizeToolCalls(resp.ToolCalls)
@@ -708,8 +715,12 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 				ToolName:   tc.Name,
 			}
 			if result != nil && result.IsError {
-				evt.Error = result.ForLLM
 				evt.Cause = "tool_error"
+				evt.Error = ab.logContentPreview(asyncSessionKey, result.ForLLM, 240)
+				evt.Metadata = map[string]any{
+					"error_len":      len(result.ForLLM),
+					"error_redacted": !ab.logContentPolicy.enabledForSession(asyncSessionKey),
+				}
 			}
 			ab.EmitRuntimeEvent(evt)
 			toolMsg := providers.Message{
@@ -1165,15 +1176,73 @@ func trimForLog(content string, limit int) string {
 	return content[:limit] + "...(truncated)"
 }
 
-func toolArgsPreview(args map[string]any, limit int) string {
+type logContentPolicy struct {
+	detailedTraceEnabled bool
+	sampleRate           float64
+}
+
+func newLogContentPolicy(detailedTraceEnabled bool, sampleRate float64) logContentPolicy {
+	if sampleRate < 0 {
+		sampleRate = 0
+	}
+	if sampleRate > 1 {
+		sampleRate = 1
+	}
+	return logContentPolicy{
+		detailedTraceEnabled: detailedTraceEnabled,
+		sampleRate:           sampleRate,
+	}
+}
+
+func (p logContentPolicy) enabledForSession(sessionKey string) bool {
+	if p.detailedTraceEnabled {
+		return true
+	}
+	if p.sampleRate <= 0 {
+		return false
+	}
+	if p.sampleRate >= 1 {
+		return true
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.TrimSpace(sessionKey)))
+	bucket := float64(h.Sum32()) / float64(^uint32(0))
+	return bucket < p.sampleRate
+}
+
+func (p logContentPolicy) contentPreview(sessionKey, content string, limit int) string {
+	if !p.enabledForSession(sessionKey) {
+		return redactedLogValue
+	}
+	return trimForLog(content, limit)
+}
+
+func (p logContentPolicy) toolArgsPreview(sessionKey string, args map[string]any, limit int) string {
 	if len(args) == 0 {
 		return "{}"
+	}
+	if !p.enabledForSession(sessionKey) {
+		return redactedLogValue
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return fmt.Sprintf("<unmarshalable args: %v>", err)
 	}
 	return trimForLog(string(raw), limit)
+}
+
+func (ab *AgentBridge) logContentPreview(sessionKey, content string, limit int) string {
+	if ab == nil {
+		return redactedLogValue
+	}
+	return ab.logContentPolicy.contentPreview(sessionKey, content, limit)
+}
+
+func (ab *AgentBridge) logToolArgsPreview(sessionKey string, args map[string]any, limit int) string {
+	if ab == nil {
+		return redactedLogValue
+	}
+	return ab.logContentPolicy.toolArgsPreview(sessionKey, args, limit)
 }
 
 func buildProactiveLLMOptions(base map[string]any) map[string]any {
@@ -1209,8 +1278,10 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 		"tool":            tc.Name,
 		"tool_call_id":    tc.ID,
 		"session":         sessionKey,
-		"arguments":       toolArgsPreview(tc.Arguments, 240),
+		"arguments":       ab.logToolArgsPreview(sessionKey, tc.Arguments, 240),
 		"argument_fields": len(tc.Arguments),
+		"arguments_redacted": len(tc.Arguments) > 0 &&
+			!ab.logContentPolicy.enabledForSession(sessionKey),
 	})
 
 	// Create an async callback that routes completed background tasks to the
@@ -1259,7 +1330,8 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 		"session":      sessionKey,
 		"duration_ms":  durationMS,
 		"is_error":     result.IsError,
-		"llm_preview":  trimForLog(result.ContentForLLM(), 240),
+		"llm_preview":  ab.logContentPreview(sessionKey, result.ContentForLLM(), 240),
+		"llm_redacted": !ab.logContentPolicy.enabledForSession(sessionKey),
 	})
 	ab.maybeMirrorWorkspaceArtifact(ctx, sessionKey, tc, result)
 	return result
