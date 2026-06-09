@@ -3,6 +3,7 @@ package livekit
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	livekitproto "github.com/livekit/protocol/livekit"
@@ -34,5 +35,48 @@ func TestRoomSessionSpeaksSTTUnavailableFallback(t *testing.T) {
 
 	if got, want := ttsProvider.LastText(), sttUnavailableFallbackPhrase(); got != want {
 		t.Fatalf("STT unavailable fallback TTS text = %q, want %q", got, want)
+	}
+}
+
+func TestHandleDataMessageAbortInterruptsActivePipeline(t *testing.T) {
+	cancelCalls := 0
+	participant := &ParticipantState{
+		identity:   "device-a",
+		sessionKey: "livekit:device:a",
+		ttsCancel:  func() { cancelCalls++ },
+	}
+	rs := &RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: participant,
+	}
+	pipeline := NewAudioPipeline(rs, nil, nil, nil)
+	rs.activePipeline = pipeline
+
+	var states []string
+	pipeline.publishAgentState = func(oldState, newState string) {
+		states = append(states, oldState+"->"+newState)
+	}
+	turn := pipeline.startTurn(context.Background(), "test_turn")
+
+	rs.handleDataMessage([]byte(`{"type":"abort","session_id":"livekit:device:a","source":"mqtt_gateway"}`))
+
+	if cancelCalls != 1 {
+		t.Fatalf("tts cancel calls = %d, want 1", cancelCalls)
+	}
+	if err := turn.ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("turn context error = %v, want context.Canceled", err)
+	}
+	if !slices.Contains(states, "speaking->listening") {
+		t.Fatalf("state transitions = %v, want speaking->listening", states)
+	}
+	participant.mu.Lock()
+	gotReason := participant.ttsCancelReason
+	hasCancel := participant.ttsCancel != nil
+	participant.mu.Unlock()
+	if gotReason != "mqtt_abort" {
+		t.Fatalf("tts cancel reason = %q, want mqtt_abort", gotReason)
+	}
+	if hasCancel {
+		t.Fatal("tts cancel callback was not cleared")
 	}
 }

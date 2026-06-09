@@ -31,17 +31,18 @@ import (
 
 // RoomSession manages one agent in one LiveKit room (one job).
 type RoomSession struct {
-	worker        *Worker
-	jobID         string
-	roomInfo      *livekit.Room
-	bridge        *AgentBridge
-	room          *lksdk.Room
-	localTrack    *lkmedia.PCMLocalTrack
-	localTrackSID string
-	participant   *ParticipantState
-	mu            sync.Mutex
-	ctx           context.Context
-	cancel        context.CancelFunc
+	worker         *Worker
+	jobID          string
+	roomInfo       *livekit.Room
+	bridge         *AgentBridge
+	room           *lksdk.Room
+	localTrack     *lkmedia.PCMLocalTrack
+	localTrackSID  string
+	participant    *ParticipantState
+	activePipeline *AudioPipeline
+	mu             sync.Mutex
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	serverURL           string
 	token               string
@@ -314,6 +315,7 @@ func (rs *RoomSession) leave() {
 	}
 	participant := rs.participant
 	rs.participant = nil
+	rs.activePipeline = nil
 	localTrack := rs.localTrack
 	rs.localTrack = nil
 	room := rs.room
@@ -383,6 +385,13 @@ func (rs *RoomSession) handleDataMessage(data []byte) {
 		requireAck, _ := msg["require_ack"].(bool)
 		logger.InfoCF("livekit", "Received shutdown_request from gateway", map[string]any{"room": rs.roomInfo.Name})
 		go rs.handleShutdownRequest(sessionID, requireAck)
+	case "abort":
+		sessionID, _ := msg["session_id"].(string)
+		logger.InfoCF("livekit", "Received abort from gateway", map[string]any{
+			"room":       rs.roomInfo.Name,
+			"session_id": strings.TrimSpace(sessionID),
+		})
+		rs.interruptActivePipeline("mqtt_abort")
 	case "session_language_update":
 		update, ok := parseSessionLanguageUpdate(data)
 		if !ok {
@@ -393,6 +402,23 @@ func (rs *RoomSession) handleDataMessage(data []byte) {
 		}
 		go rs.handleSessionLanguageUpdate(update)
 	}
+}
+
+func (rs *RoomSession) interruptActivePipeline(reason string) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "external_abort"
+	}
+	rs.mu.Lock()
+	pipeline := rs.activePipeline
+	rs.mu.Unlock()
+	if pipeline == nil {
+		logger.InfoCF("livekit", "Abort received with no active audio pipeline", map[string]any{
+			"room":   rs.roomName(),
+			"reason": reason,
+		})
+		return
+	}
+	pipeline.interruptActiveSpeech(reason)
 }
 
 type sessionLanguageUpdate struct {
@@ -694,6 +720,9 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	}
 
 	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, vadEventInterface)
+	rs.mu.Lock()
+	rs.activePipeline = pipeline
+	rs.mu.Unlock()
 	go pipeline.RunInbound(rs.ctx, stream)
 
 	// Fire proactive LLM greeting precisely when the deepgram and VAD systems
@@ -756,6 +785,7 @@ func (rs *RoomSession) handleParticipantDisconnected(rp *lksdk.RemoteParticipant
 		return
 	}
 	rs.participant = nil
+	rs.activePipeline = nil
 	rs.mu.Unlock()
 
 	participant.mu.Lock()

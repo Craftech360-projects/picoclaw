@@ -324,7 +324,7 @@ func (c *voiceTurnController) StartWithTimeout(parent context.Context, reason st
 	} else {
 		ctx, cancel = context.WithCancel(parent)
 	}
-	c.active = voiceTurn{id: c.nextID, ctx: ctx, cancel: cancel}
+	c.active = voiceTurn{id: c.nextID, ctx: ctx, cancel: cancel, reason: reason}
 	return c.active
 }
 
@@ -342,6 +342,12 @@ func (c *voiceTurnController) ActiveReason() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.active.reason
+}
+
+func (c *voiceTurnController) ActiveSnapshot() (uint64, string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active.id, c.active.reason, c.active.cancel != nil
 }
 
 func (c *voiceTurnController) IsActive(turn voiceTurn) bool {
@@ -637,6 +643,35 @@ func (ap *AudioPipeline) publishState(oldState, newState string) {
 func (ap *AudioPipeline) resetAgentStateToListening() {
 	ap.publishState("thinking", "listening")
 	ap.publishState("speaking", "listening")
+}
+
+func (ap *AudioPipeline) interruptActiveSpeech(reason string) {
+	if ap == nil {
+		return
+	}
+	turnID, turnReason, hadActiveTurn := ap.turns.ActiveSnapshot()
+	hadActiveTTS := ap.hasActiveTTS()
+	logger.InfoCF("livekit", "Interrupting active agent audio", map[string]any{
+		"session":            ap.sessionKey(),
+		"reason":             reason,
+		"had_active_tts":     hadActiveTTS,
+		"had_active_turn":    hadActiveTurn,
+		"active_turn_id":     turnID,
+		"active_turn_reason": turnReason,
+		"track_sid":          ap.localTrackSID(),
+	})
+	ap.cancelTTS(reason)
+	ap.turns.Cancel(reason)
+}
+
+func (ap *AudioPipeline) hasActiveTTS() bool {
+	if ap == nil || ap.session == nil || ap.session.participant == nil {
+		return false
+	}
+	ps := ap.session.participant
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.ttsCancel != nil
 }
 
 func (ap *AudioPipeline) speakTurnTimeoutFallback(sessionKey string, cause error) {
@@ -1481,8 +1516,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 							"text_len":      len(evt.Text),
 							"text_redacted": ap.logTextRedacted(sessionKey),
 						})
-						ap.cancelTTS("stt_transcript_after_vad")
-						ap.turns.Cancel("stt_transcript_after_vad")
+						ap.interruptActiveSpeech("stt_transcript_after_vad")
 						lastBargeInText = evt.Text
 						lastBargeInAt = now
 					}
