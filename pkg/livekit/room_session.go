@@ -324,6 +324,13 @@ func (rs *RoomSession) leave() {
 	rs.bridge = nil
 	rs.mu.Unlock()
 
+	if rs.worker != nil && strings.TrimSpace(rs.jobID) != "" && rs.worker.removeJob(rs.jobID, rs) {
+		logger.InfoCF("livekit", "Room session removed from worker", map[string]any{
+			"room":   rs.roomName(),
+			"job_id": rs.jobID,
+		})
+	}
+
 	// Persist usage + transcript before bridge/session teardown.
 	rs.persistPostSessionData(bridge)
 

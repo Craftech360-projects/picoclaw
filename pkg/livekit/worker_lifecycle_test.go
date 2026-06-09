@@ -49,6 +49,31 @@ func TestWorkerRemovesJobAndLeavesSessionWhenJoinFails(t *testing.T) {
 	})
 }
 
+func TestRoomSessionLeaveRemovesWorkerJob(t *testing.T) {
+	w := NewWorker(WorkerConfig{
+		AgentName:   "test-agent",
+		ServerURL:   "ws://localhost:7880",
+		APIKey:      "key",
+		APISecret:   "secret",
+		MaxSessions: 1,
+	})
+	session := &RoomSession{
+		worker:   w,
+		jobID:    "job-1",
+		roomInfo: &lk.Room{Name: "room-a"},
+	}
+	w.jobs["job-1"] = session
+
+	session.Leave()
+
+	w.mu.RLock()
+	activeJobs := len(w.jobs)
+	w.mu.RUnlock()
+	if activeJobs != 0 {
+		t.Fatalf("active jobs = %d, want 0 after session leave", activeJobs)
+	}
+}
+
 func TestWorkerRunOnceResetsConnectedAndReadyAfterWebsocketLoss(t *testing.T) {
 	registerSent := make(chan struct{})
 	upgrader := websocket.Upgrader{}

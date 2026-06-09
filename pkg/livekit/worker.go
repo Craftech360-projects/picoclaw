@@ -308,17 +308,18 @@ func (w *Worker) hasJob(jobID string) bool {
 	return ok
 }
 
-func (w *Worker) removeJob(jobID string, session *RoomSession) {
+func (w *Worker) removeJob(jobID string, session *RoomSession) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	current, ok := w.jobs[jobID]
 	if !ok {
-		return
+		return false
 	}
 	if session != nil && current != session {
-		return
+		return false
 	}
 	delete(w.jobs, jobID)
+	return true
 }
 
 func (w *Worker) handleTermination(term *livekit.JobTermination) {
