@@ -25,7 +25,7 @@ LiveKit worker identity and endpoints:
 
 - Agent name: `cheeko-agent1`
 - LiveKit URL: `wss://cheeko-prod-68ib8ma4.livekit.cloud`
-- Manager API URL: `http://64.227.170.31:8002/toy`
+- Manager API URL: `http://139.59.7.72:8002/toy`
 - Node group: `picoclaw-ng-m7i-xlarge`
 - Node instance: `m7i.xlarge` (`4 vCPU`, `16Gi` memory), fixed at 1 node for the current test
 

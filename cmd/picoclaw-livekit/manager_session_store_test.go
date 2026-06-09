@@ -80,3 +80,13 @@ func TestManagerAPIBaseURLPrefersEnvOverConfig(t *testing.T) {
 		t.Fatalf("managerAPIBaseURL() = %q, want env primary", got)
 	}
 }
+
+func TestManagerAPIServiceKeyPrefersManagerAPISecret(t *testing.T) {
+	t.Setenv("MANAGER_API_SECRET", "new-secret")
+	t.Setenv("SERVICE_SECRET_KEY", "service-secret")
+	t.Setenv("PICOCLAW_LIVEKIT_MANAGER_API_SERVICE_KEY", "legacy-secret")
+
+	if got := managerAPIServiceKey(); got != "new-secret" {
+		t.Fatalf("managerAPIServiceKey() = %q, want MANAGER_API_SECRET", got)
+	}
+}

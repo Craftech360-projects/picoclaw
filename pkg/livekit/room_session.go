@@ -151,9 +151,9 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 
 func managerAPIServiceKeyFromEnv() string {
 	for _, key := range []string{
-		"PICOCLAW_LIVEKIT_MANAGER_API_SERVICE_KEY",
-		"SERVICE_SECRET_KEY",
 		"MANAGER_API_SECRET",
+		"SERVICE_SECRET_KEY",
+		"PICOCLAW_LIVEKIT_MANAGER_API_SERVICE_KEY",
 	} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value

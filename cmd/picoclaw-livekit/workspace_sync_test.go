@@ -49,13 +49,7 @@ func TestDownloadWorkspaceFilesWritesCanonicalFilesAndPreservesMemoryMode(t *tes
 	if _, err := os.Stat(memoryPath); err != nil {
 		t.Fatalf("Stat(memory/MEMORY.md) error = %v", err)
 	}
-	info, err := os.Stat(memoryPath)
-	if err != nil {
-		t.Fatalf("Stat(memory/MEMORY.md) error = %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("memory/MEMORY.md mode = %v, want 0600", got)
-	}
+	assertFilePerm(t, memoryPath, 0o600)
 }
 
 func TestUploadWorkspaceFilesQueuesOutboxWhenWorkspaceSyncFails(t *testing.T) {

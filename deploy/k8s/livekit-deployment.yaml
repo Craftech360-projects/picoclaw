@@ -26,7 +26,7 @@ spec:
         node.kubernetes.io/instance-type: m7i.xlarge
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit:20260608-132642
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit:20260608-164238
           args: ["--agent-name", "cheeko-agent1", "--config", "/etc/picoclaw/config.json"]
           ports:
             - name: health
@@ -54,11 +54,11 @@ spec:
                 secretKeyRef:
                   name: picoclaw-secrets
                   key: manager_api_url
-            - name: PICOCLAW_LIVEKIT_MANAGER_API_SERVICE_KEY
+            - name: MANAGER_API_SECRET
               valueFrom:
                 secretKeyRef:
                   name: picoclaw-secrets
-                  key: manager_api_service_key
+                  key: manager_api_secret
             - name: STT_DATABASE_URL
               valueFrom:
                 secretKeyRef:

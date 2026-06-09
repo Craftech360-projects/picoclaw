@@ -141,13 +141,7 @@ func TestHydrateLiveKitWorkspaceWritesManagerSessionContext(t *testing.T) {
 	if !strings.HasSuffix(string(data), "\n") {
 		t.Fatalf("session context file should end with newline: %q", string(data))
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat session context error = %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("session context mode = %v, want 0600", got)
-	}
+	assertFilePerm(t, path, 0o600)
 }
 
 func TestHydrateLiveKitWorkspaceSkeletonDoesNotOverwriteAgentWithEmptyIdentity(t *testing.T) {
@@ -325,10 +319,10 @@ func TestHydrateLiveKitWorkspaceSkeletonFirstTimeOverwritesTemplateUserWithMetad
 	mustWriteFile(t, filepath.Join(templateWorkspace, "USER.md"), "# User\n\n- Name: Template Kid\n- Age: 8 years old\n")
 
 	_, err := hydrateLiveKitWorkspaceSkeleton(workspace, liveKitWorkspaceHydrationOptions{
-		TemplateSourceDirs:   []string{templateWorkspace},
-		FirstTimeWorkspace:   true,
-		UserContent:          "# User\n\n- Name: Rahul\n- Age: 6 years old\n- Interests: science\n",
-		IdentityContent:      "# Identity\n\nRoom profile",
+		TemplateSourceDirs:    []string{templateWorkspace},
+		FirstTimeWorkspace:    true,
+		UserContent:           "# User\n\n- Name: Rahul\n- Age: 6 years old\n- Interests: science\n",
+		IdentityContent:       "# Identity\n\nRoom profile",
 		SessionContextContent: "",
 	})
 	if err != nil {

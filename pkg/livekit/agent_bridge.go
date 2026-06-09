@@ -48,6 +48,8 @@ const (
 	maxToolDefsForLLM   = 20
 	maxGemini429Retries = 2
 	maxLLMLogContentLen = 1200
+
+	defaultLiveKitToolExecutionTimeout = 20 * time.Second
 )
 
 var assistantThoughtBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
@@ -118,25 +120,26 @@ type MCPManager interface {
 
 // AgentBridge provides a simplified agent execution path for voice conversations.
 type AgentBridge struct {
-	agentInstance       *agent.AgentInstance
-	cfg                 *config.Config
-	provider            providers.LLMProvider
-	streamProvider      providers.StreamingProvider
-	preserveWorkspace   bool
-	onClose             func()
-	onAfterClose        func()
-	modelID             string
-	sessions            session.SessionStore
-	tools               *tools.ToolRegistry
-	contextBuilder      *agent.ContextBuilder
-	maxIterations       int
-	llmOptions          map[string]any
-	proactiveLLMOptions map[string]any
-	asyncEventChan      chan AsyncEvent // receives background task completions
-	runtimeEventChan    chan RuntimeEvent
-	workspaceArtifacts  WorkspaceArtifactStore
-	mcpManager          MCPManager
-	allowedToolNames    map[string]struct{}
+	agentInstance        *agent.AgentInstance
+	cfg                  *config.Config
+	provider             providers.LLMProvider
+	streamProvider       providers.StreamingProvider
+	preserveWorkspace    bool
+	onClose              func()
+	onAfterClose         func()
+	modelID              string
+	sessions             session.SessionStore
+	tools                *tools.ToolRegistry
+	contextBuilder       *agent.ContextBuilder
+	maxIterations        int
+	toolExecutionTimeout time.Duration
+	llmOptions           map[string]any
+	proactiveLLMOptions  map[string]any
+	asyncEventChan       chan AsyncEvent // receives background task completions
+	runtimeEventChan     chan RuntimeEvent
+	workspaceArtifacts   WorkspaceArtifactStore
+	mcpManager           MCPManager
+	allowedToolNames     map[string]struct{}
 
 	// summarization config
 	summarizeMessageThreshold int
@@ -165,19 +168,20 @@ type AgentBridge struct {
 
 // AgentBridgeConfig defines shared resources for creating bridges.
 type AgentBridgeConfig struct {
-	Config             *config.Config
-	Provider           providers.LLMProvider
-	ModelID            string
-	AgentInstance      *agent.AgentInstance
-	PreserveWorkspace  bool
-	OnClose            func()
-	OnAfterClose       func()
-	MaxIterations      int
-	LLMOptions         map[string]any
-	AsyncEventChan     chan AsyncEvent // optional channel for background task results
-	RuntimeEventChan   chan RuntimeEvent
-	WorkspaceArtifacts WorkspaceArtifactStore
-	MCPManager         MCPManager
+	Config               *config.Config
+	Provider             providers.LLMProvider
+	ModelID              string
+	AgentInstance        *agent.AgentInstance
+	PreserveWorkspace    bool
+	OnClose              func()
+	OnAfterClose         func()
+	MaxIterations        int
+	ToolExecutionTimeout time.Duration
+	LLMOptions           map[string]any
+	AsyncEventChan       chan AsyncEvent // optional channel for background task results
+	RuntimeEventChan     chan RuntimeEvent
+	WorkspaceArtifacts   WorkspaceArtifactStore
+	MCPManager           MCPManager
 	// SummarizeMessageThreshold is the number of history messages that triggers summarization.
 	// Defaults to 20 if zero.
 	SummarizeMessageThreshold int
@@ -212,6 +216,10 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 	if ctxWindow <= 0 {
 		ctxWindow = 128000
 	}
+	toolTimeout := cfg.ToolExecutionTimeout
+	if toolTimeout <= 0 {
+		toolTimeout = defaultLiveKitToolExecutionTimeout
+	}
 	ab := &AgentBridge{
 		agentInstance:             cfg.AgentInstance,
 		cfg:                       cfg.Config,
@@ -224,6 +232,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		tools:                     cfg.AgentInstance.Tools,
 		contextBuilder:            cfg.AgentInstance.ContextBuilder,
 		maxIterations:             cfg.MaxIterations,
+		toolExecutionTimeout:      toolTimeout,
 		llmOptions:                cfg.LLMOptions,
 		proactiveLLMOptions:       buildProactiveLLMOptions(cfg.LLMOptions),
 		asyncEventChan:            asyncChan,
@@ -585,15 +594,15 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	llmOpts := ab.optionsForProfile(profile)
 	ensureToolCallTokenBudget(ab.modelID, llmOpts, len(toolDefs))
 	logger.InfoCF("livekit", "LLM request config", map[string]any{
-		"session":      sessionKey,
-		"profile":      profile,
-		"model_id":     ab.modelID,
-		"provider":     modelProtocol(ab.modelID),
-		"messages":     len(messages),
-		"tools":        len(toolDefs),
-		"max_tokens":   llmOptionValue(llmOpts, "max_tokens"),
-		"temperature":  llmOptionValue(llmOpts, "temperature"),
-		"streaming":    ab.streamProvider != nil,
+		"session":        sessionKey,
+		"profile":        profile,
+		"model_id":       ab.modelID,
+		"provider":       modelProtocol(ab.modelID),
+		"messages":       len(messages),
+		"tools":          len(toolDefs),
+		"max_tokens":     llmOptionValue(llmOpts, "max_tokens"),
+		"temperature":    llmOptionValue(llmOpts, "temperature"),
+		"streaming":      ab.streamProvider != nil,
 		"rate_retry_429": ab.shouldRetryGeminiRateLimit(),
 	})
 	resp, err := ab.callLLM(ctx, sessionKey, messages, toolDefs, llmOpts, cb)
@@ -604,7 +613,7 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 			Error:      err.Error(),
 			Cause:      "llm_call_failed",
 		})
-		if onDone != nil {
+		if onDone != nil && isContextCanceled(ctx, err) {
 			onDone()
 		}
 		return false, err
@@ -686,16 +695,13 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 
 	// Run tools asynchronously
 	go func(asyncCtx context.Context, asyncSessionKey string, asyncMessages []providers.Message, asyncCalls []providers.ToolCall, asyncCb func(chunk string), asyncOnDone func()) {
-		// We use background context for the tool execution because we don't want the tool to die if the turn context cancels early.
-		// Ideally we should use a bounded context tied to the overall room session.
-		toolCtx := context.Background()
 		for _, tc := range asyncCalls {
 			ab.EmitRuntimeEvent(RuntimeEvent{
 				Kind:       "tool_call_start",
 				SessionKey: asyncSessionKey,
 				ToolName:   tc.Name,
 			})
-			result := ab.executeTool(toolCtx, asyncSessionKey, tc)
+			result := ab.executeTool(asyncCtx, asyncSessionKey, tc)
 			evt := RuntimeEvent{
 				Kind:       "tool_call_end",
 				SessionKey: asyncSessionKey,
@@ -1231,9 +1237,11 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 		}
 	})
 
-	result := ab.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, "livekit", sessionKey, asyncCb)
+	execCtx, cancel := ab.toolExecutionContext(ctx)
+	result := ab.executeToolWithBoundedReturn(execCtx, sessionKey, tc, asyncCb)
 	durationMS := time.Since(start).Milliseconds()
 	if result == nil {
+		cancel()
 		logger.ErrorCF("livekit", "Tool call returned nil result", map[string]any{
 			"tool":         tc.Name,
 			"tool_call_id": tc.ID,
@@ -1241,6 +1249,9 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 			"duration_ms":  durationMS,
 		})
 		return tools.ErrorResult(fmt.Sprintf("tool %q returned nil result", tc.Name))
+	}
+	if !result.Async {
+		cancel()
 	}
 	logger.InfoCF("livekit", "Tool call finished", map[string]any{
 		"tool":         tc.Name,
@@ -1252,6 +1263,50 @@ func (ab *AgentBridge) executeTool(ctx context.Context, sessionKey string, tc pr
 	})
 	ab.maybeMirrorWorkspaceArtifact(ctx, sessionKey, tc, result)
 	return result
+}
+
+func (ab *AgentBridge) toolExecutionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := defaultLiveKitToolExecutionTimeout
+	if ab != nil && ab.toolExecutionTimeout > 0 {
+		timeout = ab.toolExecutionTimeout
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func (ab *AgentBridge) executeToolWithBoundedReturn(
+	ctx context.Context,
+	sessionKey string,
+	tc providers.ToolCall,
+	asyncCb tools.AsyncCallback,
+) *tools.ToolResult {
+	if err := ctx.Err(); err != nil {
+		return toolExecutionContextErrorResult(tc.Name, err)
+	}
+
+	resultCh := make(chan *tools.ToolResult, 1)
+	go func() {
+		resultCh <- ab.tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, "livekit", sessionKey, asyncCb)
+	}()
+
+	select {
+	case result := <-resultCh:
+		return result
+	case <-ctx.Done():
+		return toolExecutionContextErrorResult(tc.Name, ctx.Err())
+	}
+}
+
+func toolExecutionContextErrorResult(toolName string, err error) *tools.ToolResult {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return tools.ErrorResult(fmt.Sprintf("tool %q timed out", toolName)).WithError(err)
+	}
+	if err != nil {
+		return tools.ErrorResult(fmt.Sprintf("tool %q canceled: %v", toolName, err)).WithError(err)
+	}
+	return tools.ErrorResult(fmt.Sprintf("tool %q canceled", toolName))
 }
 
 func normalizeAllowedToolNames(names []string) map[string]struct{} {

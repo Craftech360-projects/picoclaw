@@ -133,16 +133,13 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	w.conn = conn
-	w.mu.Lock()
-	w.connected = true
-	w.mu.Unlock()
+	w.markConnected(conn)
+	defer w.markDisconnected(conn)
 	logger.InfoCF("livekit", "Connected to LiveKit agent endpoint", map[string]any{
 		"ws_url": wsURL,
 	})
 
 	if err := w.sendRegister(); err != nil {
-		_ = conn.Close()
 		return err
 	}
 
@@ -154,7 +151,6 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			_ = conn.Close()
 			return err
 		}
 
@@ -170,8 +166,8 @@ func (w *Worker) handleServerMessage(ctx context.Context, msg *livekit.ServerMes
 	switch m := msg.Message.(type) {
 	case *livekit.ServerMessage_Register:
 		if m.Register != nil {
-			w.workerID = m.Register.WorkerId
 			w.mu.Lock()
+			w.workerID = m.Register.WorkerId
 			w.ready = true
 			w.mu.Unlock()
 			logger.InfoCF("livekit", "Worker registered", map[string]any{
@@ -200,10 +196,11 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 
 	w.mu.RLock()
 	currentJobs := len(w.jobs)
+	draining := w.draining
 	w.mu.RUnlock()
 
 	available := currentJobs < w.maxSessions
-	if w.draining {
+	if draining {
 		available = false
 	}
 
@@ -213,7 +210,7 @@ func (w *Worker) handleAvailability(req *livekit.AvailabilityRequest) {
 		"current_jobs": currentJobs,
 		"max_sessions": w.maxSessions,
 		"available":    available,
-		"draining":     w.draining,
+		"draining":     draining,
 	})
 
 	resp := &livekit.WorkerMessage{
@@ -249,6 +246,15 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 		"job_metadata_bytes":  jobMetadataBytes,
 	})
 
+	if w.hasJob(job.Id) {
+		logger.WarnCF("livekit", "Duplicate job assignment ignored", map[string]any{
+			"job_id": job.Id,
+			"room":   jobRoomName(job),
+		})
+		w.updateJobStatus(job.Id, livekit.JobStatus_JS_RUNNING)
+		return
+	}
+
 	if w.skipRoomJoin {
 		w.mu.Lock()
 		w.jobs[job.Id] = nil
@@ -277,6 +283,8 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 
 	go func() {
 		if err := session.Join(ctx); err != nil {
+			w.removeJob(job.Id, session)
+			session.Leave()
 			logger.ErrorCF("livekit", "Room join failed", map[string]any{
 				"job_id": job.Id,
 				"room":   jobRoomName(job),
@@ -291,6 +299,26 @@ func (w *Worker) handleAssignment(ctx context.Context, assignment *livekit.JobAs
 		})
 		w.updateJobStatus(job.Id, livekit.JobStatus_JS_RUNNING)
 	}()
+}
+
+func (w *Worker) hasJob(jobID string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	_, ok := w.jobs[jobID]
+	return ok
+}
+
+func (w *Worker) removeJob(jobID string, session *RoomSession) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	current, ok := w.jobs[jobID]
+	if !ok {
+		return
+	}
+	if session != nil && current != session {
+		return
+	}
+	delete(w.jobs, jobID)
 }
 
 func (w *Worker) handleTermination(term *livekit.JobTermination) {
@@ -354,12 +382,38 @@ func (w *Worker) sendProto(msg *livekit.WorkerMessage) error {
 	if err != nil {
 		return err
 	}
-	if w.conn == nil {
-		return fmt.Errorf("not connected")
-	}
 	w.sendMu.Lock()
 	defer w.sendMu.Unlock()
-	return w.conn.WriteMessage(websocket.BinaryMessage, data)
+	w.mu.RLock()
+	conn := w.conn
+	w.mu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+func (w *Worker) markConnected(conn *websocket.Conn) {
+	w.mu.Lock()
+	w.conn = conn
+	w.connected = true
+	w.ready = false
+	w.mu.Unlock()
+}
+
+func (w *Worker) markDisconnected(conn *websocket.Conn) {
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	w.mu.Lock()
+	if conn == nil || w.conn == conn {
+		w.conn = nil
+		w.connected = false
+		w.ready = false
+	}
+	w.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func (w *Worker) pingLoop(ctx context.Context) {
@@ -451,10 +505,13 @@ func (w *Worker) Shutdown() {
 		s.Leave()
 	}
 
-	if w.conn != nil {
-		_ = w.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		_ = w.conn.Close()
+	w.mu.RLock()
+	conn := w.conn
+	w.mu.RUnlock()
+	if conn != nil {
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	}
+	w.markDisconnected(conn)
 }
 
 // BeginDraining stops the worker from accepting new jobs while allowing active jobs to finish.
@@ -534,6 +591,7 @@ func (w *Worker) startHealthServer() {
 		ready := w.ready
 		activeJobs := len(w.jobs)
 		maxSessions := w.maxSessions
+		draining := w.draining
 		w.mu.RUnlock()
 
 		if !connected || !ready {
@@ -549,12 +607,12 @@ func (w *Worker) startHealthServer() {
 
 		// Worker is ready if it has capacity for more sessions
 		available := activeJobs < maxSessions
-		if w.draining {
+		if draining {
 			available = false
 		}
 		statusCode := http.StatusOK
 		status := "ready"
-		if w.draining {
+		if draining {
 			statusCode = http.StatusServiceUnavailable
 			status = "draining"
 		} else if !available {
@@ -569,7 +627,7 @@ func (w *Worker) startHealthServer() {
 			"activeJobs":  activeJobs,
 			"maxSessions": maxSessions,
 			"available":   available,
-			"draining":    w.draining,
+			"draining":    draining,
 		})
 	})
 

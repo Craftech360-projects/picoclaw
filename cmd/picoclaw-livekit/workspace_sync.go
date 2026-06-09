@@ -376,9 +376,9 @@ func collectWorkspaceSyncFiles(workspaceDir string, cfg config.LiveKitServiceMan
 
 func decodeWorkspaceSyncData(body []byte) (workspaceSyncData, error) {
 	var wrapper struct {
-		Code int               `json:"code"`
-		Msg  string            `json:"msg"`
-		Data workspaceSyncData `json:"data"`
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &wrapper); err != nil {
 		return workspaceSyncData{}, err
@@ -386,7 +386,27 @@ func decodeWorkspaceSyncData(body []byte) (workspaceSyncData, error) {
 	if wrapper.Code != 0 {
 		return workspaceSyncData{}, fmt.Errorf("workspace-sync API code=%d msg=%s", wrapper.Code, wrapper.Msg)
 	}
-	return wrapper.Data, nil
+	if len(wrapper.Data) == 0 || string(wrapper.Data) == "null" {
+		return workspaceSyncData{}, fmt.Errorf("workspace-sync response missing data")
+	}
+	var data workspaceSyncData
+	if err := json.Unmarshal(wrapper.Data, &data); err != nil {
+		return workspaceSyncData{}, err
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(wrapper.Data, &shape); err != nil {
+		return workspaceSyncData{}, err
+	}
+	if _, ok := shape["files"]; !ok {
+		if _, ok := shape["deleted"]; !ok {
+			if _, ok := shape["revision"]; !ok {
+				if _, ok := shape["manifest"]; !ok {
+					return workspaceSyncData{}, fmt.Errorf("workspace-sync response is not sync-shaped")
+				}
+			}
+		}
+	}
+	return data, nil
 }
 
 func tryDownloadWorkspaceSync(
@@ -458,7 +478,7 @@ func tryDownloadWorkspaceSync(
 		if rel == "memory/MEMORY.md" || rel == workspaceSyncManifestPath {
 			mode = 0o600
 		}
-		if err := os.WriteFile(target, []byte(file.Content), mode); err != nil {
+		if err := writeFileWithMode(target, []byte(file.Content), mode); err != nil {
 			logger.WarnCF("livekit", "workspace-sync: failed to write file", map[string]any{
 				"path":  rel,
 				"error": err.Error(),
@@ -847,7 +867,7 @@ func downloadWorkspaceFilesLegacy(
 			continue
 		}
 		mode := workspaceDiskMode(diskPath)
-		if err := os.WriteFile(target, []byte(entry.Content), mode); err != nil {
+		if err := writeFileWithMode(target, []byte(entry.Content), mode); err != nil {
 			logger.WarnCF("livekit", "workspace-files: failed to write file", map[string]any{
 				"path":  diskPath,
 				"error": err.Error(),

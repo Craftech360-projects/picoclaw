@@ -198,7 +198,7 @@ func looksLikeWorkspaceRootPath(rawPath, workspace string) bool {
 	if path == "" {
 		return false
 	}
-	cleaned := filepath.Clean(path)
+	cleaned := filepath.ToSlash(filepath.Clean(path))
 	if cleaned == "/root" || cleaned == "/root/." {
 		return true
 	}

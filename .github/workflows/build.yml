@@ -29,5 +29,8 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Run LiveKit worker gate
+        run: go test ./pkg/livekit ./cmd/picoclaw-livekit
+
       - name: Build voice worker
         run: make build-livekit

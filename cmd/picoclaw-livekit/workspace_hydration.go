@@ -183,7 +183,7 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 		if err := os.MkdirAll(filepath.Dir(memoryPath), 0o755); err != nil {
 			return result, err
 		}
-		if err := os.WriteFile(memoryPath, []byte(ensureTrailingNewline(contentToWrite)), 0o600); err != nil {
+		if err := writeFileWithMode(memoryPath, []byte(ensureTrailingNewline(contentToWrite)), 0o600); err != nil {
 			return result, err
 		}
 		result.MemoryWritten = true
@@ -191,7 +191,7 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 
 	sessionContextContent := strings.TrimSpace(opts.SessionContextContent)
 	if sessionContextContent != "" {
-		if err := os.WriteFile(
+		if err := writeFileWithMode(
 			filepath.Join(workspace, "sessions", "manager_recent_voice_context.md"),
 			[]byte(ensureTrailingNewline(sessionContextContent)),
 			0o600,
@@ -336,7 +336,7 @@ func seedWorkspaceCoreFilesFromSources(workspace string, sourceDirs []string) er
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(target, []byte(ensureTrailingNewline(string(data))), spec.Perm); err != nil {
+			if err := writeFileWithMode(target, []byte(ensureTrailingNewline(string(data))), spec.Perm); err != nil {
 				return err
 			}
 			break
@@ -355,7 +355,7 @@ func writeFileIfMissing(path, content string, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), perm)
+	return writeFileWithMode(path, []byte(content), perm)
 }
 
 func writeFileIfMissingOrBlank(path, content string, perm os.FileMode) error {
@@ -373,7 +373,14 @@ func writeFileIfMissingOrBlank(path, content string, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), perm)
+	return writeFileWithMode(path, []byte(content), perm)
+}
+
+func writeFileWithMode(path string, data []byte, perm os.FileMode) error {
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return err
+	}
+	return os.Chmod(path, perm)
 }
 
 func shouldInitializeMemoryContent(content string, readErr error) bool {
