@@ -203,6 +203,41 @@ kubectl --context $Context -n $Namespace create secret generic picoclaw-config `
 
 Do not commit real `config.json`, `.security.yml`, API keys, database URLs, or LiveKit secrets.
 
+## Developer Access From Another Laptop
+
+Developer access and pod access are separate.
+
+The production pod has:
+
+```yaml
+automountServiceAccountToken: false
+```
+
+This only means the running `picoclaw-livekit` container does not receive an automatic Kubernetes API token at `/var/run/secrets/kubernetes.io/serviceaccount/token`. The voice agent does not need to list pods, read Kubernetes Secrets, create Jobs, or control the cluster, so removing that token reduces blast radius if the container is compromised.
+
+This does not affect a developer, Codex, CI, `kubectl`, Helm, or AWS CLI from outside the cluster. A developer on another laptop still manages the deployment through AWS/IAM credentials and a local kubeconfig.
+
+Setup on a new laptop:
+
+```powershell
+aws configure
+aws eks update-kubeconfig --region ap-south-2 --name picoclaw-eks
+kubectl config get-contexts
+kubectl -n picoclaw-dev get pods
+```
+
+If the AWS account uses SSO or named profiles, use that profile:
+
+```powershell
+aws sso login --profile <profile-name>
+aws eks update-kubeconfig --region ap-south-2 --name picoclaw-eks --profile <profile-name>
+kubectl -n picoclaw-dev get pods
+```
+
+The IAM user or role must also be authorized for the EKS cluster through EKS access entries or the cluster's `aws-auth` mapping. If `kubectl` returns `Unauthorized`, fix the developer's AWS/EKS access; do not enable ServiceAccount token mounting on the application pod.
+
+Never copy a ServiceAccount token out of a pod to make laptop access work. Laptop access should come from IAM, SSO, or another approved operator identity.
+
 ## Build And Push A Production Image
 
 Production image builds use `../Dockerfile.eks`.
