@@ -1,5 +1,7 @@
 # Picoclaw LiveKit Kubernetes Deployment Handover
 
+> Superseded note, 2026-06-10: the live EKS deployment has moved from the one-node `m7i.xlarge` test to `picoclaw-ng-c7i-xlarge` with Cluster Autoscaler, HPA `2-10`, hardened non-root pods, and staged NetworkPolicy. Use `docs/picoclaw-livekit-aws-eks-runbook.md` and `deploy/k8s/capacity-and-hardening.md` as the current source of truth.
+
 Date: 2026-05-29
 Repo: D:\picoclaw
 Branch at handover: codex/voice-only-livekit

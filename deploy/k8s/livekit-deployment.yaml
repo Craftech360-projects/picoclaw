@@ -26,6 +26,11 @@ spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 900
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       nodeSelector:
@@ -35,6 +40,7 @@ spec:
           image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:206785024710d57de2d5b1ca064882effc0edffd1128bddc2ad2187a10d5a0cb
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
@@ -46,6 +52,12 @@ spec:
           env:
             - name: PICOCLAW_CONFIG
               value: /etc/picoclaw/config.json
+            - name: PICOCLAW_HOME
+              value: /opt/picoclaw
+            - name: HOME
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /tmp/.cache
             - name: PICOCLAW_LIVEKIT_STRICT_CONFIG
               value: "true"
             - name: PICOCLAW_LIVEKIT_DRAIN_TIMEOUT_SECONDS
@@ -126,9 +138,13 @@ spec:
               readOnly: true
             - name: work
               mountPath: /opt/picoclaw
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: cfg
           secret:
             secretName: picoclaw-config
         - name: work
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}

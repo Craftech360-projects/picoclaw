@@ -1,6 +1,6 @@
 # Picoclaw LiveKit on AWS EKS - Deployment and Operations Runbook
 
-Last updated: 2026-06-06
+Last updated: 2026-06-10
 
 ## 1. Purpose
 
@@ -26,8 +26,11 @@ LiveKit worker identity and endpoints:
 - Agent name: `cheeko-agent1`
 - LiveKit URL: `wss://cheeko-prod-68ib8ma4.livekit.cloud`
 - Manager API URL: `http://139.59.7.72:8002/toy`
-- Node group: `picoclaw-ng-m7i-xlarge`
-- Node instance: `m7i.xlarge` (`4 vCPU`, `16Gi` memory), fixed at 1 node for the current test
+- Active agent node group: `picoclaw-ng-c7i-xlarge`
+- Node instance type: `c7i.xlarge` (`4 vCPU`, `8Gi` memory)
+- Node group scaling: `minSize=3`, `desiredSize=3`, `maxSize=10`
+- Node autoscaler: Cluster Autoscaler
+- HPA range: `minReplicas=2`, `maxReplicas=10`
 
 Kubernetes manifests:
 
@@ -143,16 +146,16 @@ If `livekit_service` keys/url change:
 
 ## 6. Deployment Configuration (EKS)
 
-Current worker sizing (per pod), tuned for one `m7i.xlarge` test node:
+Current worker sizing (per pod), tuned for one pod per `c7i.xlarge` node:
 
 - Requests: `3 vCPU`, `6Gi` memory, `10Gi` ephemeral
 - Limits: `4 vCPU`, `8Gi` memory, `20Gi` ephemeral
 - Max sessions per pod: `PICOCLAW_LIVEKIT_MAX_SESSIONS=12`
-- Node selector: `node.kubernetes.io/instance-type=m7i.xlarge`
+- Node selector: `node.kubernetes.io/instance-type=c7i.xlarge`
 
-This follows the LiveKit self-hosted starting point of roughly `4 CPU / 8Gi` per agent server, while reserving enough node headroom for Kubernetes system pods and monitoring on the same `m7i.xlarge`.
+This follows the LiveKit self-hosted starting point of roughly `4 CPU / 8Gi` per agent server. The `3 vCPU / 6Gi` request keeps scheduling conservative and usually places one voice-agent pod per `c7i.xlarge` node.
 
-Do not apply this production deployment profile to a `t3.large`/`t3.xlarge` test node. The current deployment is pinned to `m7i.xlarge`.
+Do not apply this production deployment profile to a `t3.large`/`t3.xlarge` test node. The current deployment is pinned to `c7i.xlarge`.
 
 Health endpoints:
 
@@ -177,14 +180,15 @@ Metrics:
 
 Replica policy:
 
-- `minReplicas: 1`
-- `maxReplicas: 1`
+- `minReplicas: 2`
+- `maxReplicas: 10`
 
 Behavior:
 
-- HPA metrics remain installed for observation.
-- Scaling is intentionally capped at one pod during the `m7i.xlarge` test.
-- Increase `maxReplicas` only after adding node capacity.
+- Session load is the primary scale signal.
+- CPU is the secondary safety metric.
+- Scale-down is intentionally slow (`900s` stabilization window) to avoid flapping during voice sessions.
+- Cluster Autoscaler adds nodes when HPA-created pods cannot schedule on existing nodes.
 
 This follows LiveKit guidance to scale up below saturation (worker saturation often near 70-75%).
 
@@ -230,13 +234,13 @@ Adapter mapping config:
 
 Current node setup:
 
-- Managed node group: `picoclaw-ng-m7i-xlarge`
-- Instance type: `m7i.xlarge`
-- Desired/min/max nodes: `1/1/1`
+- Managed node group: `picoclaw-ng-c7i-xlarge`
+- Instance type: `c7i.xlarge`
+- Desired/min/max nodes: `3/3/10`
 - Disk: `80Gi`
-- Old `t3.xlarge` node group: deleted after migration
+- Old `picoclaw-ng-m7i-xlarge` node group: scaled to `0/0/1` and removed from Cluster Autoscaler discovery
 
-Node autoscaling is intentionally not enabled for this test. If this one-node test is good, add Karpenter or Cluster Autoscaler before raising HPA above one replica.
+Node autoscaling is enabled through Cluster Autoscaler. The account's EC2 On-Demand Standard vCPU quota in `ap-south-2` is `64`, which is enough for the configured `maxSize=10` c7i node group with current small non-EKS instances.
 
 Do not purchase Compute Savings Plans or Reserved Instances automatically from deployment scripts. Treat them as a billing decision after observing that at least one node runs most of the day.
 
@@ -343,25 +347,32 @@ Fix:
 
 ## 11. Capacity and Scaling Notes
 
-Current capacity (initial):
+Current capacity:
 
-- 1 warm pod minimum and maximum
-- 1 `m7i.xlarge` node
+- 2 warm pods minimum
+- 3 warm `c7i.xlarge` nodes minimum
 - Up to 12 sessions per pod configured
+- HPA can scale to 10 pods
 - Estimated practical range per pod depends on STT/TTS/model profile and latency budget
 
-Peak planning for the current launch phase:
+Interpretation for 100 total users:
 
-- Current test target: validate quality around 6-10 concurrent sessions
-- Hard configured ceiling: 12 concurrent sessions on the single worker
-- Revisit node size, `maxReplicas`, and node autoscaling before a 20+ concurrent launch/demo event
+- Size by peak concurrent voice sessions, not total registered users.
+- If only 5-15 users talk at once, the current baseline should usually be enough from the Kubernetes side.
+- If 50-100 users can talk at once, validate provider/API limits and expect HPA plus Cluster Autoscaler scale-out.
 
 With `MAX_SESSIONS=12` and HPA target `50%`:
 
 - 6 concurrent sessions reaches the 50% observation target
 - 10-12 concurrent sessions should be treated as a load test, not guaranteed production capacity
-- 20 concurrent sessions should use at least two warm pods on larger/additional node capacity
-- 50+ concurrent sessions needs horizontal scaling and node autoscaling planned ahead of time
+- 2 warm pods provide about 24 configured concurrent-session slots before additional scale-out
+- 10 pods provide about 120 configured concurrent-session slots, subject to real latency and external provider limits
+
+AWS cost baseline:
+
+- Current baseline is roughly `$500-530/month` for three warm `c7i.xlarge` nodes, EKS control plane, and root volumes.
+- Each extra `c7i.xlarge` during scale-out adds about `$0.1785/hour`, plus storage while present.
+- This excludes LiveKit Cloud, LLM, STT, TTS, database, and Manager API costs.
 
 Recommended process:
 
@@ -375,6 +386,9 @@ Recommended process:
 - Do not commit production secrets to git.
 - Rotate LiveKit and Manager credentials by updating secret and rolling deployment.
 - Keep `.security.yml` changes auditable with commit history and release notes.
+- Workload security is hardened in `deploy/k8s/livekit-deployment.yaml`: non-root UID/GID `10001`, no service account token, dropped capabilities, no privilege escalation, RuntimeDefault seccomp, read-only root filesystem, and explicit writable `/opt/picoclaw` plus `/tmp` volumes.
+- ECR repository hardening is enabled: immutable tags and scan-on-push. Production manifest is pinned by image digest.
+- NetworkPolicy is staged in `deploy/k8s/network-policy/livekit-networkpolicy.yaml` but not applied until AWS VPC CNI network policy enforcement is enabled and tested.
 
 ## 13. File Index
 
@@ -384,6 +398,9 @@ Recommended process:
 - `deploy/k8s/livekit-pdb.yaml`
 - `deploy/k8s/livekit-podmonitor.yaml`
 - `deploy/k8s/prometheus-adapter-values.yaml`
+- `deploy/k8s/cluster-autoscaler/`
+- `deploy/k8s/network-policy/`
+- `deploy/k8s/capacity-and-hardening.md`
 
 ## 14. Quick Health Checklist
 

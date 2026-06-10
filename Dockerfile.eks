@@ -21,6 +21,9 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CGO_LDFLAGS="-lc++ -lc++abi -lm" \
 
 FROM debian:bookworm-slim
 
+ARG APP_UID=10001
+ARG APP_GID=10001
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc++1 \
@@ -32,11 +35,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
   && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd --system --gid "${APP_GID}" picoclaw \
+  && useradd --system --uid "${APP_UID}" --gid picoclaw --home-dir /home/picoclaw --create-home --shell /usr/sbin/nologin picoclaw \
+  && mkdir -p /opt/picoclaw /tmp/.cache \
+  && chown -R picoclaw:picoclaw /opt/picoclaw /home/picoclaw /tmp/.cache
+
 WORKDIR /app
 COPY --from=builder /out/picoclaw-livekit /usr/local/bin/picoclaw-livekit
 COPY third_party/ten-vad/lib/Linux/x64/libten_vad.so /usr/local/third_party/ten-vad/lib/Linux/x64/libten_vad.so
 COPY workspace-template /usr/local/bin/workspace-template
 COPY prompts/cheeko.tmpl ./prompts/cheeko.tmpl
+
+ENV PICOCLAW_HOME=/opt/picoclaw \
+    HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache
+
+USER 10001:10001
 
 EXPOSE 8192
 ENTRYPOINT ["picoclaw-livekit"]
