@@ -1,3 +1,5 @@
+ARG RUNTIME_IMAGE=debian:trixie-slim
+
 FROM golang:1.25-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,11 +21,12 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CGO_LDFLAGS="-lc++ -lc++abi -lm" \
     go build -trimpath -ldflags="-s -w" -o /out/picoclaw-livekit ./cmd/picoclaw-livekit
 
-FROM debian:bookworm-slim
+FROM ${RUNTIME_IMAGE}
 
 ARG APP_UID=10001
 ARG APP_GID=10001
 
+# Runtime does not use Perl; remove it after certificate setup to keep ECR scans clean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc++1 \
@@ -33,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsoxr0 \
     libunwind8 \
     tzdata \
+  && dpkg --purge --force-all perl-base \
   && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid "${APP_GID}" picoclaw \

@@ -37,7 +37,7 @@ spec:
         node.kubernetes.io/instance-type: c7i.xlarge
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:206785024710d57de2d5b1ca064882effc0edffd1128bddc2ad2187a10d5a0cb
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:24ec4f8cc5448d09563788f3e831ee540e4827333b3e92a5bc82ce251528c8c9
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
