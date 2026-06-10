@@ -2,13 +2,15 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: picoclaw-livekit
+  namespace: picoclaw-dev
 spec:
-  replicas: 1
+  replicas: 2
+  minReadySeconds: 10
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 0
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: picoclaw-livekit
@@ -21,12 +23,21 @@ spec:
         prometheus.io/port: "8192"
         prometheus.io/path: "/metrics"
     spec:
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 900
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       nodeSelector:
-        node.kubernetes.io/instance-type: m7i.xlarge
+        node.kubernetes.io/instance-type: c7i.xlarge
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit:20260608-164238
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:206785024710d57de2d5b1ca064882effc0edffd1128bddc2ad2187a10d5a0cb
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args: ["--agent-name", "cheeko-agent1", "--config", "/etc/picoclaw/config.json"]
           ports:
             - name: health

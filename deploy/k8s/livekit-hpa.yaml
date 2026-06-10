@@ -2,13 +2,14 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: picoclaw-livekit
+  namespace: picoclaw-dev
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: picoclaw-livekit
-  minReplicas: 1
-  maxReplicas: 1
+  minReplicas: 2
+  maxReplicas: 10
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 0
@@ -22,9 +23,13 @@ spec:
           periodSeconds: 30
     scaleDown:
       stabilizationWindowSeconds: 900
+      selectPolicy: Min
       policies:
         - type: Percent
-          value: 10
+          value: 25
+          periodSeconds: 60
+        - type: Pods
+          value: 1
           periodSeconds: 60
   metrics:
     # Primary metric: session load (%) per pod.

@@ -2,8 +2,9 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: picoclaw-livekit
+  namespace: picoclaw-dev
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: picoclaw-livekit
