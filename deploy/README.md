@@ -21,7 +21,7 @@ Run the commands in this README from `D:\picoclaw\deploy` unless a command says 
 | Image repo | `382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit` |
 | Node group | `picoclaw-ng-c7i-xlarge` |
 | Node type | `c7i.xlarge` |
-| Node scaling | `minSize=3`, `desiredSize=3`, `maxSize=10` |
+| Node scaling | `minSize=2`, `desiredSize=2`, `maxSize=10` |
 | Pod scaling | HPA `minReplicas=2`, `maxReplicas=10` |
 | Autoscaler | Cluster Autoscaler |
 | NetworkPolicy | Staged, not applied until CNI policy enforcement is enabled |
@@ -160,7 +160,7 @@ How to interpret this:
 - The HPA can scale to 10 pods, which is about 120 configured session slots.
 - The node group can scale to 10 `c7i.xlarge` nodes.
 
-The current AWS baseline keeps three `c7i.xlarge` nodes warm. This is deliberate because each worker pod requests `3 vCPU` and `6Gi` memory, and rolling updates can temporarily need extra room.
+The current AWS baseline keeps two `c7i.xlarge` nodes warm for the two minimum agent pods. This saves one always-on node compared with the earlier three-node baseline. Rolling updates or load spikes can still temporarily need a third node because each worker pod requests `3 vCPU` and `6Gi` memory; Cluster Autoscaler should add that capacity when new pods cannot schedule.
 
 ## Secrets And Config
 

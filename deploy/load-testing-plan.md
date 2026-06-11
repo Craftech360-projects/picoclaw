@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-11
 
-This plan validates whether the Picoclaw LiveKit voice agent can handle real concurrent usage on AWS EKS, not only a single smoke-test session.
+This plan validates whether the Picoclaw LiveKit voice agent can handle real concurrent usage on AWS EKS, not only a single smoke-test session. The capacity test target is the cost-optimized `c6a.xlarge` setup, not the existing `c7i.xlarge` pool.
 
 Primary source: LiveKit field guide, "How to load test voice agents and get meaningful results" (`https://livekit.com/field-guides/guide/load-testing-voice-agents`).
 
@@ -22,6 +22,13 @@ Validate production readiness for the `cheeko-agent1` LiveKit voice agent by mea
 
 The goal is not to instantly prove "100 users works." The goal is to find the highest safe concurrency level with acceptable voice latency and low error rate.
 
+Capacity discovery goals:
+
+- host a canary agent on a new `c6a.xlarge` node group
+- find the highest safe sessions per pod on `c6a.xlarge`
+- decide whether the Cerebrium-style starting concurrency of `4` can be raised to `8`, `12`, `18`, or higher
+- choose the final `PICOCLAW_LIVEKIT_MAX_SESSIONS`, HPA target, HPA max replicas, and node group shape from measurements instead of assumptions
+
 ## Current Deployment Baseline
 
 | Item | Value |
@@ -34,12 +41,25 @@ The goal is not to instantly prove "100 users works." The goal is to find the hi
 | Deployment | `picoclaw-livekit` |
 | HPA | `minReplicas=2`, `maxReplicas=10` |
 | Node group | `picoclaw-ng-c7i-xlarge` |
-| Node group size | `minSize=3`, `desiredSize=3`, `maxSize=10` |
+| Node group size | `minSize=2`, `desiredSize=2`, `maxSize=10` |
 | Node autoscaler | Cluster Autoscaler |
 | Pod max sessions | `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` |
 | HPA session target | `picoclaw_livekit_session_load_percent = 50` |
 | CPU target | `50%` |
 | NetworkPolicy | staged, not enforced yet |
+
+Proposed cost-optimized target to test:
+
+| Item | Value |
+| --- | --- |
+| Candidate node group | `picoclaw-ng-c6a-xlarge` |
+| Candidate instance | `c6a.xlarge` |
+| Candidate node size | `4 vCPU`, `8 GiB` |
+| Candidate price | about `$0.0935/hour`, about `$2.24/day` per node |
+| Candidate node scaling | `minSize=1`, `desiredSize=1`, `maxSize=8` |
+| Candidate HPA | `minReplicas=1`, `maxReplicas=8` |
+| Candidate start concurrency | `PICOCLAW_LIVEKIT_MAX_SESSIONS=4` |
+| Candidate graceful drain | `900s` |
 
 Capacity interpretation:
 
@@ -136,6 +156,16 @@ aws eks describe-nodegroup `
   --query "nodegroup.scalingConfig"
 ```
 
+For the `c6a.xlarge` canary test, check the candidate node group after creating it:
+
+```powershell
+aws eks describe-nodegroup `
+  --region ap-south-2 `
+  --cluster-name picoclaw-eks `
+  --nodegroup-name picoclaw-ng-c6a-xlarge `
+  --query "nodegroup.scalingConfig"
+```
+
 Check EC2 quota:
 
 ```powershell
@@ -211,6 +241,15 @@ The current `8.3%` load for one active session is a slot calculation, not CPU:
 
 Because the worker is written in Go, CPU and memory may allow more than 12 sessions per pod. But voice capacity is not only Go runtime cost. Each session also consumes WebRTC audio handling, VAD, streaming STT, LLM streaming, TTS synthesis, workspace state, network I/O, and provider quota. This calibration test finds the real per-pod comfort limit with measurements.
 
+### What This Test Must Answer
+
+The output of this section must answer:
+
+- How many concurrent sessions can one `c6a.xlarge` pod handle before latency or errors become unacceptable?
+- Is `4` sessions per pod too conservative?
+- Is `8`, `12`, `18`, or `24` sessions per pod safe?
+- Does the bottleneck appear in CPU, memory, STT, LLM, TTS, LiveKit dispatch, workspace sync, or network?
+
 ### Preferred Method: Dedicated One-Pod Capacity Agent
 
 Do not use the production `cheeko-agent1` pool for this test if avoidable. Create a temporary canary Deployment with the same image, resources, secrets, security context, and node selector as production, but with:
@@ -241,6 +280,45 @@ lk perf agent-load-test `
 
 If the LiveKit CLI test does not include enough real room metadata for workspace/device behavior, use the same one-pod canary idea with the custom gateway/metadata-aware runner described later in this document.
 
+### C6A Test Environment
+
+Create a temporary `c6a.xlarge` node group and run the one-pod calibration there.
+
+Temporary node group:
+
+```text
+name: picoclaw-ng-c6a-xlarge
+instance type: c6a.xlarge
+minSize: 1
+desiredSize: 1
+maxSize: 8
+capacity: ON_DEMAND
+labels:
+  workload=picoclaw-livekit-capacity
+  node.kubernetes.io/instance-type=c6a.xlarge
+```
+
+Pin the capacity-test Deployment to this node group with a node selector. Do not migrate production traffic until the test result is known.
+
+Canary workload:
+
+```text
+agent name: cheeko-agent-capacity-test
+replicas: 1
+HPA: disabled for the canary
+PICOCLAW_LIVEKIT_MAX_SESSIONS: start at 4, then raise for test rounds
+nodeSelector:
+  node.kubernetes.io/instance-type: c6a.xlarge
+```
+
+Expected decision:
+
+```text
+If c6a.xlarge passes the launch concurrency and latency target, migrate production to c6a.xlarge.
+If c6a.xlarge passes only 4-8 sessions per pod, use Cerebrium-like safe mode and keep max pods at 8.
+If c6a.xlarge fails below 4 sessions, do not migrate; investigate provider/runtime bottlenecks first.
+```
+
 ### Fallback Method: Production Pool Maintenance Test
 
 Only use this during a maintenance window.
@@ -261,9 +339,9 @@ Run each level for at least 5 minutes. Stop at the first sustained failure point
 | Step | Rooms on one pod | Purpose |
 | --- | ---: | --- |
 | P1 | 1 | verify canary joins and speaks |
-| P2 | 3 | light concurrency |
+| P2 | 4 | match Cerebrium `replica_concurrency=4` |
 | P3 | 6 | current HPA comfort target for one production pod |
-| P4 | 9 | current 75% slot load |
+| P4 | 8 | candidate low-risk production target |
 | P5 | 12 | current configured ceiling |
 | P6 | 15 | test whether the current ceiling is conservative |
 | P7 | 18 | higher Go/runtime/provider pressure |
@@ -333,6 +411,28 @@ Expected HPA scale trigger at 50%: about 12 sessions per pod
 ```
 
 Do not raise `PICOCLAW_LIVEKIT_MAX_SESSIONS` only because CPU is low. Provider latency, stream stability, and first-audio p95 matter more for voice quality.
+
+### Capacity Decision Table
+
+Use this table after the `c6a.xlarge` one-pod test:
+
+| Highest passing sessions per pod | Recommended config |
+| ---: | --- |
+| `< 4` | not ready; investigate before launch |
+| `4` | Cerebrium-like safe mode: `max_sessions=4`, HPA target `60`, max pods `8` |
+| `8` | balanced launch mode: `max_sessions=8`, HPA target `60`, max pods `8` |
+| `12` | current-style mode: `max_sessions=12`, HPA target `50-60`, max pods `8-10` |
+| `18` | optimized mode: `max_sessions=18`, HPA target `50`, max pods based on expected traffic |
+| `24+` | high-density mode; use only if provider limits and p95 latency stay healthy |
+
+For launch, choose one step below the first failing point.
+
+Example:
+
+```text
+c6a.xlarge passes 12 sessions, fails or gets slow at 18.
+Recommended launch setting: max_sessions=12 or 8, depending on p95 first-audio latency.
+```
 
 ## Test Matrix
 
@@ -686,7 +786,7 @@ If HPA does not scale:
 
 If pods cannot schedule:
 
-- check node selector for `c7i.xlarge`
+- check node selector for the active test node type, such as `c6a.xlarge`
 - check node group max size
 - check vCPU quota
 - check subnet capacity

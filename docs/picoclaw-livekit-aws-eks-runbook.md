@@ -28,7 +28,7 @@ LiveKit worker identity and endpoints:
 - Manager API URL: `http://139.59.7.72:8002/toy`
 - Active agent node group: `picoclaw-ng-c7i-xlarge`
 - Node instance type: `c7i.xlarge` (`4 vCPU`, `8Gi` memory)
-- Node group scaling: `minSize=3`, `desiredSize=3`, `maxSize=10`
+- Node group scaling: `minSize=2`, `desiredSize=2`, `maxSize=10`
 - Node autoscaler: Cluster Autoscaler
 - HPA range: `minReplicas=2`, `maxReplicas=10`
 
@@ -350,7 +350,7 @@ Fix:
 Current capacity:
 
 - 2 warm pods minimum
-- 3 warm `c7i.xlarge` nodes minimum
+- 2 warm `c7i.xlarge` nodes minimum
 - Up to 12 sessions per pod configured
 - HPA can scale to 10 pods
 - Estimated practical range per pod depends on STT/TTS/model profile and latency budget
@@ -370,7 +370,7 @@ With `MAX_SESSIONS=12` and HPA target `50%`:
 
 AWS cost baseline:
 
-- Current baseline is roughly `$500-530/month` for three warm `c7i.xlarge` nodes, EKS control plane, and root volumes.
+- Current baseline is roughly `$355-385/month` for two warm `c7i.xlarge` nodes, EKS control plane, and root volumes.
 - Each extra `c7i.xlarge` during scale-out adds about `$0.1785/hour`, plus storage while present.
 - This excludes LiveKit Cloud, LLM, STT, TTS, database, and Manager API costs.
 

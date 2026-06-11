@@ -1,6 +1,6 @@
 # LiveKit Agent Capacity and Hardening Notes
 
-Last updated: 2026-06-10
+Last updated: 2026-06-11
 
 ## Current production shape
 
@@ -11,7 +11,7 @@ Last updated: 2026-06-10
 - Deployment replicas: `2`
 - HPA: `minReplicas=2`, `maxReplicas=10`
 - Node group: `picoclaw-ng-c7i-xlarge`
-- Node group scaling: `minSize=3`, `desiredSize=3`, `maxSize=10`
+- Node group scaling: `minSize=2`, `desiredSize=2`, `maxSize=10`
 - Node autoscaler: Cluster Autoscaler with ASG tag discovery
 - EC2 On-Demand Standard vCPU quota: `64`
 
@@ -35,19 +35,19 @@ For billing and sizing, use peak concurrent voice sessions and active minutes, n
 
 ## Current AWS cost baseline
 
-Current baseline cost is mostly fixed by keeping three `c7i.xlarge` nodes warm:
+Current baseline cost is mostly fixed by keeping two `c7i.xlarge` nodes warm:
 
 - `c7i.xlarge` in `ap-south-2`: about `$0.1785/hour` each on demand.
-- Three warm nodes: about `$391/month`.
+- Two warm nodes: about `$257/month`.
 - EKS control plane: about `$73/month`.
-- EBS/root volume storage and small extras: roughly `$35-65/month`, depending on actual volume sizes.
+- EBS/root volume storage and small extras: roughly `$25-55/month`, depending on actual volume sizes.
 
-Expected current AWS baseline: roughly `$500-530/month`, excluding LiveKit Cloud, LLM, STT, TTS, database, and manager API costs.
+Expected current AWS baseline: roughly `$355-385/month`, or about `$12-13/day`, excluding LiveKit Cloud, LLM, STT, TTS, database, and manager API costs.
 
 Temporary scale-out cost:
 
 - Each extra `c7i.xlarge` is about `$0.1785/hour`, plus storage while the instance exists.
-- Rolling updates can briefly add extra nodes because each agent pod requests `3 vCPU` and `6Gi` memory.
+- Rolling updates can briefly add a third node because each agent pod requests `3 vCPU` and `6Gi` memory.
 - The `900s` termination grace period protects active voice sessions, but it can also keep old pods reserving node resources during rollout while new pods surge.
 - Cluster Autoscaler should remove empty/unneeded nodes after its scale-down cooldown.
 
