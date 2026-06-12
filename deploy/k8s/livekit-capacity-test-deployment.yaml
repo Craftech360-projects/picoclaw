@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: picoclaw-livekit-capacity
+  namespace: picoclaw-dev
+spec:
+  replicas: 1
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: picoclaw-livekit-capacity
+  template:
+    metadata:
+      labels:
+        app: picoclaw-livekit-capacity
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8192"
+        prometheus.io/path: "/metrics"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 900
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        node.kubernetes.io/instance-type: c6a.xlarge
+        workload: picoclaw-livekit-capacity
+      containers:
+        - name: livekit
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:24ec4f8cc5448d09563788f3e831ee540e4827333b3e92a5bc82ce251528c8c9
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          args: ["--agent-name", "cheeko-agent-capacity-test", "--config", "/etc/picoclaw/config.json"]
+          ports:
+            - name: health
+              containerPort: 8192
+              protocol: TCP
+          env:
+            - name: PICOCLAW_CONFIG
+              value: /etc/picoclaw/config.json
+            - name: PICOCLAW_HOME
+              value: /opt/picoclaw
+            - name: HOME
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /tmp/.cache
+            - name: PICOCLAW_LIVEKIT_STRICT_CONFIG
+              value: "true"
+            - name: PICOCLAW_LIVEKIT_DRAIN_TIMEOUT_SECONDS
+              value: "900"
+            - name: PICOCLAW_LIVEKIT_HEALTH_PORT
+              value: "8192"
+            - name: PICOCLAW_LIVEKIT_MAX_SESSIONS
+              value: "4"
+            - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD
+              value: "0.72"
+            - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS
+              value: "800"
+            - name: PICOCLAW_AGENTS_DEFAULTS_WORKSPACE
+              value: /opt/picoclaw/workspace-template
+            - name: MANAGER_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: picoclaw-secrets
+                  key: manager_api_url
+            - name: MANAGER_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: picoclaw-secrets
+                  key: manager_api_secret
+            - name: STT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: picoclaw-secrets
+                  key: stt_database_url
+            - name: DIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: picoclaw-secrets
+                  key: direct_url
+          startupProbe:
+            httpGet:
+              path: /health
+              port: health
+            failureThreshold: 60
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+          resources:
+            requests:
+              cpu: "3000m"
+              memory: "6Gi"
+              ephemeral-storage: "10Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+              ephemeral-storage: "20Gi"
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/picoclaw/config.json
+              subPath: config.json
+              readOnly: true
+            - name: cfg
+              mountPath: /etc/picoclaw/.security.yml
+              subPath: .security.yml
+              readOnly: true
+            - name: work
+              mountPath: /opt/picoclaw
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: cfg
+          secret:
+            secretName: picoclaw-config
+        - name: work
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

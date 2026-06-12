@@ -67,6 +67,7 @@ What each file is for:
 | File | Purpose |
 | --- | --- |
 | `k8s/livekit-deployment.yaml` | Production EKS Deployment for the LiveKit worker. Contains image digest, probes, resources, security context, secrets, workspace volumes, and rollout strategy. |
+| `k8s/livekit-capacity-test-deployment.yaml` | One-pod c6a.xlarge canary Deployment for measuring per-pod LiveKit voice-agent capacity without sending traffic to the production `cheeko-agent1` pool. |
 | `k8s/livekit-service.yaml` | Internal Service exposing the worker health/metrics port `8192`. |
 | `k8s/livekit-hpa.yaml` | HPA using session load and CPU. Primary metric is `picoclaw_livekit_session_load_percent`. |
 | `k8s/livekit-pdb.yaml` | PDB allowing one voluntary disruption while keeping the two-pod baseline available. |

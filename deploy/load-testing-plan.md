@@ -1,6 +1,6 @@
 # LiveKit Voice Agent Load Testing Plan
 
-Last updated: 2026-06-11
+Last updated: 2026-06-12
 
 This plan validates whether the Picoclaw LiveKit voice agent can handle real concurrent usage on AWS EKS, not only a single smoke-test session. The capacity test target is the cost-optimized `c6a.xlarge` setup, not the existing `c7i.xlarge` pool.
 
@@ -60,6 +60,20 @@ Proposed cost-optimized target to test:
 | Candidate HPA | `minReplicas=1`, `maxReplicas=8` |
 | Candidate start concurrency | `PICOCLAW_LIVEKIT_MAX_SESSIONS=4` |
 | Candidate graceful drain | `900s` |
+
+Actual c6a canary status as of 2026-06-12:
+
+| Item | Value |
+| --- | --- |
+| Canary node group | `picoclaw-ng-c6a-xlarge` |
+| Canary instance | `c6a.xlarge` |
+| Canary node scaling | `minSize=1`, `desiredSize=1`, `maxSize=8` |
+| Canary Deployment | `picoclaw-livekit-capacity` |
+| Canary agent name | `cheeko-agent-capacity-test` |
+| Canary HPA | disabled |
+| Canary manifest | `deploy/k8s/livekit-capacity-test-deployment.yaml` |
+| Git default max sessions | `4` |
+| Live test max sessions used | temporarily raised to `8` |
 
 Capacity interpretation:
 
@@ -319,6 +333,33 @@ If c6a.xlarge passes only 4-8 sessions per pod, use Cerebrium-like safe mode and
 If c6a.xlarge fails below 4 sessions, do not migrate; investigate provider/runtime bottlenecks first.
 ```
 
+### 2026-06-12 C6A Canary Results
+
+These tests used the dedicated one-pod `cheeko-agent-capacity-test` worker on the `picoclaw-ng-c6a-xlarge` node group. The production `cheeko-agent1` pool was not changed.
+
+| Rooms | Duration | CLI result | Pod result | Important finding |
+| ---: | --- | --- | --- | --- |
+| 1 | 3m | passed | `0` restarts | smoke test passed; worker registered and handled a room |
+| 4 | 5m | passed | `0` restarts | matches Cerebrium-style `replica_concurrency=4`; no AWS capacity issue |
+| 5 | 10m | passed from LiveKit dispatch perspective | `0` restarts, about `1m CPU / 74Mi` after run | one ElevenLabs `concurrent_limit_exceeded`; this is the current provider edge |
+| 6 | 5m | passed | `0` restarts, about `267m CPU / 66Mi` after run | c6a pod remained light; echo test produced interruption noise |
+| 8 | 5m | passed from LiveKit dispatch perspective | `0` restarts, about `138m CPU / 86Mi` after run | ElevenLabs returned `concurrent_limit_exceeded`; current TTS account allows about 5 parallel TTS requests |
+
+Interpretation:
+
+- `c6a.xlarge` did not look CPU- or memory-bound at 8 CLI echo rooms.
+- The first hard bottleneck was TTS provider concurrency, not AWS compute.
+- 8 concurrent sessions is not production-safe with the current ElevenLabs subscription unless TTS calls are queued/throttled or the ElevenLabs concurrency limit is raised.
+- 5 concurrent sessions is the provider edge, not the comfort target, because it still produced one TTS concurrency error during a 10-minute echo test.
+- For launch with the current provider limit, keep the practical target near `4` concurrent sessions per worker and verify total service concurrency against provider limits, not only per-pod CPU.
+- Scaling Kubernetes pods cannot solve an account-level TTS concurrency cap by itself. More pods can make the provider cap easier to hit.
+
+Recommended next test:
+
+1. Run a 4-room test through the real product/gateway path for 15-30 minutes, because `lk perf agent-load-test` does not send all production metadata.
+2. Before testing 5+ production-like sessions, raise the ElevenLabs concurrency limit or add application-level TTS concurrency control.
+3. After provider capacity is fixed, repeat 5, 8, and 12 room tests before increasing production `PICOCLAW_LIVEKIT_MAX_SESSIONS`.
+
 ### Fallback Method: Production Pool Maintenance Test
 
 Only use this during a maintenance window.
@@ -340,13 +381,14 @@ Run each level for at least 5 minutes. Stop at the first sustained failure point
 | --- | ---: | --- |
 | P1 | 1 | verify canary joins and speaks |
 | P2 | 4 | match Cerebrium `replica_concurrency=4` |
-| P3 | 6 | current HPA comfort target for one production pod |
-| P4 | 8 | candidate low-risk production target |
-| P5 | 12 | current configured ceiling |
-| P6 | 15 | test whether the current ceiling is conservative |
-| P7 | 18 | higher Go/runtime/provider pressure |
-| P8 | 24 | candidate next `max_sessions` value |
-| P9 | 30 | stress point only if earlier phases are clean |
+| P3 | 5 | provider-limit edge test for current ElevenLabs subscription |
+| P4 | 6 | current HPA comfort target for one production pod |
+| P5 | 8 | candidate target only after TTS concurrency is fixed |
+| P6 | 12 | current configured ceiling |
+| P7 | 15 | test whether the current ceiling is conservative |
+| P8 | 18 | higher Go/runtime/provider pressure |
+| P9 | 24 | candidate next `max_sessions` value |
+| P10 | 30 | stress point only if earlier phases are clean |
 
 For each step, record:
 

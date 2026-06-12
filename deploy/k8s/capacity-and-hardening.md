@@ -1,6 +1,6 @@
 # LiveKit Agent Capacity and Hardening Notes
 
-Last updated: 2026-06-11
+Last updated: 2026-06-12
 
 ## Current production shape
 
@@ -50,6 +50,20 @@ Temporary scale-out cost:
 - Rolling updates can briefly add a third node because each agent pod requests `3 vCPU` and `6Gi` memory.
 - The `900s` termination grace period protects active voice sessions, but it can also keep old pods reserving node resources during rollout while new pods surge.
 - Cluster Autoscaler should remove empty/unneeded nodes after its scale-down cooldown.
+
+## C6A capacity-test note
+
+A temporary cost-optimized node group exists for capacity testing:
+
+- Node group: `picoclaw-ng-c6a-xlarge`
+- Instance type: `c6a.xlarge`
+- Scaling: `minSize=1`, `desiredSize=1`, `maxSize=8`
+- Canary Deployment: `picoclaw-livekit-capacity`
+- Canary agent name: `cheeko-agent-capacity-test`
+
+The 2026-06-12 one-pod canary test passed LiveKit dispatch at `1`, `4`, `5`, `6`, and `8` CLI echo rooms with `0` pod restarts and low observed CPU/memory after each run. The first hard bottleneck was not AWS compute. A 10-minute `5` room test produced one ElevenLabs `concurrent_limit_exceeded`, and the `8` room test produced repeated `concurrent_limit_exceeded` responses. The current ElevenLabs subscription reports a maximum of about `5` concurrent TTS requests.
+
+Until the TTS concurrency limit is raised or application-level TTS concurrency control is added, treat `4` concurrent sessions per worker as the practical safe launch target even if the c6a pod itself appears lightly loaded.
 
 ## Hardening already applied
 
