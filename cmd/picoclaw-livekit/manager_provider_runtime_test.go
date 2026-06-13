@@ -65,6 +65,28 @@ func TestApplyManagerActiveProvidersOverridesLLMAndTTS(t *testing.T) {
 	}
 }
 
+func TestApplyManagerTTSProviderStoresDeepgramAPIKey(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	applyManagerTTSProvider(cfg, managerActiveTTSProvider{
+		Provider:     "deepgram",
+		ModelID:      "aura-2-asteria-en",
+		OutputFormat: "pcm_24000",
+		SampleRateHz: 24000,
+		APIKey:       "deepgram-tts-key",
+	})
+
+	if cfg.LiveKitService.TTS.Provider != "deepgram" {
+		t.Fatalf("tts provider = %q, want deepgram", cfg.LiveKitService.TTS.Provider)
+	}
+	if cfg.LiveKitService.DeepgramAPIKey() != "deepgram-tts-key" {
+		t.Fatalf("deepgram key = %q, want deepgram-tts-key", cfg.LiveKitService.DeepgramAPIKey())
+	}
+	if cfg.Voice.ElevenLabsAPIKey != "" {
+		t.Fatalf("elevenlabs key = %q, want empty", cfg.Voice.ElevenLabsAPIKey)
+	}
+}
+
 func TestResolveLiveKitProviderConfigForSessionNoManagerURLFallsBackToConfig(t *testing.T) {
 	liveKitActiveProvidersCache = managerActiveProvidersCache{}
 	cfg := config.DefaultConfig()

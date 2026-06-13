@@ -33,14 +33,14 @@ spec:
           periodSeconds: 60
   metrics:
     # Primary metric: session load (%) per pod.
-    # 50% is intentionally below worker saturation thresholds (70-75%).
+    # 70% keeps headroom below the measured one-pod edge while avoiding early scale at 6/12 sessions.
     - type: Pods
       pods:
         metric:
           name: picoclaw_livekit_session_load_percent
         target:
           type: AverageValue
-          averageValue: "50"
+          averageValue: "70"
     # Secondary safety metric.
     - type: Resource
       resource:

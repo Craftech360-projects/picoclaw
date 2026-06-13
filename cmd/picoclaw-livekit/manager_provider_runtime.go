@@ -260,6 +260,8 @@ func applyManagerTTSProvider(cfg *config.Config, ttsCfg managerActiveTTSProvider
 	switch strings.ToLower(strings.TrimSpace(cfg.LiveKitService.TTS.Provider)) {
 	case "cartesia":
 		cfg.LiveKitService.SetCartesiaAPIKey(key)
+	case "deepgram":
+		cfg.LiveKitService.SetDeepgramAPIKey(key)
 	case "inworld":
 		cfg.LiveKitService.SetInworldAPIKey(key)
 	default:

@@ -5,10 +5,12 @@ Region: `ap-south-2`
 
 ## Current node groups
 
-- Active agent node group: `picoclaw-ng-c7i-xlarge`
-  - Instance type: `c7i.xlarge`
-  - Labels: `workload=picoclaw-livekit`, `node.kubernetes.io/instance-type=c7i.xlarge`
-  - Scaling config after cost reduction: `minSize=2`, `desiredSize=2`, `maxSize=10`
+- Active agent node group: `picoclaw-ng-c6a-large`
+  - Instance type: `c6a.large`
+  - Labels: `workload=picoclaw-livekit`, `node.kubernetes.io/instance-type=c6a.large`
+  - Scaling config after production migration: `minSize=2`, `desiredSize=2`, `maxSize=5`
+- Previous agent node group: `picoclaw-ng-c7i-xlarge`
+  - Scaling config after migration: `minSize=0`, `desiredSize=0`, `maxSize=1`
 - Old node group: `picoclaw-ng-m7i-xlarge`
   - Scaling config after migration: `minSize=0`, `desiredSize=0`, `maxSize=1`
   - Cluster Autoscaler discovery tags were removed so it is not used for new capacity.
@@ -25,6 +27,6 @@ A quota increase request was submitted on 2026-06-10:
 - Request ID: `21d765a1a4604c418ee171668e5e82b3wjgryKwf`
 - Final status checked on 2026-06-10: approved, quota value `64`
 
-With two `c7i.xlarge` EKS nodes and two non-EKS `t3.small` instances, current usage is
-approximately 12 vCPU. The approved 64 vCPU quota leaves room for Cluster Autoscaler to
-launch additional `c7i.xlarge` nodes up to the configured node group `maxSize: 10`.
+With two `c6a.large` EKS nodes and two non-EKS `t3.small` instances, current usage is
+approximately 6 vCPU. The approved 64 vCPU quota leaves room for Cluster Autoscaler to
+launch additional `c6a.large` nodes up to the configured node group `maxSize: 5`.

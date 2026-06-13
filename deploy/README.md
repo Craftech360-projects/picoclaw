@@ -1,6 +1,6 @@
 # Picoclaw LiveKit Deployment
 
-Last updated: 2026-06-10
+Last updated: 2026-06-12
 
 This folder contains the deployment entry point for the Picoclaw LiveKit voice agent. It is intended to be enough for a new developer to understand what runs in AWS, how the Kubernetes pieces fit together, how to ship a new image, how to verify a smoke test, and where the sharp edges are.
 
@@ -19,9 +19,9 @@ Run the commands in this README from `D:\picoclaw\deploy` unless a command says 
 | Workload | `Deployment/picoclaw-livekit` |
 | Agent name | `cheeko-agent1` |
 | Image repo | `382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit` |
-| Node group | `picoclaw-ng-c7i-xlarge` |
-| Node type | `c7i.xlarge` |
-| Node scaling | `minSize=2`, `desiredSize=2`, `maxSize=10` |
+| Node group | `picoclaw-ng-c6a-large` |
+| Node type | `c6a.large` |
+| Node scaling | `minSize=2`, `desiredSize=2`, `maxSize=5` |
 | Pod scaling | HPA `minReplicas=2`, `maxReplicas=10` |
 | Autoscaler | Cluster Autoscaler |
 | NetworkPolicy | Staged, not applied until CNI policy enforcement is enabled |
@@ -67,7 +67,7 @@ What each file is for:
 | File | Purpose |
 | --- | --- |
 | `k8s/livekit-deployment.yaml` | Production EKS Deployment for the LiveKit worker. Contains image digest, probes, resources, security context, secrets, workspace volumes, and rollout strategy. |
-| `k8s/livekit-capacity-test-deployment.yaml` | One-pod c6a.xlarge canary Deployment for measuring per-pod LiveKit voice-agent capacity without sending traffic to the production `cheeko-agent1` pool. |
+| `k8s/livekit-capacity-test-deployment.yaml` | Off-by-default c6a.large canary Deployment for measuring per-pod LiveKit voice-agent capacity without sending traffic to the production `cheeko-agent1` pool. |
 | `k8s/livekit-service.yaml` | Internal Service exposing the worker health/metrics port `8192`. |
 | `k8s/livekit-hpa.yaml` | HPA using session load and CPU. Primary metric is `picoclaw_livekit_session_load_percent`. |
 | `k8s/livekit-pdb.yaml` | PDB allowing one voluntary disruption while keeping the two-pod baseline available. |
@@ -96,7 +96,7 @@ flowchart LR
   Deployment["Deployment replica count"]
   Pending["Pending pods\nwhen nodes are full"]
   CA["Cluster Autoscaler"]
-  NodeGroup["EKS managed node group\npicoclaw-ng-c7i-xlarge"]
+  NodeGroup["EKS managed node group\npicoclaw-ng-c6a-large"]
   ECR["ECR image repo"]
 
   Device --> Gateway
@@ -136,7 +136,7 @@ The current worker setting is:
 PICOCLAW_LIVEKIT_MAX_SESSIONS=12
 ```
 
-The HPA target for session load is `50`.
+The HPA target for session load is `70`.
 
 Session load is:
 
@@ -150,18 +150,19 @@ With `max_sessions=12`:
 | --- | --- |
 | 1 | about `8.3%` |
 | 6 | about `50%` |
+| 8 | about `66.7%` |
 | 9 | about `75%` |
 | 12 | `100%` |
 
 How to interpret this:
 
 - `12` is the configured ceiling, not the comfort target.
-- HPA should start adding pods around 6 active sessions per pod.
+- HPA should start adding pods around 8-9 active sessions per pod from session load, with CPU `50%` as the second safety metric.
 - The two warm pods provide about 24 configured session slots before extra scale-out, but production capacity should be judged by latency, provider limits, and error rate.
 - The HPA can scale to 10 pods, which is about 120 configured session slots.
-- The node group can scale to 10 `c7i.xlarge` nodes.
+- The node group can scale to 5 `c6a.large` nodes. With the current `750m` CPU request, that supports up to about 10 agent pods.
 
-The current AWS baseline keeps two `c7i.xlarge` nodes warm for the two minimum agent pods. This saves one always-on node compared with the earlier three-node baseline. Rolling updates or load spikes can still temporarily need a third node because each worker pod requests `3 vCPU` and `6Gi` memory; Cluster Autoscaler should add that capacity when new pods cannot schedule.
+The current AWS baseline keeps two `c6a.large` nodes warm for the two minimum agent pods. Each worker pod requests `750m` CPU and `512Mi` memory, with no CPU limit and a `2Gi` memory limit. This lets each `c6a.large` node run one warm production pod plus system/monitoring overhead, and Cluster Autoscaler can add more `c6a.large` nodes when HPA-created pods cannot schedule.
 
 ## Secrets And Config
 
@@ -477,7 +478,7 @@ Check node group scaling from AWS:
 aws eks describe-nodegroup `
   --region ap-south-2 `
   --cluster-name picoclaw-eks `
-  --nodegroup-name picoclaw-ng-c7i-xlarge `
+  --nodegroup-name picoclaw-ng-c6a-large `
   --query "nodegroup.scalingConfig"
 ```
 
@@ -539,7 +540,7 @@ Likely causes:
 
 - Node group max size is too low.
 - Cluster Autoscaler is not running or lacks AWS permissions.
-- Node selector requires `c7i.xlarge` nodes but none are available.
+- Node selector requires `c6a.large` nodes with `workload=picoclaw-livekit`, but none are available.
 - EC2 vCPU quota or subnet capacity blocks scale-out.
 
 Useful checks:

@@ -10,8 +10,8 @@ Last updated: 2026-06-12
 - Workload: `Deployment/picoclaw-livekit`
 - Deployment replicas: `2`
 - HPA: `minReplicas=2`, `maxReplicas=10`
-- Node group: `picoclaw-ng-c7i-xlarge`
-- Node group scaling: `minSize=2`, `desiredSize=2`, `maxSize=10`
+- Node group: `picoclaw-ng-c6a-large`
+- Node group scaling: `minSize=2`, `desiredSize=2`, `maxSize=5`
 - Node autoscaler: Cluster Autoscaler with ASG tag discovery
 - EC2 On-Demand Standard vCPU quota: `64`
 
@@ -20,13 +20,14 @@ Last updated: 2026-06-12
 The agent pod is configured with:
 
 - `PICOCLAW_LIVEKIT_MAX_SESSIONS=12`
-- HPA session-load target: `50`
+- HPA session-load target: `70`
 - CPU target: `50%`
 
 This means:
 
 - 1 active session on one pod reports about `8.3%` load.
-- 6 active sessions on one pod reports about `50%` load and should trigger scale-up pressure.
+- 6 active sessions on one pod reports about `50%` load.
+- 8-9 active sessions on one pod reports about `67-75%` load and should trigger scale-up pressure.
 - 12 active sessions on one pod is the configured per-pod ceiling, not a comfort target.
 - 2 warm pods give a configured ceiling of about 24 concurrent sessions before HPA adds more pods.
 - 10 pods give a configured ceiling of about 120 concurrent sessions, subject to real latency and provider limits.
@@ -35,35 +36,35 @@ For billing and sizing, use peak concurrent voice sessions and active minutes, n
 
 ## Current AWS cost baseline
 
-Current baseline cost is mostly fixed by keeping two `c7i.xlarge` nodes warm:
+Current baseline cost is mostly fixed by keeping two `c6a.large` nodes warm:
 
-- `c7i.xlarge` in `ap-south-2`: about `$0.1785/hour` each on demand.
-- Two warm nodes: about `$257/month`.
+- `c6a.large` is roughly half the size of the previously tested `c6a.xlarge`.
+- Two warm nodes should be much cheaper than the previous two-`c7i.xlarge` baseline; verify exact pricing with AWS Pricing or Cost Explorer before budgeting.
 - EKS control plane: about `$73/month`.
 - EBS/root volume storage and small extras: roughly `$25-55/month`, depending on actual volume sizes.
 
-Expected current AWS baseline: roughly `$355-385/month`, or about `$12-13/day`, excluding LiveKit Cloud, LLM, STT, TTS, database, and manager API costs.
+Expected current AWS baseline is now mainly the EKS control plane plus two small compute nodes, excluding LiveKit Cloud, LLM, STT, TTS, database, and manager API costs.
 
 Temporary scale-out cost:
 
-- Each extra `c7i.xlarge` is about `$0.1785/hour`, plus storage while the instance exists.
-- Rolling updates can briefly add a third node because each agent pod requests `3 vCPU` and `6Gi` memory.
+- Each extra `c6a.large` adds one small EKS worker node plus root volume storage while the instance exists.
+- Rolling updates can briefly add capacity because each agent pod requests `750m` CPU, `512Mi` memory, and `10Gi` ephemeral storage.
 - The `900s` termination grace period protects active voice sessions, but it can also keep old pods reserving node resources during rollout while new pods surge.
 - Cluster Autoscaler should remove empty/unneeded nodes after its scale-down cooldown.
 
 ## C6A capacity-test note
 
-A temporary cost-optimized node group exists for capacity testing:
+The previous capacity-test node group has been promoted to production:
 
-- Node group: `picoclaw-ng-c6a-xlarge`
-- Instance type: `c6a.xlarge`
-- Scaling: `minSize=1`, `desiredSize=1`, `maxSize=8`
-- Canary Deployment: `picoclaw-livekit-capacity`
-- Canary agent name: `cheeko-agent-capacity-test`
+- Node group: `picoclaw-ng-c6a-large`
+- Instance type: `c6a.large`
+- Scaling: `minSize=2`, `desiredSize=2`, `maxSize=5`
+- Production Deployment: `picoclaw-livekit`
+- Production agent name: `cheeko-agent1`
 
-The 2026-06-12 one-pod canary test passed LiveKit dispatch at `1`, `4`, `5`, `6`, and `8` CLI echo rooms with `0` pod restarts and low observed CPU/memory after each run. The first hard bottleneck was not AWS compute. A 10-minute `5` room test produced one ElevenLabs `concurrent_limit_exceeded`, and the `8` room test produced repeated `concurrent_limit_exceeded` responses. The current ElevenLabs subscription reports a maximum of about `5` concurrent TTS requests.
+The 2026-06-12 real-audio canary test on one `c6a.large` pod passed `12`, `14`, and `15` rooms from the LiveKit/VAD/STT/LLM path with low memory usage and no pod restarts. At `16` rooms, all rooms joined and VAD/STT started, but only `13/16` reached LLM before the short test window ended. The safe production setting is therefore `PICOCLAW_LIVEKIT_MAX_SESSIONS=12`.
 
-Until the TTS concurrency limit is raised or application-level TTS concurrency control is added, treat `4` concurrent sessions per worker as the practical safe launch target even if the c6a pod itself appears lightly loaded.
+ElevenLabs is still the external response-audio gate. Production smoke on 2026-06-12 reached LiveKit dispatch, room join, VAD, STT, and LLM, but ElevenLabs returned `payment_issue` for TTS bytes. Re-test full response audio after the ElevenLabs account/plan is fixed.
 
 ## Hardening already applied
 

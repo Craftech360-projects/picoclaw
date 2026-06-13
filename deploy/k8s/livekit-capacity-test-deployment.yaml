@@ -4,7 +4,7 @@ metadata:
   name: picoclaw-livekit-capacity
   namespace: picoclaw-dev
 spec:
-  replicas: 1
+  replicas: 0
   minReadySeconds: 10
   strategy:
     type: RollingUpdate
@@ -34,11 +34,11 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       nodeSelector:
-        node.kubernetes.io/instance-type: c6a.xlarge
+        node.kubernetes.io/instance-type: c6a.large
         workload: picoclaw-livekit-capacity
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:24ec4f8cc5448d09563788f3e831ee540e4827333b3e92a5bc82ce251528c8c9
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:2fb9b1b622638897ac393ad91abb8df7232af69a22ff6bef1e51576a5afcfcda
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -121,12 +121,11 @@ spec:
                 command: ["/bin/sh", "-c", "sleep 10"]
           resources:
             requests:
-              cpu: "3000m"
-              memory: "6Gi"
+              cpu: "750m"
+              memory: "512Mi"
               ephemeral-storage: "10Gi"
             limits:
-              cpu: "4000m"
-              memory: "8Gi"
+              memory: "2Gi"
               ephemeral-storage: "20Gi"
           volumeMounts:
             - name: cfg

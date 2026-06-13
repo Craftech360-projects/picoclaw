@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-12
 
-This plan validates whether the Picoclaw LiveKit voice agent can handle real concurrent usage on AWS EKS, not only a single smoke-test session. The capacity test target is the cost-optimized `c6a.xlarge` setup, not the existing `c7i.xlarge` pool.
+This plan validates whether the Picoclaw LiveKit voice agent can handle real concurrent usage on AWS EKS, not only a single smoke-test session. The current production target is the cost-optimized `c6a.large` setup.
 
 Primary source: LiveKit field guide, "How to load test voice agents and get meaningful results" (`https://livekit.com/field-guides/guide/load-testing-voice-agents`).
 
@@ -24,8 +24,8 @@ The goal is not to instantly prove "100 users works." The goal is to find the hi
 
 Capacity discovery goals:
 
-- host a canary agent on a new `c6a.xlarge` node group
-- find the highest safe sessions per pod on `c6a.xlarge`
+- host a canary agent on a `c6a.large` node group before production changes
+- find the highest safe sessions per pod on `c6a.large`
 - decide whether the Cerebrium-style starting concurrency of `4` can be raised to `8`, `12`, `18`, or higher
 - choose the final `PICOCLAW_LIVEKIT_MAX_SESSIONS`, HPA target, HPA max replicas, and node group shape from measurements instead of assumptions
 
@@ -40,45 +40,45 @@ Capacity discovery goals:
 | Namespace | `picoclaw-dev` |
 | Deployment | `picoclaw-livekit` |
 | HPA | `minReplicas=2`, `maxReplicas=10` |
-| Node group | `picoclaw-ng-c7i-xlarge` |
-| Node group size | `minSize=2`, `desiredSize=2`, `maxSize=10` |
+| Node group | `picoclaw-ng-c6a-large` |
+| Node group size | `minSize=2`, `desiredSize=2`, `maxSize=5` |
 | Node autoscaler | Cluster Autoscaler |
 | Pod max sessions | `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` |
-| HPA session target | `picoclaw_livekit_session_load_percent = 50` |
+| HPA session target | `picoclaw_livekit_session_load_percent = 70` |
 | CPU target | `50%` |
 | NetworkPolicy | staged, not enforced yet |
 
-Proposed cost-optimized target to test:
+Cost-optimized production target:
 
 | Item | Value |
 | --- | --- |
-| Candidate node group | `picoclaw-ng-c6a-xlarge` |
-| Candidate instance | `c6a.xlarge` |
-| Candidate node size | `4 vCPU`, `8 GiB` |
-| Candidate price | about `$0.0935/hour`, about `$2.24/day` per node |
-| Candidate node scaling | `minSize=1`, `desiredSize=1`, `maxSize=8` |
-| Candidate HPA | `minReplicas=1`, `maxReplicas=8` |
-| Candidate start concurrency | `PICOCLAW_LIVEKIT_MAX_SESSIONS=4` |
-| Candidate graceful drain | `900s` |
+| Production node group | `picoclaw-ng-c6a-large` |
+| Production instance | `c6a.large` |
+| Production node size | `2 vCPU`, `4 GiB` |
+| Production node scaling | `minSize=2`, `desiredSize=2`, `maxSize=5` |
+| Production HPA | `minReplicas=2`, `maxReplicas=10` |
+| Production concurrency | `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` |
+| Graceful drain | `900s` |
 
 Actual c6a canary status as of 2026-06-12:
 
 | Item | Value |
 | --- | --- |
-| Canary node group | `picoclaw-ng-c6a-xlarge` |
-| Canary instance | `c6a.xlarge` |
-| Canary node scaling | `minSize=1`, `desiredSize=1`, `maxSize=8` |
+| Canary node group | `picoclaw-ng-c6a-large` |
+| Canary instance | `c6a.large` |
+| Canary node scaling | promoted to production: `minSize=2`, `desiredSize=2`, `maxSize=5` |
 | Canary Deployment | `picoclaw-livekit-capacity` |
 | Canary agent name | `cheeko-agent-capacity-test` |
 | Canary HPA | disabled |
 | Canary manifest | `deploy/k8s/livekit-capacity-test-deployment.yaml` |
 | Git default max sessions | `4` |
-| Live test max sessions used | temporarily raised to `8` |
+| Live test max sessions used | temporarily raised above production to find the one-pod edge |
 
 Capacity interpretation:
 
 - 1 active session on one pod reports about `8.3%` load.
-- 6 active sessions on one pod reports about `50%` load and should create HPA scale-up pressure.
+- 6 active sessions on one pod reports about `50%` load.
+- 8-9 active sessions on one pod reports about `67-75%` load and should create HPA scale-up pressure.
 - 12 sessions on one pod is the configured ceiling, not the comfort target.
 - 2 warm pods provide about 24 configured session slots before extra scale-out.
 - 10 pods provide about 120 configured session slots, subject to real latency and external provider limits.
@@ -166,17 +166,17 @@ Check node group scaling:
 aws eks describe-nodegroup `
   --region ap-south-2 `
   --cluster-name picoclaw-eks `
-  --nodegroup-name picoclaw-ng-c7i-xlarge `
+  --nodegroup-name picoclaw-ng-c6a-large `
   --query "nodegroup.scalingConfig"
 ```
 
-For the `c6a.xlarge` canary test, check the candidate node group after creating it:
+For a `c6a.large` canary test, check the candidate node group after creating it or repurposing it:
 
 ```powershell
 aws eks describe-nodegroup `
   --region ap-south-2 `
   --cluster-name picoclaw-eks `
-  --nodegroup-name picoclaw-ng-c6a-xlarge `
+  --nodegroup-name picoclaw-ng-c6a-large `
   --query "nodegroup.scalingConfig"
 ```
 
@@ -259,7 +259,7 @@ Because the worker is written in Go, CPU and memory may allow more than 12 sessi
 
 The output of this section must answer:
 
-- How many concurrent sessions can one `c6a.xlarge` pod handle before latency or errors become unacceptable?
+- How many concurrent sessions can one `c6a.large` pod handle before latency or errors become unacceptable?
 - Is `4` sessions per pod too conservative?
 - Is `8`, `12`, `18`, or `24` sessions per pod safe?
 - Does the bottleneck appear in CPU, memory, STT, LLM, TTS, LiveKit dispatch, workspace sync, or network?
@@ -296,20 +296,20 @@ If the LiveKit CLI test does not include enough real room metadata for workspace
 
 ### C6A Test Environment
 
-Create a temporary `c6a.xlarge` node group and run the one-pod calibration there.
+Create or reuse a temporary `c6a.large` node group and run the one-pod calibration there.
 
 Temporary node group:
 
 ```text
-name: picoclaw-ng-c6a-xlarge
-instance type: c6a.xlarge
+name: picoclaw-ng-c6a-large
+instance type: c6a.large
 minSize: 1
 desiredSize: 1
 maxSize: 8
 capacity: ON_DEMAND
 labels:
   workload=picoclaw-livekit-capacity
-  node.kubernetes.io/instance-type=c6a.xlarge
+  node.kubernetes.io/instance-type=c6a.large
 ```
 
 Pin the capacity-test Deployment to this node group with a node selector. Do not migrate production traffic until the test result is known.
@@ -322,43 +322,50 @@ replicas: 1
 HPA: disabled for the canary
 PICOCLAW_LIVEKIT_MAX_SESSIONS: start at 4, then raise for test rounds
 nodeSelector:
-  node.kubernetes.io/instance-type: c6a.xlarge
+  node.kubernetes.io/instance-type: c6a.large
 ```
 
 Expected decision:
 
 ```text
-If c6a.xlarge passes the launch concurrency and latency target, migrate production to c6a.xlarge.
-If c6a.xlarge passes only 4-8 sessions per pod, use Cerebrium-like safe mode and keep max pods at 8.
-If c6a.xlarge fails below 4 sessions, do not migrate; investigate provider/runtime bottlenecks first.
+If c6a.large passes the launch concurrency and latency target, migrate production to c6a.large.
+If c6a.large passes only 4-8 sessions per pod, use Cerebrium-like safe mode and keep max pods at 8.
+If c6a.large fails below 4 sessions, do not migrate; investigate provider/runtime bottlenecks first.
 ```
 
 ### 2026-06-12 C6A Canary Results
 
-These tests used the dedicated one-pod `cheeko-agent-capacity-test` worker on the `picoclaw-ng-c6a-xlarge` node group. The production `cheeko-agent1` pool was not changed.
+These tests used the dedicated one-pod `cheeko-agent-capacity-test` worker before the `picoclaw-ng-c6a-large` node group was promoted to production.
 
-| Rooms | Duration | CLI result | Pod result | Important finding |
-| ---: | --- | --- | --- | --- |
-| 1 | 3m | passed | `0` restarts | smoke test passed; worker registered and handled a room |
-| 4 | 5m | passed | `0` restarts | matches Cerebrium-style `replica_concurrency=4`; no AWS capacity issue |
-| 5 | 10m | passed from LiveKit dispatch perspective | `0` restarts, about `1m CPU / 74Mi` after run | one ElevenLabs `concurrent_limit_exceeded`; this is the current provider edge |
-| 6 | 5m | passed | `0` restarts, about `267m CPU / 66Mi` after run | c6a pod remained light; echo test produced interruption noise |
-| 8 | 5m | passed from LiveKit dispatch perspective | `0` restarts, about `138m CPU / 86Mi` after run | ElevenLabs returned `concurrent_limit_exceeded`; current TTS account allows about 5 parallel TTS requests |
+| Rooms | Duration | TTS model | CLI result | Pod result | Important finding |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | 3m | `eleven_multilingual_v2` | passed | `0` restarts | smoke test passed; worker registered and handled a room |
+| 4 | 5m | `eleven_multilingual_v2` | passed | `0` restarts | matches Cerebrium-style `replica_concurrency=4`; no AWS capacity issue |
+| 5 | 10m | `eleven_multilingual_v2` | passed from LiveKit dispatch perspective | `0` restarts, about `1m CPU / 74Mi` after run | one ElevenLabs `concurrent_limit_exceeded`; this is the old-model provider edge |
+| 6 | 5m | `eleven_multilingual_v2` | passed | `0` restarts, about `267m CPU / 66Mi` after run | c6a pod remained light; echo test produced interruption noise |
+| 8 | 5m | `eleven_multilingual_v2` | passed from LiveKit dispatch perspective | `0` restarts, about `138m CPU / 86Mi` after run | ElevenLabs returned `concurrent_limit_exceeded`; old model was limited to about 5 parallel TTS requests |
+| 8 | 5m | `eleven_flash_v2_5` | passed | `0` restarts, about `426m CPU / 90Mi` after run | no real `429`, no `concurrent_limit_exceeded`, no `401` |
+| 10 | 5m | `eleven_flash_v2_5` | passed | `0` restarts, about `2m CPU / 89Mi` after run | no real `429`, no `concurrent_limit_exceeded`, no `401`; this is the Creator Flash edge test |
+| 12 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `602m CPU / 92Mi` | clean one-pod result on `c6a.large` |
+| 14 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `604m CPU / 96Mi` | clean one-pod result on `c6a.large` |
+| 15 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `593m CPU / 99Mi` | highest clean one-pod room count observed on `c6a.large` |
+| 16 | real-audio short run | ElevenLabs ignored for compute edge | partial | peak about `590m CPU / 107Mi` | all rooms joined and VAD/STT started, but only `13/16` reached LLM before the session ended |
 
 Interpretation:
 
-- `c6a.xlarge` did not look CPU- or memory-bound at 8 CLI echo rooms.
-- The first hard bottleneck was TTS provider concurrency, not AWS compute.
-- 8 concurrent sessions is not production-safe with the current ElevenLabs subscription unless TTS calls are queued/throttled or the ElevenLabs concurrency limit is raised.
-- 5 concurrent sessions is the provider edge, not the comfort target, because it still produced one TTS concurrency error during a 10-minute echo test.
-- For launch with the current provider limit, keep the practical target near `4` concurrent sessions per worker and verify total service concurrency against provider limits, not only per-pod CPU.
+- `c6a.large` did not look CPU- or memory-bound through 15 real-audio rooms.
+- With `eleven_multilingual_v2`, the first hard bottleneck was TTS provider concurrency, not AWS compute.
+- With `eleven_flash_v2_5`, the one-pod canary passed `8` and `10` CLI echo rooms without ElevenLabs rate-limit errors.
+- `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` is the production setting because it stays below the observed one-pod edge at 16 rooms.
+- Full response-audio validation is still blocked by ElevenLabs returning `payment_issue`; re-run after the account/plan is fixed.
 - Scaling Kubernetes pods cannot solve an account-level TTS concurrency cap by itself. More pods can make the provider cap easier to hit.
 
 Recommended next test:
 
-1. Run a 4-room test through the real product/gateway path for 15-30 minutes, because `lk perf agent-load-test` does not send all production metadata.
-2. Before testing 5+ production-like sessions, raise the ElevenLabs concurrency limit or add application-level TTS concurrency control.
-3. After provider capacity is fixed, repeat 5, 8, and 12 room tests before increasing production `PICOCLAW_LIVEKIT_MAX_SESSIONS`.
+1. Confirm the deployed image digest contains the WebSocket TTS implementation, not only the Manager model change.
+2. Run a real product/gateway-path test with `20`, `30`, `40`, and `50` simultaneous sessions using staggered user behavior.
+3. Add or verify TTS active-generation metrics so the test proves whether ElevenLabs active generation crosses `10`.
+4. If `50` users exceed `10` active TTS generations or produce any ElevenLabs `429`, cap launch lower or add a global TTS concurrency limiter.
 
 ### Fallback Method: Production Pool Maintenance Test
 
@@ -383,7 +390,7 @@ Run each level for at least 5 minutes. Stop at the first sustained failure point
 | P2 | 4 | match Cerebrium `replica_concurrency=4` |
 | P3 | 5 | provider-limit edge test for current ElevenLabs subscription |
 | P4 | 6 | current HPA comfort target for one production pod |
-| P5 | 8 | candidate target only after TTS concurrency is fixed |
+| P5 | 8 | candidate launch target with `eleven_flash_v2_5` |
 | P6 | 12 | current configured ceiling |
 | P7 | 15 | test whether the current ceiling is conservative |
 | P8 | 18 | higher Go/runtime/provider pressure |
@@ -456,7 +463,7 @@ Do not raise `PICOCLAW_LIVEKIT_MAX_SESSIONS` only because CPU is low. Provider l
 
 ### Capacity Decision Table
 
-Use this table after the `c6a.xlarge` one-pod test:
+Use this table after the `c6a.large` one-pod test:
 
 | Highest passing sessions per pod | Recommended config |
 | ---: | --- |
@@ -472,7 +479,7 @@ For launch, choose one step below the first failing point.
 Example:
 
 ```text
-c6a.xlarge passes 12 sessions, fails or gets slow at 18.
+c6a.large passes 12 sessions, fails or gets slow at 18.
 Recommended launch setting: max_sessions=12 or 8, depending on p95 first-audio latency.
 ```
 
@@ -521,6 +528,87 @@ lk perf agent-load-test `
   --attribute test_id=load-20260611-b3 `
   --attribute env=picoclaw-dev
 ```
+
+## Real-World Provider Concurrency Test
+
+The CLI room count alone does not prove whether more than `10` concurrent user sessions will hit the ElevenLabs Creator Flash limit. The important value is active TTS generation overlap:
+
+```text
+total connected sessions != active ElevenLabs TTS generations
+```
+
+A user consumes ElevenLabs concurrency only while ElevenLabs is actively generating audio bytes. During user speech, silence, VAD hold time, STT processing, LLM thinking, or playback after generation has finished, the session should not consume ElevenLabs TTS concurrency.
+
+### Required TTS Metrics
+
+Add or verify these agent metrics before treating the `30-50` user result as production evidence:
+
+```text
+picoclaw_tts_active_generations{provider="elevenlabs",model="eleven_flash_v2_5"}
+picoclaw_tts_requests_total{provider="elevenlabs",model="eleven_flash_v2_5"}
+picoclaw_tts_errors_total{provider="elevenlabs",model="eleven_flash_v2_5",type="rate_limit"}
+picoclaw_tts_first_audio_seconds{provider="elevenlabs",model="eleven_flash_v2_5"}
+picoclaw_tts_generation_seconds{provider="elevenlabs",model="eleven_flash_v2_5"}
+```
+
+For WebSocket TTS, increment `picoclaw_tts_active_generations` after text is sent/flushed and decrement when the WebSocket stream reaches final, errors, or is canceled. Do not count idle open WebSocket time as active generation.
+
+Prometheus checks:
+
+```promql
+sum(picoclaw_tts_active_generations{provider="elevenlabs",model="eleven_flash_v2_5"})
+max_over_time(sum(picoclaw_tts_active_generations{provider="elevenlabs",model="eleven_flash_v2_5"})[10m:])
+increase(picoclaw_tts_errors_total{provider="elevenlabs",type="rate_limit"}[10m])
+histogram_quantile(0.95, sum(rate(picoclaw_tts_first_audio_seconds_bucket{provider="elevenlabs"}[5m])) by (le))
+```
+
+### Real-World Ramp
+
+Use the real product/gateway path, or a custom runner that reproduces it. Do not use a single synchronized burst for this phase.
+
+Each virtual user should:
+
+1. Join a LiveKit room through the same flow as a real device.
+2. Wait random startup jitter between `0-60s`.
+3. Speak for `2-5s`.
+4. Wait for the agent response.
+5. Wait random think/listen time between `3-12s`.
+6. Repeat for `15-30m`.
+
+Run phases in order:
+
+| Phase | Simultaneous sessions | Ramp shape | Duration at target | Purpose |
+| --- | ---: | --- | --- | --- |
+| R1 | 10 | add 1 user every 3-5s | 10m | verify runner and metrics |
+| R2 | 20 | add 1 user every 3-5s | 10m | below expected Creator Flash comfort range |
+| R3 | 30 | add 1 user every 3-5s | 15m | realistic launch target |
+| R4 | 40 | add 1 user every 3-5s | 15m | upper comfort range for 10 active TTS concurrency |
+| R5 | 50 | add 1 user every 3-5s | 20-30m | target stress test; expect to find overlap risk |
+
+Pass criteria for `R5`:
+
+- `increase(picoclaw_tts_errors_total{type="rate_limit"}[30m]) = 0`
+- `max_over_time(sum(picoclaw_tts_active_generations)[30m:]) <= 10`
+- TTS first-audio p95 stays within the voice UX target.
+- No pod restarts, OOMKills, or sustained pending pods.
+- No repeated STT/LLM/TTS provider timeout bursts.
+
+If `R5` exceeds `10` active TTS generations or produces any ElevenLabs `429`, do not launch uncapped `50` concurrent sessions on Creator Flash. Either cap HPA/session capacity lower, add a global TTS semaphore/queue around `8-10`, or upgrade ElevenLabs concurrency.
+
+### Temporary Approximation With LiveKit CLI
+
+If the custom runner is not ready, approximate real-world timing by staggering multiple smaller CLI runs instead of starting one large synchronized run.
+
+Example shape:
+
+```powershell
+# Terminal/job 1
+lk perf agent-load-test --rooms 5 --agent-name cheeko-agent-capacity-test --echo-speech-delay 10s --duration 20m
+
+# Start another 5-room run every 45-60 seconds until the target room count is active.
+```
+
+This is still less realistic than product-path audio because the echo participant creates unnatural barge-ins and synchronized turns. Use it only as a bridge test.
 
 ## Monitoring During Each Run
 
@@ -587,7 +675,7 @@ Provider dashboards:
 
 - STT concurrency, errors, latency
 - LLM request rate, time to first token, `429`/timeout errors
-- TTS latency, concurrency, `429`/timeout errors
+- TTS latency, active generation concurrency, `429`/timeout errors
 
 ## Log Markers To Track
 
@@ -603,6 +691,7 @@ Published local TTS track
 Audio track subscribed
 STT stream opened
 TEN VAD speech start detected
+TEN VAD speech end detected
 LLM request config
 Turn latency summary
 Session quality summary
@@ -632,6 +721,58 @@ For voice UX, prioritize:
 - interruption recovery
 
 `turn_total_e2e_ms` may include completion/bookkeeping after the user already heard audio, so do not use it alone as the perceived latency metric.
+
+## VAD Performance Coverage
+
+The load test does exercise VAD because the agent logs speech start/end and uses VAD to decide when user turns are ready for STT/LLM/TTS. However, the basic `lk perf agent-load-test` echo pattern is not a full VAD quality test.
+
+What the CLI test can tell us:
+
+- whether VAD fires under concurrent sessions
+- whether speech start/end events are produced
+- whether endpointing causes obvious turn delays
+- whether barge-in/interruption handling breaks under load
+
+What it cannot prove by itself:
+
+- false positive rate in real background noise
+- false negative rate for quiet speakers
+- endpoint accuracy across accents, devices, and rooms
+- robustness against music, TV, fan noise, echo, packet loss, or double-talk
+- whether real users feel the agent cuts them off too early or waits too long
+
+Add a VAD-focused runner phase using recorded or generated audio fixtures:
+
+| Phase | Audio condition | Purpose |
+| --- | --- | --- |
+| V1 | clean speech, normal pauses | baseline endpoint latency |
+| V2 | quiet speaker | false negative check |
+| V3 | noisy room/fan/background speech | false positive check |
+| V4 | long pauses mid-sentence | early cutoff check |
+| V5 | user interrupts agent speech | barge-in detection and recovery |
+| V6 | silence-only room | false speech-start check |
+| V7 | overlapping user/agent audio | double-talk behavior |
+
+VAD metrics to add or extract from logs:
+
+```text
+picoclaw_vad_speech_start_total
+picoclaw_vad_speech_end_total
+picoclaw_vad_false_start_total
+picoclaw_vad_false_end_total
+picoclaw_vad_endpoint_latency_seconds
+picoclaw_vad_barge_in_total
+picoclaw_vad_barge_in_recovered_total
+```
+
+VAD pass criteria:
+
+- speech-start false positives stay near zero in silence/noise-only tests
+- quiet speech is detected reliably
+- endpoint latency p95 is low enough that the agent does not feel sluggish
+- long pauses do not consistently split one human thought into multiple turns
+- barge-in stops TTS quickly and the next user turn completes successfully
+- no repeated `turn_canceled` loops for normal human timing
 
 Noisy but not automatically fatal:
 
@@ -670,6 +811,12 @@ For every phase, record:
 | STT first final p50/p95 | logs/provider dashboard |
 | LLM first token p50/p95 | logs/provider dashboard |
 | TTS first audio p50/p95 | logs/provider dashboard |
+| max active ElevenLabs TTS generations | Prometheus/provider dashboard |
+| TTS rate-limit errors | Prometheus/logs/provider dashboard |
+| VAD speech start/end count | logs/Prometheus |
+| VAD endpoint latency p50/p95 | logs/Prometheus |
+| VAD false start/end count | VAD fixture runner/log review |
+| barge-in recovery rate | logs/Prometheus |
 | session failure rate | CLI/dashboard/logs |
 | dispatch errors | LiveKit dashboard/logs |
 | provider `429`/timeout/errors | provider dashboards/logs |
@@ -691,6 +838,10 @@ For the initial production-readiness target, use these thresholds:
 | user-perceived first audio p95 | `<= 4s` after STT final |
 | session failure rate | `< 1-2%` |
 | provider quota errors | `0` |
+| max active ElevenLabs TTS generations | `<= 10` on Creator Flash, preferably `<= 8-9` for launch margin |
+| VAD endpoint latency p95 | low enough that turns do not feel delayed; establish exact target from product smoke tests |
+| VAD false starts/false ends | no repeated pattern in fixture tests |
+| barge-in recovery | user interruption stops TTS and next turn completes reliably |
 | pod restarts/OOMKills | `0` |
 | sustained pending pods | `0` after autoscaler has time to react |
 | HPA behavior | scales up at load, scales down after stabilization |
@@ -764,12 +915,18 @@ Provider summary:
 - STT errors/latency:
 - LLM errors/latency:
 - TTS errors/latency:
+- max active ElevenLabs TTS generations:
+- TTS rate-limit errors:
 
 Log summary:
 - first audio p50/p95:
 - STT first final p50/p95:
 - LLM first token p50/p95:
 - TTS first audio p50/p95:
+- VAD speech start/end count:
+- VAD endpoint latency p50/p95:
+- VAD false start/end observations:
+- barge-in recovery:
 - workspace errors:
 - disconnects/timeouts:
 
@@ -793,8 +950,11 @@ Runner requirements:
 - dispatch `cheeko-agent1`
 - join one synthetic audio participant per room
 - publish realistic short speech audio or echo agent speech
+- publish fixture audio for VAD cases: clean speech, quiet speech, long pauses, background noise, silence, and barge-in
+- randomize user timing so TTS requests are not synchronized
 - ramp sessions gradually
 - collect per-room join, first greeting, first response, disconnect, and error metrics
+- collect VAD speech start/end, endpoint latency, false start/end observations, and barge-in recovery
 
 Implementation options:
 
@@ -828,7 +988,7 @@ If HPA does not scale:
 
 If pods cannot schedule:
 
-- check node selector for the active test node type, such as `c6a.xlarge`
+- check node selector for the active test node type, such as `c6a.large`
 - check node group max size
 - check vCPU quota
 - check subnet capacity
