@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 const (
@@ -57,6 +58,13 @@ func (t *DeepgramTTS) Synthesize(ctx context.Context, text string) (AudioStream,
 	if err != nil {
 		return nil, err
 	}
+
+	logger.InfoCF("deepgram_tts", "Using Deepgram TTS provider", map[string]any{
+		"tts_provider":       "deepgram",
+		"tts_model_id":       modelID(t.cfg),
+		"tts_output_format":  t.cfg.OutputFormat,
+		"tts_sample_rate_hz": sampleRate(t.cfg),
+	})
 
 	header := http.Header{}
 	header.Set("Authorization", formatAuthHeader(t.cfg.APIKey))

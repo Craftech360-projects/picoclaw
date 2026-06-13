@@ -1853,10 +1853,11 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 		return
 	}
 	logger.DebugCF("livekit", "Synthesizing audio chunk", map[string]any{
-		"session":       ap.sessionKey(),
-		"text":          ap.logTextPreview(ap.sessionKey(), text, 240),
-		"text_len":      len(text),
-		"text_redacted": ap.logTextRedacted(ap.sessionKey()),
+		"session":           ap.sessionKey(),
+		"text":              ap.logTextPreview(ap.sessionKey(), text, 240),
+		"text_len":          len(text),
+		"text_redacted":     ap.logTextRedacted(ap.sessionKey()),
+		"tts_provider_type": fmt.Sprintf("%T", ap.tts),
 	})
 	stream, err := ap.tts.Synthesize(ctx, text)
 	if err != nil {

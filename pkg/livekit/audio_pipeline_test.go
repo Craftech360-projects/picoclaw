@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +16,7 @@ import (
 	livekitproto "github.com/livekit/protocol/livekit"
 	protoLogger "github.com/livekit/protocol/logger"
 	lkmedia "github.com/livekit/server-sdk-go/v2/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
@@ -89,6 +93,45 @@ func TestTTSAudioTailSampleCountDefaultsToTwentyFourKilohertz(t *testing.T) {
 	got := ttsAudioTailSampleCount(0, liveKitTTSAudioTailMs)
 	if got != 6000 {
 		t.Fatalf("default tail sample count = %d, want 6000", got)
+	}
+}
+
+func TestSynthesizeAndPlayLogsTTSProviderType(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "livekit-tts.log")
+	if err := logger.EnableFileLogging(logPath); err != nil {
+		t.Fatalf("EnableFileLogging() error = %v", err)
+	}
+	t.Cleanup(logger.DisableFileLogging)
+
+	localTrack, err := lkmedia.NewPCMLocalTrack(24000, 1, protoLogger.GetLogger())
+	if err != nil {
+		t.Fatalf("NewPCMLocalTrack error = %v", err)
+	}
+	defer localTrack.Close()
+
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo: &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{
+			identity:   "device-a",
+			sessionKey: "livekit:device:a",
+		},
+		localTrack: localTrack,
+		sampleRate: 24000,
+	}, nil, &capturingTTSProvider{}, nil)
+
+	pipeline.synthesizeAndPlay(context.Background(), "hello")
+	logger.DisableFileLogging()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logs := string(data)
+	if !strings.Contains(logs, `"message":"Synthesizing audio chunk"`) {
+		t.Fatalf("logs missing synthesis marker:\n%s", logs)
+	}
+	if !strings.Contains(logs, `"tts_provider_type":"*livekit.capturingTTSProvider"`) {
+		t.Fatalf("logs missing TTS provider type:\n%s", logs)
 	}
 }
 

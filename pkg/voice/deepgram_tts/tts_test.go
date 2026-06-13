@@ -5,9 +5,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 func TestSynthesizeUsesDeepgramWebSocketSpeak(t *testing.T) {
@@ -140,6 +144,66 @@ func TestSynthesizeAcceptsBearerToken(t *testing.T) {
 		t.Fatalf("Synthesize() error = %v", err)
 	}
 	_ = stream.Close()
+}
+
+func TestSynthesizeLogsDeepgramProviderSelection(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer conn.Close()
+		for i := 0; i < 2; i++ {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				t.Fatalf("read websocket message %d: %v", i, err)
+			}
+		}
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	}))
+	defer server.Close()
+
+	logPath := filepath.Join(t.TempDir(), "deepgram-tts.log")
+	if err := logger.EnableFileLogging(logPath); err != nil {
+		t.Fatalf("EnableFileLogging() error = %v", err)
+	}
+	t.Cleanup(logger.DisableFileLogging)
+
+	client := NewDeepgramTTS(TTSConfig{
+		APIKey:       "secret-deepgram-key",
+		ModelID:      "aura-2-asteria-en",
+		OutputFormat: "pcm_24000",
+		BaseURL:      server.URL,
+	})
+
+	stream, err := client.Synthesize(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	_ = stream.Close()
+	logger.DisableFileLogging()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logs := string(data)
+	for _, want := range []string{
+		`"message":"Using Deepgram TTS provider"`,
+		`"tts_provider":"deepgram"`,
+		`"tts_model_id":"aura-2-asteria-en"`,
+		`"tts_output_format":"pcm_24000"`,
+		`"tts_sample_rate_hz":24000`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs missing %s:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "secret-deepgram-key") {
+		t.Fatalf("logs leaked Deepgram API key:\n%s", logs)
+	}
 }
 
 func TestBuildWebSocketURLUsesVoiceIDAsModelFallback(t *testing.T) {
