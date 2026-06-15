@@ -13,7 +13,7 @@ The prompt, voice, language, and memory style that make a Character feel distinc
 _Avoid_: Bot process, service
 
 **Character Prompt**:
-The persona-specific instructions for a Character, separate from shared kid-safety, runtime, and memory rules.
+The persona-specific instructions for a Character, separate from shared kid-safety, runtime, and memory rules. Stored in Manager as **two fields** — `system_prompt` (the `AGENT.md` persona block) and `soul` (`SOUL.md`) — because persona has two surfaces. Both regenerate together on a Character switch.
 _Avoid_: Full workspace prompt, runtime guardrails
 
 **Runtime Agent**:
@@ -36,8 +36,20 @@ _Avoid_: Character selection
 The shared Runtime Agent family used by persona-only Characters. The concrete Runtime Agent Version is selected by Runtime Routing Policy.
 _Avoid_: Character-specific worker
 
+**Persona-only Character**:
+A Character that differs from others only by persona (prompt, voice, language), e.g. Cheeko, Cheeko German, Cheeko Astronaut, Cheeko Magic. All Persona-only Characters run on the **Default Runtime Agent** and are created by adding an `ai_agent_template` row — no worker deploy.
+_Avoid_: Custom worker, dedicated agent
+
+**Specialized Character**:
+A Character that needs its own tools or game loop and therefore its own Runtime Agent, e.g. Math Tutor, Riddle Solver, Word Ladder. Adding one is a deliberate new-worker-plus-deploy event. Its prompt and game loop ship with the worker, so it does not participate in Manager-driven `AGENT.md` regeneration.
+_Avoid_: Persona, template character
+
+**AI Card**:
+An RFID card (`card_type = 'ai'`) that, when scanned, resolves through Manager API to a Character and a language for the current Device session. The card carries a uid only; Manager owns the uid → Character + language mapping.
+_Avoid_: Content pack, Q&A pack, character card
+
 **Device**:
-A physical toy identified by MAC address. A Device selects its current Character through Manager API.
+A physical toy identified by MAC address. A Device selects its current Character through Manager API. Workspace state (USER.md, MEMORY.md) is scoped per-Device and shared across Character switches; only AGENT.md swaps when the Character changes.
 _Avoid_: User, child
 
 ## Example Dialogue
