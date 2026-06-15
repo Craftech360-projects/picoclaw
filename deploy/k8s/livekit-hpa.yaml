@@ -40,7 +40,7 @@ spec:
           name: picoclaw_livekit_session_load_percent
         target:
           type: AverageValue
-          averageValue: "70"
+          averageValue: "60"
     # Secondary safety metric.
     - type: Resource
       resource:

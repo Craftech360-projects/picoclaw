@@ -43,8 +43,8 @@ Capacity discovery goals:
 | Node group | `picoclaw-ng-c6a-large` |
 | Node group size | `minSize=2`, `desiredSize=2`, `maxSize=5` |
 | Node autoscaler | Cluster Autoscaler |
-| Pod max sessions | `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` |
-| HPA session target | `picoclaw_livekit_session_load_percent = 70` |
+| Pod max sessions | `PICOCLAW_LIVEKIT_MAX_SESSIONS=15` |
+| HPA session target | `picoclaw_livekit_session_load_percent = 60` |
 | CPU target | `50%` |
 | NetworkPolicy | staged, not enforced yet |
 
@@ -57,10 +57,10 @@ Cost-optimized production target:
 | Production node size | `2 vCPU`, `4 GiB` |
 | Production node scaling | `minSize=2`, `desiredSize=2`, `maxSize=5` |
 | Production HPA | `minReplicas=2`, `maxReplicas=10` |
-| Production concurrency | `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` |
+| Production concurrency | `PICOCLAW_LIVEKIT_MAX_SESSIONS=15` |
 | Graceful drain | `900s` |
 
-Actual c6a canary status as of 2026-06-12:
+Actual c6a canary status as of 2026-06-13:
 
 | Item | Value |
 | --- | --- |
@@ -348,15 +348,19 @@ These tests used the dedicated one-pod `cheeko-agent-capacity-test` worker befor
 | 10 | 5m | `eleven_flash_v2_5` | passed | `0` restarts, about `2m CPU / 89Mi` after run | no real `429`, no `concurrent_limit_exceeded`, no `401`; this is the Creator Flash edge test |
 | 12 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `602m CPU / 92Mi` | clean one-pod result on `c6a.large` |
 | 14 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `604m CPU / 96Mi` | clean one-pod result on `c6a.large` |
-| 15 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `593m CPU / 99Mi` | highest clean one-pod room count observed on `c6a.large` |
-| 16 | real-audio short run | ElevenLabs ignored for compute edge | partial | peak about `590m CPU / 107Mi` | all rooms joined and VAD/STT started, but only `13/16` reached LLM before the session ended |
+| 15 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `593m CPU / 99Mi` | clean one-pod result on `c6a.large` |
+| 16 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `615m CPU / 126Mi` | clean one-pod result on `c6a.large` |
+| 17 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `589m CPU / 125Mi` | clean one-pod result on `c6a.large` |
+| 18 | real-audio short run | ElevenLabs ignored for compute edge | passed from LiveKit/VAD/STT/LLM path | peak about `628m CPU / 126Mi` | highest clean one-pod room count observed on `c6a.large` |
+| 19 | real-audio short run | ElevenLabs ignored for compute edge | partial | peak about `639m CPU / 132Mi` | all rooms joined, but only `18/19` reached STT/VAD and `17/19` reached LLM/quality summaries |
+| 20 | real-audio short run | ElevenLabs ignored for compute edge | partial | peak about `623m CPU / 129Mi` | all rooms joined, but only `18/20` reached STT/quality summaries |
 
 Interpretation:
 
-- `c6a.large` did not look CPU- or memory-bound through 15 real-audio rooms.
+- `c6a.large` did not look CPU- or memory-bound through 18 real-audio rooms.
 - With `eleven_multilingual_v2`, the first hard bottleneck was TTS provider concurrency, not AWS compute.
 - With `eleven_flash_v2_5`, the one-pod canary passed `8` and `10` CLI echo rooms without ElevenLabs rate-limit errors.
-- `PICOCLAW_LIVEKIT_MAX_SESSIONS=12` is the production setting because it stays below the observed one-pod edge at 16 rooms.
+- `PICOCLAW_LIVEKIT_MAX_SESSIONS=15` is the production setting because it stays below the observed one-pod clean result at 18 rooms while still giving more headroom than the previous 12-room setting.
 - Full response-audio validation is still blocked by ElevenLabs returning `payment_issue`; re-run after the account/plan is fixed.
 - Scaling Kubernetes pods cannot solve an account-level TTS concurrency cap by itself. More pods can make the provider cap easier to hit.
 
@@ -445,9 +449,9 @@ Example decision:
 
 ```text
 Highest clean one-pod result: 18 concurrent sessions
-Observed stress/failure point: 24 concurrent sessions
-Recommended max_sessions: 18
-Recommended HPA target: 50%
+Observed stress/failure point: 19 concurrent sessions
+Recommended max_sessions: 15
+Recommended HPA target: 60%
 Expected HPA scale trigger: about 9 sessions per pod
 ```
 
@@ -470,7 +474,8 @@ Use this table after the `c6a.large` one-pod test:
 | `< 4` | not ready; investigate before launch |
 | `4` | Cerebrium-like safe mode: `max_sessions=4`, HPA target `60`, max pods `8` |
 | `8` | balanced launch mode: `max_sessions=8`, HPA target `60`, max pods `8` |
-| `12` | current-style mode: `max_sessions=12`, HPA target `50-60`, max pods `8-10` |
+| `12` | conservative mode: `max_sessions=12`, HPA target `50-60`, max pods `8-10` |
+| `15` | current production mode: `max_sessions=15`, HPA target `60`, max pods `10` |
 | `18` | optimized mode: `max_sessions=18`, HPA target `50`, max pods based on expected traffic |
 | `24+` | high-density mode; use only if provider limits and p95 latency stay healthy |
 
@@ -479,8 +484,8 @@ For launch, choose one step below the first failing point.
 Example:
 
 ```text
-c6a.large passes 12 sessions, fails or gets slow at 18.
-Recommended launch setting: max_sessions=12 or 8, depending on p95 first-audio latency.
+c6a.large passes 18 sessions cleanly but fails at 19.
+Recommended launch setting: max_sessions=15 with HPA target 60.
 ```
 
 ## Test Matrix

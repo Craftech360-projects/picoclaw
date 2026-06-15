@@ -133,10 +133,10 @@ Runtime flow:
 The current worker setting is:
 
 ```text
-PICOCLAW_LIVEKIT_MAX_SESSIONS=12
+PICOCLAW_LIVEKIT_MAX_SESSIONS=15
 ```
 
-The HPA target for session load is `70`.
+The HPA target for session load is `60`.
 
 Session load is:
 
@@ -144,22 +144,22 @@ Session load is:
 active_sessions / max_sessions * 100
 ```
 
-With `max_sessions=12`:
+With `max_sessions=15`:
 
 | Active sessions on one pod | Reported session load |
 | --- | --- |
-| 1 | about `8.3%` |
-| 6 | about `50%` |
-| 8 | about `66.7%` |
-| 9 | about `75%` |
-| 12 | `100%` |
+| 1 | about `6.7%` |
+| 8 | about `53.3%` |
+| 9 | `60%` |
+| 10 | about `66.7%` |
+| 15 | `100%` |
 
 How to interpret this:
 
-- `12` is the configured ceiling, not the comfort target.
-- HPA should start adding pods around 8-9 active sessions per pod from session load, with CPU `50%` as the second safety metric.
-- The two warm pods provide about 24 configured session slots before extra scale-out, but production capacity should be judged by latency, provider limits, and error rate.
-- The HPA can scale to 10 pods, which is about 120 configured session slots.
+- `15` is the configured ceiling, not the comfort target.
+- HPA should start adding pods around 9 active sessions per pod from session load, with CPU `50%` as the second safety metric.
+- The two warm pods provide about 30 configured session slots before extra scale-out, but production capacity should be judged by latency, provider limits, and error rate.
+- The HPA can scale to 10 pods, which is about 150 configured session slots.
 - The node group can scale to 5 `c6a.large` nodes. With the current `750m` CPU request, that supports up to about 10 agent pods.
 
 The current AWS baseline keeps two `c6a.large` nodes warm for the two minimum agent pods. Each worker pod requests `750m` CPU and `512Mi` memory, with no CPU limit and a `2Gi` memory limit. This lets each `c6a.large` node run one warm production pod plus system/monitoring overhead, and Cluster Autoscaler can add more `c6a.large` nodes when HPA-created pods cannot schedule.
@@ -459,7 +459,7 @@ kubectl --context $Context get --raw "/apis/custom.metrics.k8s.io/v1beta1/namesp
 Expected behavior:
 
 - With no sessions, session load should be near zero.
-- With one active session and `max_sessions=12`, a pod should report about `8.3`.
+- With one active session and `max_sessions=15`, a pod should report about `6.7`.
 - HPA may display custom metric values with milli-unit formatting such as `4166m`. That means `4.166`, not 4166 percent.
 - If the custom metric is `<unknown>`, check Prometheus, Prometheus Adapter, and the `custom.metrics.k8s.io` APIService.
 

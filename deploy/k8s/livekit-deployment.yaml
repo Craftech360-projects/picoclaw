@@ -79,7 +79,7 @@ spec:
             - name: PICOCLAW_LIVEKIT_HEALTH_PORT
               value: "8192"
             - name: PICOCLAW_LIVEKIT_MAX_SESSIONS
-              value: "12"
+              value: "15"
             - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD
               value: "0.72"
             - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS

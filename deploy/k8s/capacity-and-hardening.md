@@ -1,6 +1,6 @@
 # LiveKit Agent Capacity and Hardening Notes
 
-Last updated: 2026-06-12
+Last updated: 2026-06-13
 
 ## Current production shape
 
@@ -19,18 +19,18 @@ Last updated: 2026-06-12
 
 The agent pod is configured with:
 
-- `PICOCLAW_LIVEKIT_MAX_SESSIONS=12`
-- HPA session-load target: `70`
+- `PICOCLAW_LIVEKIT_MAX_SESSIONS=15`
+- HPA session-load target: `60`
 - CPU target: `50%`
 
 This means:
 
-- 1 active session on one pod reports about `8.3%` load.
-- 6 active sessions on one pod reports about `50%` load.
-- 8-9 active sessions on one pod reports about `67-75%` load and should trigger scale-up pressure.
-- 12 active sessions on one pod is the configured per-pod ceiling, not a comfort target.
-- 2 warm pods give a configured ceiling of about 24 concurrent sessions before HPA adds more pods.
-- 10 pods give a configured ceiling of about 120 concurrent sessions, subject to real latency and provider limits.
+- 1 active session on one pod reports about `6.7%` load.
+- 8 active sessions on one pod reports about `53.3%` load.
+- 9 active sessions on one pod reports `60%` load and should trigger scale-up pressure.
+- 15 active sessions on one pod is the configured per-pod ceiling, not a comfort target.
+- 2 warm pods give a configured ceiling of about 30 concurrent sessions before HPA adds more pods.
+- 10 pods give a configured ceiling of about 150 concurrent sessions, subject to real latency and provider limits.
 
 For billing and sizing, use peak concurrent voice sessions and active minutes, not total registered users. If there are 100 total users but only 5-15 are active at the same time, the current 2-pod baseline should usually be enough from the Kubernetes side. If 50-100 users can talk at once, the HPA and node group must scale up and provider/API limits must be tested separately.
 
@@ -62,7 +62,7 @@ The previous capacity-test node group has been promoted to production:
 - Production Deployment: `picoclaw-livekit`
 - Production agent name: `cheeko-agent1`
 
-The 2026-06-12 real-audio canary test on one `c6a.large` pod passed `12`, `14`, and `15` rooms from the LiveKit/VAD/STT/LLM path with low memory usage and no pod restarts. At `16` rooms, all rooms joined and VAD/STT started, but only `13/16` reached LLM before the short test window ended. The safe production setting is therefore `PICOCLAW_LIVEKIT_MAX_SESSIONS=12`.
+The 2026-06-13 real-audio canary test on one isolated `c6a.large` pod passed `18` rooms cleanly through dispatch, join, STT, VAD, LLM, cleanup, and quality summaries with low memory usage and no pod restarts. At `19` rooms, all rooms joined, but only `18` reached STT/VAD and `17` reached LLM/quality summaries. The balanced production setting is therefore `PICOCLAW_LIVEKIT_MAX_SESSIONS=15` with the HPA session-load target set to `60`.
 
 ElevenLabs is still the external response-audio gate. Production smoke on 2026-06-12 reached LiveKit dispatch, room join, VAD, STT, and LLM, but ElevenLabs returned `payment_issue` for TTS bytes. Re-test full response audio after the ElevenLabs account/plan is fixed.
 
