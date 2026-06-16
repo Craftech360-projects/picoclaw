@@ -35,6 +35,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/inworld_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/openai_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
@@ -202,13 +203,8 @@ func main() {
 		}
 	}
 
-	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("openai", apiKey, "whisper-1", 6); err != nil {
-			logger.WarnCF("livekit", "Failed to configure OpenAI provider", map[string]any{
-				"error": err.Error(),
-			})
-		}
-	}
+	// openai STT is DB-driven: do not seed/overwrite its model here. The model column
+	// in stt_providers is the source of truth; auth uses OPENAI_API_KEY at runtime.
 
 	if apiKey := os.Getenv("CARTESIA_API_KEY"); apiKey != "" {
 		if err := sttFactory.SeedProviderConfig("cartesia", apiKey, "ink-whisper", 7); err != nil {
@@ -1334,6 +1330,7 @@ func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tt
 	factory.Register("inworld", inworld_tts.NewBuilder())
 	factory.Register("cartesia", cartesia_tts.NewBuilder())
 	factory.Register("deepgram", deepgram_tts.NewBuilder())
+	factory.Register("openai", openai_tts.NewBuilder())
 
 	return factory.Create(cfg, lkCfg)
 }
