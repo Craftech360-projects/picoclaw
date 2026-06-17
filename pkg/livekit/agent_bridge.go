@@ -526,6 +526,32 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 	default:
 	}
 
+	// Kid-safety guardrails: self-harm and model-identity probes must never be left to
+	// the LLM to improvise. On a match, record the turn, speak the canned line, and skip
+	// generation entirely. See voice_guardrails.go.
+	if override, ok := voiceSafetyOverride(text); ok {
+		if strings.TrimSpace(text) != "" {
+			ab.recordTranscript(chatTypeUser, text)
+			if ab.sessions != nil {
+				ab.sessions.AddMessage(sessionKey, "user", text)
+			}
+		}
+		ab.recordTranscript(chatTypeAssistant, override)
+		if ab.sessions != nil {
+			ab.sessions.AddMessage(sessionKey, "assistant", override)
+		}
+		logger.InfoCF("livekit", "Voice safety guardrail override applied", map[string]any{
+			"session": sessionKey,
+		})
+		if cb != nil {
+			cb(override)
+		}
+		if onDone != nil {
+			onDone()
+		}
+		return false, nil
+	}
+
 	var history []providers.Message
 	var summary string
 	if ab.sessions != nil {
@@ -637,6 +663,12 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		"content_len":      len(resp.Content),
 		"content_redacted": !ab.logContentPolicy.enabledForSession(sessionKey),
 		"tool_call_count":  len(resp.ToolCalls),
+	})
+
+	// ponytail: raw, full, unredacted LLM reply for debugging. Remove when no longer needed.
+	logger.InfoCF("livekit", "LLM raw reply", map[string]any{
+		"session": sessionKey,
+		"content": resp.Content,
 	})
 
 	normalized := normalizeToolCalls(resp.ToolCalls)
@@ -891,6 +923,11 @@ func (ab *AgentBridge) activeSkillNames() []string {
 
 func (ab *AgentBridge) toolDefs() []providers.ToolDefinition {
 	if ab.tools == nil {
+		return nil
+	}
+	// Ollama doesn't support tool calling — skip entirely to avoid 400 errors.
+	if mc, err := ab.cfg.GetModelConfig(ab.cfg.Agents.Defaults.GetModelName()); err == nil && mc != nil &&
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(mc.Model)), "ollama/") {
 		return nil
 	}
 	defs := ab.tools.ToProviderDefs()

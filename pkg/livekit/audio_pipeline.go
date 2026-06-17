@@ -26,6 +26,23 @@ import (
 var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
 var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
+
+// Small models (Gemma, etc.) leak emoji and markdown that TTS would read aloud
+// ("asterisk", "one dot"). Strip them so spoken output stays clean regardless of model.
+var voiceEmojiRE = regexp.MustCompile(`[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{2300}-\x{23FF}\x{2190}-\x{21FF}\x{1F1E6}-\x{1F1FF}\x{FE00}-\x{FE0F}\x{200D}]`)
+var voiceMarkdownLinkRE = regexp.MustCompile(`\[([^\]]+)\]\([^)]*\)`) // [text](url) -> text
+var voiceURLRE = regexp.MustCompile(`https?://\S+`)
+var voiceListMarkerRE = regexp.MustCompile(`(?m)^\s*([-*+]|\d+\.)\s+`) // leading bullet/number markers
+var voiceMarkdownCharsRE = regexp.MustCompile("[*_`~#]+")              // emphasis/heading/code markers
+// gemma3 and similar small models hallucinate tool-call markup in text output even when tools=0
+var voiceToolCallRE = regexp.MustCompile(`(?i)\*?\[tool[_\s]?\w*[^]]*\]\*?|\btool_code\b[^)]*\)?|<tool[^>]*>.*?</tool[^>]*>|\{[\s\S]{0,200}?"type"\s*:\s*"tool[^}]*\}`)
+// Kids models emit stage directions like "( *Dramatic pause* )" or "(laughs)" that TTS would read aloud.
+// ponytail: strips any parenthetical aside up to 40 chars; a longer legit parenthetical survives.
+var voiceStageDirectionRE = regexp.MustCompile(`\s*\([^)]{0,40}\)`)
+// Asterisk-wrapped multi-word actions like "*pauses dramatically*" or "*taps fingers thoughtfully*"
+// are stage directions; strip the whole span. ponytail: only multi-word spans (contain a space) —
+// single-word *emphasis* keeps its word (existing markdown stripper just removes the stars).
+var voiceAsteriskActionRE = regexp.MustCompile(`\*[^*]*\s[^*]*\*`)
 var dynamicGreetingCooldownUntilUnix atomic.Int64
 
 const (
@@ -86,6 +103,14 @@ func sanitizeVoiceTextForTTS(text string) string {
 		"<analysis>", "",
 		"</analysis>", "",
 	).Replace(text)
+	text = voiceToolCallRE.ReplaceAllString(text, "")
+	text = voiceMarkdownLinkRE.ReplaceAllString(text, "$1")
+	text = voiceURLRE.ReplaceAllString(text, "")
+	text = voiceStageDirectionRE.ReplaceAllString(text, "")
+	text = voiceAsteriskActionRE.ReplaceAllString(text, "")
+	text = voiceListMarkerRE.ReplaceAllString(text, "")
+	text = voiceMarkdownCharsRE.ReplaceAllString(text, "")
+	text = voiceEmojiRE.ReplaceAllString(text, "")
 	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
 }
 

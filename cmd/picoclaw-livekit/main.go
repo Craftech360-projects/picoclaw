@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -15,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -395,14 +393,11 @@ func main() {
 			workspace = filepath.Join(baseWorkspace, "..", "workspace-"+id)
 		}
 		lockTimeout := liveKitWorkspaceLockTimeout(lkCfg.ManagerAPI)
-		lockStaleAfter := 2 * time.Minute
-		if lockTimeout > time.Minute {
-			lockStaleAfter = lockTimeout * 2
-		}
-		reconnectLockTimeout := liveKitWorkspaceReconnectLockTimeout(lkCfg.ManagerAPI)
-		reconnectLockStaleAfter := liveKitWorkspaceReconnectLockStaleAfter(lkCfg.ManagerAPI)
 		lockTTLSeconds := liveKitWorkspaceLockLeaseTTL(lkCfg.ManagerAPI)
-		var wsLock *workspaceLock
+		// ponytail: local file-based per-device lock removed — it blocked reconnects
+		// (old session's heartbeat still fresh) causing drops + delay. Manager
+		// distributed lock below is the cross-process guard. Restore acquireWorkspaceLock
+		// if you ever run >1 worker against the same workspace without the manager lock.
 		var managerLockLease *managerWorkspaceLockLease
 		var wsLockReleaseOnce sync.Once
 		releaseWorkspaceLock := func(reason string) {
@@ -411,25 +406,6 @@ func main() {
 					managerLockLease.Release(reason)
 					managerLockLease = nil
 				}
-				if wsLock == nil {
-					return
-				}
-				if err := wsLock.Release(); err != nil {
-					logger.WarnCF("livekit", "Failed to release workspace lock", map[string]any{
-						"room":       roomName,
-						"device_mac": deviceMAC,
-						"workspace":  workspace,
-						"reason":     reason,
-						"error":      err.Error(),
-					})
-					return
-				}
-				logger.InfoCF("livekit", "Released per-device workspace lock", map[string]any{
-					"room":       roomName,
-					"device_mac": deviceMAC,
-					"workspace":  workspace,
-					"reason":     reason,
-				})
 			})
 		}
 		if workspace != "" && strings.TrimSpace(deviceMAC) != "" {
@@ -474,73 +450,18 @@ func main() {
 					})
 				}
 			}
-			lock, err := acquireWorkspaceLock(workspace, lockOwner, lockTimeout, lockStaleAfter)
-			if err != nil && strings.Contains(err.Error(), "workspace lock busy") {
-				// Reconnect races are expected when the previous room is still flushing
-				// post-session persistence. Give handoff one extra grace window before
-				// abandoning this assignment.
-				if ok, hintOwner := livekit.HasRecentWorkspaceReconnectHint(workspace, 2*time.Minute); ok &&
-					strings.TrimSpace(hintOwner) == lockOwner {
-					logger.InfoCF("livekit", "Retrying per-device workspace lock acquisition during reconnect handoff", map[string]any{
-						"room":               roomName,
-						"device_mac":         deviceMAC,
-						"workspace":          workspace,
-						"lock_owner":         lockOwner,
-						"retry_timeout_ms":   reconnectLockTimeout.Milliseconds(),
-						"stale_reclaim_ms":   reconnectLockStaleAfter.Milliseconds(),
-						"initial_timeout_ms": lockTimeout.Milliseconds(),
-					})
-					lock, err = acquireWorkspaceLock(workspace, lockOwner, reconnectLockTimeout, reconnectLockStaleAfter)
-				}
-			}
-			if err != nil {
-				logger.WarnCF("livekit", "Failed to acquire per-device workspace lock", map[string]any{
-					"room":            roomName,
-					"device_mac":      deviceMAC,
-					"workspace":       workspace,
-					"lock_owner":      lockOwner,
-					"lock_timeout_ms": lockTimeout.Milliseconds(),
-					"error":           err.Error(),
-				})
-				return nil
-			}
-			wsLock = lock
-			logger.InfoCF("livekit", "Acquired per-device workspace lock", map[string]any{
-				"room":            roomName,
-				"device_mac":      deviceMAC,
-				"workspace":       workspace,
-				"lock_owner":      lockOwner,
-				"lock_timeout_ms": lockTimeout.Milliseconds(),
-			})
 		}
 
 		// 2. Fetch and decode room metadata payload from MQTT gateway.
 		// We keep this for child/memory hydration, but AGENT.md prompt prefers DB system_prompt.
 		bootstrap := roomMetadataBootstrap{Source: bootstrapSourceManagerAPIFallback}
-		renderedIdentity := ""
 		workspaceBootstrapSource := bootstrap.Source
+		// Child profile is hydrated into USER.md (renderUserTemplateWithChildProfile); AGENT.md/SOUL.md
+		// carry the persona. cheeko.tmpl identity injection was redundant and removed.
 		if roomMetadata != "" {
 			var err error
 			bootstrap, err = parseRoomMetadataBootstrap(roomMetadata)
-			if err == nil {
-				md := bootstrap.Metadata
-				// 3. Load the Go template we built
-				tmplPath := filepath.Join(".", "prompts", "cheeko.tmpl")
-				if tmplBytes, readErr := os.ReadFile(tmplPath); readErr == nil {
-					if tmpl, parseErr := template.New("cheeko").Parse(string(tmplBytes)); parseErr == nil {
-						var buf bytes.Buffer
-						if execErr := tmpl.Execute(&buf, md); execErr == nil {
-							renderedIdentity = buf.String()
-						} else {
-							logger.ErrorCF("livekit", "Template exec failed", map[string]any{"error": execErr.Error()})
-						}
-					} else {
-						logger.ErrorCF("livekit", "Template parse failed", map[string]any{"error": parseErr.Error()})
-					}
-				} else {
-					logger.ErrorCF("livekit", "Could not read cheeko.tmpl", map[string]any{"error": readErr.Error()})
-				}
-			} else {
+			if err != nil {
 				logger.ErrorCF("livekit", "Invalid job metadata payload", map[string]any{
 					"error":            err.Error(),
 					"bootstrap_source": bootstrap.Source,
@@ -548,7 +469,7 @@ func main() {
 				})
 			}
 		}
-		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, renderedIdentity)
+		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, "")
 		if bootstrap.Source == bootstrapSourceRoomMetadata {
 			workspaceBootstrapSource = bootstrap.Source
 		}
