@@ -136,6 +136,11 @@ func (s *openaiStreamAdapter) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		// Close is called from both the disconnect handler and track cleanup;
+		// guard against double-close panicking on resultChan.
+		return nil
+	}
 	s.closed = true
 	close(s.resultChan)
 	return nil
@@ -175,9 +180,11 @@ func (s *openaiStreamAdapter) flushBuffer() error {
 			Duration: s.calculateDuration(),
 		}
 
-		select {
-		case s.resultChan <- event:
-		default:
+		if !s.closed {
+			select {
+			case s.resultChan <- event:
+			default:
+			}
 		}
 	}
 
