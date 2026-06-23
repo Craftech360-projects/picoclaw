@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -15,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -518,33 +516,13 @@ func main() {
 			})
 		}
 
-		// 2. Fetch and decode room metadata payload from MQTT gateway.
-		// We keep this for child/memory hydration, but AGENT.md prompt prefers DB system_prompt.
+		// 2. Fetch and decode room metadata payload from MQTT gateway (child/memory/routing).
 		bootstrap := roomMetadataBootstrap{Source: bootstrapSourceManagerAPIFallback}
-		renderedIdentity := ""
 		workspaceBootstrapSource := bootstrap.Source
 		if roomMetadata != "" {
 			var err error
 			bootstrap, err = parseRoomMetadataBootstrap(roomMetadata)
-			if err == nil {
-				md := bootstrap.Metadata
-				// 3. Load the Go template we built
-				tmplPath := filepath.Join(".", "prompts", "cheeko.tmpl")
-				if tmplBytes, readErr := os.ReadFile(tmplPath); readErr == nil {
-					if tmpl, parseErr := template.New("cheeko").Parse(string(tmplBytes)); parseErr == nil {
-						var buf bytes.Buffer
-						if execErr := tmpl.Execute(&buf, md); execErr == nil {
-							renderedIdentity = buf.String()
-						} else {
-							logger.ErrorCF("livekit", "Template exec failed", map[string]any{"error": execErr.Error()})
-						}
-					} else {
-						logger.ErrorCF("livekit", "Template parse failed", map[string]any{"error": parseErr.Error()})
-					}
-				} else {
-					logger.ErrorCF("livekit", "Could not read cheeko.tmpl", map[string]any{"error": readErr.Error()})
-				}
-			} else {
+			if err != nil {
 				logger.ErrorCF("livekit", "Invalid job metadata payload", map[string]any{
 					"error":            err.Error(),
 					"bootstrap_source": bootstrap.Source,
@@ -552,10 +530,41 @@ func main() {
 				})
 			}
 		}
-		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, renderedIdentity)
 		if bootstrap.Source == bootstrapSourceRoomMetadata {
 			workspaceBootstrapSource = bootstrap.Source
 		}
+
+		// 3. Phase 3 (ADR-0003): PULL persona by characterId every session. The worker is
+		// persona-agnostic; AGENT.md = scaffold + systemPrompt and SOUL.md = soul, regenerated
+		// each session. If the pull fails, keep the last-rendered files as a degraded fallback.
+		personaSystemPrompt := ""
+		personaSoul := ""
+		personaResolved := false
+		if characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID); characterID != "" &&
+			strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
+			csCtx, csCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			session, err := fetchManagerCharacterSession(csCtx, lkCfg.ManagerAPI, characterID, managerAPIServiceKey())
+			csCancel()
+			if err != nil {
+				logger.WarnCF("livekit", "Character persona pull failed; using degraded on-disk fallback", map[string]any{
+					"character_id": characterID,
+					"error":        err.Error(),
+				})
+			} else {
+				personaSystemPrompt = strings.TrimSpace(session.SystemPrompt)
+				personaSoul = strings.TrimSpace(session.Soul)
+				personaResolved = true
+				workspaceBootstrapSource = bootstrapSourceManagerDBPrompt
+				if lang := strings.TrimSpace(session.Language); lang != "" {
+					bootstrap.Metadata.Language = lang
+				}
+			}
+		}
+
+		hydrationOptions := buildLiveKitWorkspaceHydrationOptions(baseWorkspace, bootstrap, "")
+		hydrationOptions.PersonaSystemPrompt = personaSystemPrompt
+		hydrationOptions.SoulContent = personaSoul
+		hydrationOptions.RegeneratePersona = personaResolved
 		sessionLanguagePolicy := livekit.NormalizeSessionLanguagePolicy(
 			bootstrap.Metadata.SessionLanguageName,
 			bootstrap.Metadata.SessionLanguageCode,

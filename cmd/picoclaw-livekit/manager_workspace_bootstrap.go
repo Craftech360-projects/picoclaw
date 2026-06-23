@@ -223,6 +223,82 @@ func fetchManagerWorkspaceBootstrap(
 	return out, nil
 }
 
+// managerCharacterSession is the persona contract returned by
+// GET /character/:id/session (Phase 1 resolver). No hashes (ADR-0001/0003).
+type managerCharacterSession struct {
+	CharacterID      string `json:"characterId"`
+	CharacterName    string `json:"characterName"`
+	RuntimeAgentName string `json:"runtimeAgentName"`
+	Language         string `json:"language"`
+	SystemPrompt     string `json:"systemPrompt"`
+	Soul             string `json:"soul"`
+}
+
+// fetchManagerCharacterSession PULLs a character's persona by id (ADR-0003).
+func fetchManagerCharacterSession(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	characterID string,
+	serviceKey string,
+) (managerCharacterSession, error) {
+	var out managerCharacterSession
+	characterID = strings.TrimSpace(characterID)
+	if characterID == "" {
+		return out, fmt.Errorf("character id is empty")
+	}
+
+	baseURL := managerAPIBaseURL(cfg)
+	if baseURL == "" {
+		baseURL = "http://localhost:8002/toy"
+	}
+
+	endpoint := strings.TrimRight(baseURL, "/") +
+		"/character/" + url.PathEscape(characterID) + "/session"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return out, err
+	}
+	if strings.TrimSpace(serviceKey) != "" {
+		req.Header.Set("X-Service-Key", serviceKey)
+		req.Header.Set("Authorization", "Bearer "+serviceKey)
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return out, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return out, fmt.Errorf("manager character session status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var wrapper struct {
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return out, fmt.Errorf("decode manager character session response: %w", err)
+	}
+	if wrapper.Code != 0 {
+		return out, fmt.Errorf("manager character session api code=%d msg=%s", wrapper.Code, wrapper.Msg)
+	}
+	if len(wrapper.Data) == 0 {
+		return out, fmt.Errorf("manager character session returned empty data")
+	}
+	if err := json.Unmarshal(wrapper.Data, &out); err != nil {
+		return out, fmt.Errorf("decode manager character session data: %w", err)
+	}
+	return out, nil
+}
+
 func buildLiveKitWorkspaceHydrationOptionsFromManager(
 	baseWorkspace string,
 	bootstrap managerWorkspaceBootstrap,

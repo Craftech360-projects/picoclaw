@@ -27,6 +27,41 @@ type liveKitWorkspaceHydrationOptions struct {
 	TemplateSourceDirs    []string
 	SkillsSourceDir       string
 	SkillsSourceDirs      []string
+
+	// Phase 3 (ADR-0003): persona pulled per session by characterId.
+	PersonaSystemPrompt string // injected into the AGENT.md scaffold's <!-- PERSONA --> slot
+	SoulContent         string // written verbatim to SOUL.md
+	RegeneratePersona   bool   // true when the Manager pull succeeded -> overwrite AGENT.md/SOUL.md every session
+}
+
+const personaPlaceholder = "<!-- PERSONA -->"
+
+// injectPersona fills the scaffold's persona slot. Empty persona strips the slot;
+// a scaffold without the slot gets the persona prepended (legacy templates).
+func injectPersona(scaffold, persona string) string {
+	persona = strings.TrimSpace(persona)
+	if strings.Contains(scaffold, personaPlaceholder) {
+		return strings.ReplaceAll(scaffold, personaPlaceholder, persona)
+	}
+	if persona == "" {
+		return scaffold
+	}
+	return persona + "\n\n" + scaffold
+}
+
+// readFirstWorkspaceTemplateFile returns the first non-blank copy of rel found in sourceDirs.
+func readFirstWorkspaceTemplateFile(sourceDirs []string, rel string) string {
+	for _, dir := range sourceDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		if data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel))); err == nil {
+			if strings.TrimSpace(string(data)) != "" {
+				return string(data)
+			}
+		}
+	}
+	return ""
 }
 
 type liveKitWorkspaceHydrationResult struct {
@@ -103,18 +138,26 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 		return result, err
 	}
 
-	identityContent := strings.TrimSpace(opts.IdentityContent)
-	if identityContent != "" {
-		if err := writeFileIfMissingOrBlank(
-			filepath.Join(workspace, "AGENT.md"),
-			ensureTrailingNewline(identityContent),
-			0o644,
-		); err != nil {
+	// AGENT.md = persona-agnostic scaffold + Manager systemPrompt (ADR-0003).
+	// When the persona resolved, regenerate every session; otherwise keep the last-rendered
+	// AGENT.md (degraded fallback) and only write a fresh scaffold if it's missing/blank.
+	agentPath := filepath.Join(workspace, "AGENT.md")
+	scaffold := readFirstWorkspaceTemplateFile(templateSources, "AGENT.md")
+	var agentContent string
+	if strings.TrimSpace(scaffold) != "" {
+		agentContent = injectPersona(scaffold, opts.PersonaSystemPrompt)
+	} else {
+		agentContent = strings.TrimSpace(opts.IdentityContent) // legacy fallback
+	}
+	if strings.TrimSpace(agentContent) == "" {
+		agentContent = "# LiveKit Voice Agent\n\nNo room identity has been hydrated for this session.\n"
+	}
+	if opts.RegeneratePersona && strings.TrimSpace(opts.PersonaSystemPrompt) != "" {
+		if err := writeFileWithMode(agentPath, []byte(ensureTrailingNewline(agentContent)), 0o644); err != nil {
 			return result, err
 		}
 	} else {
-		placeholder := "# LiveKit Voice Agent\n\nNo room identity has been hydrated for this session.\n"
-		if err := writeFileIfMissingOrBlank(filepath.Join(workspace, "AGENT.md"), placeholder, 0o644); err != nil {
+		if err := writeFileIfMissingOrBlank(agentPath, ensureTrailingNewline(agentContent), 0o644); err != nil {
 			return result, err
 		}
 	}
@@ -142,8 +185,21 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 			return result, err
 		}
 	}
-	if err := writeFileIfMissingOrBlank(filepath.Join(workspace, "SOUL.md"), "# Soul\n\nUse the active LiveKit room identity and child context for this voice session.\n", 0o644); err != nil {
-		return result, err
+	// SOUL.md = Manager soul, regenerated every session when the persona resolved;
+	// otherwise keep the last-rendered SOUL.md (degraded) or seed the scaffold soul once.
+	soulPath := filepath.Join(workspace, "SOUL.md")
+	if opts.RegeneratePersona && strings.TrimSpace(opts.SoulContent) != "" {
+		if err := writeFileWithMode(soulPath, []byte(ensureTrailingNewline(strings.TrimSpace(opts.SoulContent))), 0o644); err != nil {
+			return result, err
+		}
+	} else {
+		soulTemplate := strings.TrimSpace(readFirstWorkspaceTemplateFile(templateSources, "SOUL.md"))
+		if soulTemplate == "" {
+			soulTemplate = "# Soul\n\nUse the active LiveKit room identity and child context for this voice session."
+		}
+		if err := writeFileIfMissingOrBlank(soulPath, ensureTrailingNewline(soulTemplate), 0o644); err != nil {
+			return result, err
+		}
 	}
 	if err := writeFileIfMissingOrBlank(filepath.Join(workspace, "HEARTBEAT.md"), "# Heartbeat\n\nLiveKit workspace hydrated.\n", 0o644); err != nil {
 		return result, err
@@ -308,6 +364,11 @@ func seedWorkspaceCoreFilesFromSources(workspace string, sourceDirs []string) er
 	}
 
 	for rel, spec := range workspaceTemplateFiles {
+		// AGENT.md and SOUL.md are owned by the persona regeneration logic (ADR-0003),
+		// not seeded as-is (the scaffold carries a <!-- PERSONA --> slot).
+		if rel == "AGENT.md" || rel == "SOUL.md" {
+			continue
+		}
 		target := filepath.Join(workspace, filepath.FromSlash(rel))
 		targetData, err := os.ReadFile(target)
 		if err == nil && strings.TrimSpace(string(targetData)) != "" {
