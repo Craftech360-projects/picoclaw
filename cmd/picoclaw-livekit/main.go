@@ -570,12 +570,18 @@ func main() {
 			bootstrap.Metadata.SessionLanguageCode,
 		)
 		if strings.TrimSpace(bootstrap.Metadata.SessionLanguageName) == "" &&
-			strings.TrimSpace(bootstrap.Metadata.SessionLanguageCode) == "" &&
-			strings.TrimSpace(bootstrap.Metadata.PrimaryLanguage) != "" {
-			sessionLanguagePolicy = livekit.NormalizeSessionLanguagePolicy(
-				bootstrap.Metadata.PrimaryLanguage,
-				bootstrap.Metadata.PrimaryLanguage,
-			)
+			strings.TrimSpace(bootstrap.Metadata.SessionLanguageCode) == "" {
+			// No explicit card session-language: fall back to the character/card language
+			// (Phase 3 metadata.language), then the primary language. Card session-language
+			// stays highest priority.
+			if lang := strings.TrimSpace(bootstrap.Metadata.Language); lang != "" {
+				sessionLanguagePolicy = livekit.NormalizeSessionLanguagePolicy(lang, lang)
+			} else if strings.TrimSpace(bootstrap.Metadata.PrimaryLanguage) != "" {
+				sessionLanguagePolicy = livekit.NormalizeSessionLanguagePolicy(
+					bootstrap.Metadata.PrimaryLanguage,
+					bootstrap.Metadata.PrimaryLanguage,
+				)
+			}
 		}
 		if workspace != "" {
 			firstTimeWorkspace := false
