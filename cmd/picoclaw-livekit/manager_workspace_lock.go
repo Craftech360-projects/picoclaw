@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,11 +12,30 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+// errWorkspaceLockPreempted is returned by heartbeat/renew when the Manager
+// reports this holder was fenced out by a newer session (HTTP 409 +
+// lockErrorCode=LOCK_PREEMPTED). It is distinguishable from transient/network
+// errors so the worker can branch to the preempted-close path (skip workspace
+// upload, keep chat history, do not release the lock).
+var errWorkspaceLockPreempted = errors.New("manager workspace lock preempted by newer holder")
+
+// Heartbeat cadence and lease lifetime for the distributed (Manager) lock.
+//
+// last-tap-wins preemption needs the OLD holder to notice it was fenced out
+// within ~1-2s of the new session's preemptive acquire, so we heartbeat every
+// 1.5s (was 5s). The Manager lease TTL is lowered toward ~8s: short enough that
+// a crashed holder's lease lapses quickly (so a non-preempt acquire can reclaim
+// a dead lock without a long wait), but still >4x the heartbeat interval so a
+// single dropped heartbeat does not self-evict a healthy holder.
+const managerWorkspaceLockHeartbeatInterval = 1500 * time.Millisecond
+const managerWorkspaceLockLeaseTTLSeconds = 8
 
 type managerWorkspaceLockState struct {
 	DeviceMAC    string `json:"deviceMac"`
@@ -38,6 +58,51 @@ type managerWorkspaceLockLease struct {
 	stopCh       chan struct{}
 	doneCh       chan struct{}
 	once         sync.Once
+
+	// preempted is set once the Manager fences this holder out (a newer session
+	// took over). onPreempted (if set) is fired exactly once to trigger room
+	// teardown via the preempted-close path.
+	preempted     atomic.Bool
+	onPreemptedMu sync.Mutex
+	onPreempted   func()
+	preemptFired  atomic.Bool
+}
+
+// WasPreempted reports whether this lease was fenced out by a newer session.
+// The bridge close callbacks use it to decide whether to skip the workspace
+// upload and skip releasing the lock (the new room owns it now).
+func (l *managerWorkspaceLockLease) WasPreempted() bool {
+	if l == nil {
+		return false
+	}
+	return l.preempted.Load()
+}
+
+// SetOnPreempted registers a callback fired once when this lease is fenced out.
+// It is wired to trigger a graceful room teardown so the old session stops
+// promptly instead of running to a natural end.
+func (l *managerWorkspaceLockLease) SetOnPreempted(fn func()) {
+	if l == nil {
+		return
+	}
+	l.onPreemptedMu.Lock()
+	l.onPreempted = fn
+	l.onPreemptedMu.Unlock()
+}
+
+func (l *managerWorkspaceLockLease) markPreempted() {
+	if l == nil {
+		return
+	}
+	l.preempted.Store(true)
+	if l.preemptFired.CompareAndSwap(false, true) {
+		l.onPreemptedMu.Lock()
+		fn := l.onPreempted
+		l.onPreemptedMu.Unlock()
+		if fn != nil {
+			go fn()
+		}
+	}
 }
 
 func (l *managerWorkspaceLockLease) startHeartbeat(interval time.Duration) {
@@ -45,7 +110,7 @@ func (l *managerWorkspaceLockLease) startHeartbeat(interval time.Duration) {
 		return
 	}
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = managerWorkspaceLockHeartbeatInterval
 	}
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -60,6 +125,18 @@ func (l *managerWorkspaceLockLease) startHeartbeat(interval time.Duration) {
 				_, err := heartbeatManagerWorkspaceLock(ctx, l.cfg, l.deviceMAC, l.holderID, l.fencingToken, l.leaseTTL)
 				cancel()
 				if err != nil {
+					if errors.Is(err, errWorkspaceLockPreempted) {
+						// A newer session fenced us out. Mark preempted (so the
+						// close path skips upload + lock release, keeps chat
+						// history) and trigger room teardown. Stop heartbeating.
+						logger.InfoCF("livekit", "Manager workspace lock preempted by newer session; tearing down", map[string]any{
+							"device_mac":    l.deviceMAC,
+							"holder_id":     l.holderID,
+							"fencing_token": l.fencingToken,
+						})
+						l.markPreempted()
+						return
+					}
 					logger.WarnCF("livekit", "Manager workspace lock heartbeat failed", map[string]any{
 						"device_mac":    l.deviceMAC,
 						"holder_id":     l.holderID,
@@ -79,6 +156,18 @@ func (l *managerWorkspaceLockLease) Release(reason string) {
 	l.once.Do(func() {
 		close(l.stopCh)
 		<-l.doneCh
+		if l.preempted.Load() {
+			// We were fenced out: the new room owns the lock now. Do NOT call
+			// release — a stale-token release is a no-op on the Manager anyway,
+			// but skipping it avoids any chance of disturbing the new holder.
+			logger.InfoCF("livekit", "Skipping manager workspace lock release (preempted)", map[string]any{
+				"device_mac":    l.deviceMAC,
+				"holder_id":     l.holderID,
+				"fencing_token": l.fencingToken,
+				"reason":        reason,
+			})
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		released, err := releaseManagerWorkspaceLock(ctx, l.cfg, l.deviceMAC, l.holderID, l.fencingToken)
@@ -121,44 +210,52 @@ func acquireManagerWorkspaceLockWithRetry(
 	if waitTimeout <= 0 {
 		waitTimeout = 30 * time.Second
 	}
-	deadline := time.Now().Add(waitTimeout)
 
-	leaseTTLSeconds = clampPositiveInt(leaseTTLSeconds, 20, 120)
-	for {
-		result, err := acquireManagerWorkspaceLock(ctx, cfg, deviceMAC, holderID, leaseTTLSeconds, 2)
-		if err != nil {
-			return nil, err
-		}
-		if result.Acquired && result.Lock != nil {
-			lease := &managerWorkspaceLockLease{
-				cfg:          cfg,
-				deviceMAC:    deviceMAC,
-				holderID:     holderID,
-				fencingToken: result.Lock.FencingToken,
-				leaseTTL:     leaseTTLSeconds,
-				stopCh:       make(chan struct{}),
-				doneCh:       make(chan struct{}),
-			}
-			lease.startHeartbeat(5 * time.Second)
-			return lease, nil
-		}
-		if time.Now().After(deadline) {
-			currentOwner := ""
-			if result.Current != nil {
-				currentOwner = result.Current.HolderID
-			}
-			if currentOwner != "" {
-				return nil, fmt.Errorf("manager workspace lock busy (owner=%s)", currentOwner)
-			}
-			return nil, fmt.Errorf("manager workspace lock busy")
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(250 * time.Millisecond):
-		}
+	// For last-tap-wins, the distributed lease TTL is intentionally short
+	// (~8s) and decoupled from the caller's lock_timeout (which governs the
+	// LOCAL file-lock acquire wait). A short TTL lets a crashed holder's lease
+	// lapse quickly so a future non-preempt acquire can reclaim a dead lock,
+	// while preemption itself does not depend on the TTL at all. We keep the
+	// param for signature stability but override it to the tuned constant
+	// unless the caller explicitly requested something smaller.
+	if leaseTTLSeconds <= 0 || leaseTTLSeconds > managerWorkspaceLockLeaseTTLSeconds {
+		leaseTTLSeconds = managerWorkspaceLockLeaseTTLSeconds
 	}
+	leaseTTLSeconds = clampPositiveInt(leaseTTLSeconds, 6, 120)
+
+	// last-tap-wins: a just-dispatched session is by definition the newest, so we
+	// FORCE-acquire (preempt=true). If the device lock is held by a DIFFERENT
+	// holder the Manager bumps the fencing_token and hands it to us immediately —
+	// no 30s wait. If two new dispatches race, the fencing_token serializes them.
+	result, err := acquireManagerWorkspaceLock(ctx, cfg, deviceMAC, holderID, leaseTTLSeconds, 2, true)
+	if err != nil {
+		return nil, err
+	}
+	if result.Acquired && result.Lock != nil {
+		lease := &managerWorkspaceLockLease{
+			cfg:          cfg,
+			deviceMAC:    deviceMAC,
+			holderID:     holderID,
+			fencingToken: result.Lock.FencingToken,
+			leaseTTL:     leaseTTLSeconds,
+			stopCh:       make(chan struct{}),
+			doneCh:       make(chan struct{}),
+		}
+		lease.startHeartbeat(managerWorkspaceLockHeartbeatInterval)
+		return lease, nil
+	}
+
+	// A preemptive acquire should always succeed against a different holder. The
+	// only non-acquire outcome is a concurrent racing dispatch that got there
+	// first (and fenced us) — treat as busy without a long wait.
+	currentOwner := ""
+	if result.Current != nil {
+		currentOwner = result.Current.HolderID
+	}
+	if currentOwner != "" {
+		return nil, fmt.Errorf("manager workspace lock busy (owner=%s)", currentOwner)
+	}
+	return nil, fmt.Errorf("manager workspace lock busy")
 }
 
 func acquireManagerWorkspaceLock(
@@ -168,6 +265,7 @@ func acquireManagerWorkspaceLock(
 	holderID string,
 	leaseTTLSeconds int,
 	staleGraceSeconds int,
+	preempt bool,
 ) (managerWorkspaceLockAcquireResult, error) {
 	var out managerWorkspaceLockAcquireResult
 	baseURL := managerAPIBaseURL(cfg)
@@ -178,8 +276,9 @@ func acquireManagerWorkspaceLock(
 		"holderId":          holderID,
 		"leaseTTLSeconds":   leaseTTLSeconds,
 		"staleGraceSeconds": staleGraceSeconds,
+		"preempt":           preempt,
 	}
-	body, err := callManagerWorkspaceLockEndpoint(ctx, cfg, deviceMAC, "acquire", payload)
+	body, _, err := callManagerWorkspaceLockEndpoint(ctx, cfg, deviceMAC, "acquire", payload)
 	if err != nil {
 		return out, err
 	}
@@ -202,7 +301,18 @@ func heartbeatManagerWorkspaceLock(
 		"fencingToken":    fencingToken,
 		"leaseTTLSeconds": leaseTTLSeconds,
 	}
-	body, err := callManagerWorkspaceLockEndpoint(ctx, cfg, deviceMAC, "heartbeat", payload)
+	body, status, err := callManagerWorkspaceLockEndpoint(ctx, cfg, deviceMAC, "heartbeat", payload)
+	if status == http.StatusConflict {
+		// 409 means the heartbeat was rejected. Inspect the machine-readable
+		// lockErrorCode to tell "I was preempted" apart from a transient miss.
+		if workspaceLockResponseIsPreempted(body, err) {
+			return false, errWorkspaceLockPreempted
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("workspace-lock heartbeat rejected (409)")
+	}
 	if err != nil {
 		return false, err
 	}
@@ -213,6 +323,25 @@ func heartbeatManagerWorkspaceLock(
 		return false, err
 	}
 	return decoded.Renewed, nil
+}
+
+// workspaceLockResponseIsPreempted reports whether a 409 heartbeat response (or
+// its error text) indicates LOCK_PREEMPTED. The Manager returns the code both in
+// the JSON body's data.lockErrorCode and, for non-2xx, in the raw error string.
+func workspaceLockResponseIsPreempted(body []byte, rawErr error) bool {
+	if len(body) > 0 {
+		var decoded struct {
+			LockErrorCode string `json:"lockErrorCode"`
+		}
+		if json.Unmarshal(body, &decoded) == nil &&
+			strings.EqualFold(strings.TrimSpace(decoded.LockErrorCode), "LOCK_PREEMPTED") {
+			return true
+		}
+	}
+	if rawErr != nil && strings.Contains(rawErr.Error(), "LOCK_PREEMPTED") {
+		return true
+	}
+	return false
 }
 
 func releaseManagerWorkspaceLock(
@@ -226,7 +355,7 @@ func releaseManagerWorkspaceLock(
 		"holderId":     holderID,
 		"fencingToken": fencingToken,
 	}
-	body, err := callManagerWorkspaceLockEndpoint(ctx, cfg, deviceMAC, "release", payload)
+	body, _, err := callManagerWorkspaceLockEndpoint(ctx, cfg, deviceMAC, "release", payload)
 	if err != nil {
 		return false, err
 	}
@@ -239,30 +368,35 @@ func releaseManagerWorkspaceLock(
 	return decoded.Released, nil
 }
 
+// callManagerWorkspaceLockEndpoint POSTs a lock action and returns the unwrapped
+// `data` payload, the HTTP status code, and an error (if any). The status is
+// returned even on error so callers can branch on 409 (preemption) before
+// treating it as a generic failure. On 4xx/5xx the returned body is the raw
+// (still-wrapped) response so callers can inspect data.lockErrorCode.
 func callManagerWorkspaceLockEndpoint(
 	ctx context.Context,
 	cfg config.LiveKitServiceManagerAPIConfig,
 	deviceMAC string,
 	action string,
 	payload map[string]any,
-) ([]byte, error) {
+) ([]byte, int, error) {
 	baseURL := managerAPIBaseURL(cfg)
 	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("manager API base URL is empty")
+		return nil, 0, fmt.Errorf("manager API base URL is empty")
 	}
 	action = strings.TrimSpace(action)
 	if action == "" {
-		return nil, fmt.Errorf("workspace lock action is empty")
+		return nil, 0, fmt.Errorf("workspace lock action is empty")
 	}
 
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	endpoint := strings.TrimRight(baseURL, "/") + "/agent/device/" + url.PathEscape(strings.TrimSpace(deviceMAC)) + "/workspace-lock/" + action
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(encodedPayload))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if serviceKey := strings.TrimSpace(managerAPIServiceKey()); serviceKey != "" {
@@ -273,15 +407,12 @@ func callManagerWorkspaceLockEndpoint(
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("workspace-lock %s status=%d body=%s", action, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, resp.StatusCode, err
 	}
 
 	var wrapper struct {
@@ -289,16 +420,25 @@ func callManagerWorkspaceLockEndpoint(
 		Msg  string          `json:"msg"`
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(body, &wrapper); err != nil {
-		return nil, err
+	_ = json.Unmarshal(body, &wrapper)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Return the unwrapped data (carries lockErrorCode for 409) alongside the
+		// status and error so callers can distinguish preemption.
+		errOut := fmt.Errorf("workspace-lock %s status=%d body=%s", action, resp.StatusCode, strings.TrimSpace(string(body)))
+		if len(wrapper.Data) > 0 {
+			return wrapper.Data, resp.StatusCode, errOut
+		}
+		return body, resp.StatusCode, errOut
 	}
+
 	if wrapper.Code != 0 {
-		return nil, fmt.Errorf("workspace-lock %s api code=%d msg=%s", action, wrapper.Code, wrapper.Msg)
+		return wrapper.Data, resp.StatusCode, fmt.Errorf("workspace-lock %s api code=%d msg=%s", action, wrapper.Code, wrapper.Msg)
 	}
 	if len(wrapper.Data) == 0 {
-		return []byte("{}"), nil
+		return []byte("{}"), resp.StatusCode, nil
 	}
-	return wrapper.Data, nil
+	return wrapper.Data, resp.StatusCode, nil
 }
 
 func liveKitWorkspaceLockLeaseTTL(cfg config.LiveKitServiceManagerAPIConfig) int {

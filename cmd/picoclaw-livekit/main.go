@@ -768,6 +768,19 @@ func main() {
 				if cronService != nil {
 					cronService.Stop()
 				}
+				// Preempted close (a newer session took over this device's lock):
+				// SKIP the workspace-sync upload so we don't clobber the new room's
+				// USER.md/MEMORY.md/etc. Chat-history persistence already ran in
+				// rs.leave() (persistPostSessionData) before bridge.Close(), so it
+				// is kept regardless of this branch.
+				if managerLockLease.WasPreempted() {
+					logger.InfoCF("livekit", "Preempted close: skipping workspace upload (newer session owns the lock)", map[string]any{
+						"room":       roomName,
+						"device_mac": deviceMAC,
+						"workspace":  workspace,
+					})
+					return
+				}
 				if strings.TrimSpace(deviceMAC) == "" || managerAPIBaseURL(lkCfg.ManagerAPI) == "" || workspace == "" {
 					return
 				}
@@ -782,6 +795,15 @@ func main() {
 				}
 			},
 			OnAfterClose: func() {
+				// On a preempted close the new room owns the lock; releaseWorkspaceLock
+				// -> managerLockLease.Release is an internal no-op for the distributed
+				// lock when preempted (it skips the network release). The local
+				// per-device file lock is still released here, which is correct: the
+				// new session in another process acquires its own local lock.
+				if managerLockLease.WasPreempted() {
+					releaseWorkspaceLock("bridge_close_preempted")
+					return
+				}
 				releaseWorkspaceLock("bridge_close")
 			},
 		})
@@ -790,9 +812,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error creating agent bridge: %v\n", err)
 			return nil
 		}
+		// last-tap-wins: if a newer session preempts this device's distributed
+		// lock, the heartbeat goroutine fires this hook to gracefully tear the room
+		// down (RequestTeardown -> RoomSession.Leave), which persists chat history,
+		// then runs OnClose (skips upload because WasPreempted) and OnAfterClose
+		// (skips distributed-lock release because WasPreempted).
+		if managerLockLease != nil {
+			managerLockLease.SetOnPreempted(bridge.RequestTeardown)
+		}
 		startLiveKitAsyncMCPInitialization(sessionCfg, agentInstance, bridge, roomName, workspaceIdentity)
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
-			stopWorkspaceSyncLoop = startWorkspaceSyncLoop(lkCfg.ManagerAPI, deviceMAC, workspace, roomName)
+			lease := managerLockLease
+			stopWorkspaceSyncLoop = startWorkspaceSyncLoop(lkCfg.ManagerAPI, deviceMAC, workspace, roomName, func() bool {
+				return lease.WasPreempted()
+			})
 		}
 		if cronService != nil && cronTool != nil {
 			cronSessionKey := livekitCronSessionKey(deviceMAC, persistentAgentID, roomName)
@@ -1663,6 +1696,7 @@ func startWorkspaceSyncLoop(
 	deviceMAC string,
 	workspace string,
 	roomName string,
+	isPreempted func() bool,
 ) func() {
 	if !workspaceSyncEnabled(&cfg) {
 		logger.InfoCF("livekit", "workspace sync loop disabled by config", map[string]any{
@@ -1717,6 +1751,19 @@ func startWorkspaceSyncLoop(
 			case <-stopCh:
 				return
 			case <-checkpointTicker.C:
+				// last-tap-wins: once a newer session has preempted this device's
+				// workspace lock, the OLD session must NOT push its workspace to the
+				// Manager. Skip the periodic upload and stop the loop so an in-flight
+				// teardown cannot race a checkpoint upload out the door. Chat-history
+				// persistence is separate and unaffected.
+				if isPreempted != nil && isPreempted() {
+					logger.InfoCF("livekit", "Workspace sync loop stopping (preempted); skipping periodic checkpoint upload", map[string]any{
+						"room":       roomName,
+						"device_mac": deviceMAC,
+						"workspace":  workspace,
+					})
+					return
+				}
 				syncNow("periodic_checkpoint")
 			case <-retryTicker.C:
 				if hasPendingWorkspaceSync(workspace) {

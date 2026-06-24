@@ -166,6 +166,14 @@ type AgentBridge struct {
 	closeMu sync.Mutex
 	closed  bool
 
+	// teardownHook is registered by the owning RoomSession (its Leave method) so
+	// out-of-band events — e.g. the distributed workspace lock being preempted by
+	// a newer session — can trigger a full, graceful teardown (persist chat
+	// history, disconnect room, close bridge) instead of just closing the bridge.
+	teardownMu   sync.Mutex
+	teardownHook func()
+	teardownOnce sync.Once
+
 	sessionLLMLocks sync.Map // map[string]*sync.Mutex
 }
 
@@ -315,6 +323,37 @@ func (ab *AgentBridge) Close() {
 			}
 		}
 	}
+}
+
+// SetTeardownHook registers the canonical full-teardown entry point for the
+// session that owns this bridge (the RoomSession's Leave). It is used by
+// RequestTeardown to gracefully end the session from out-of-band signals.
+func (ab *AgentBridge) SetTeardownHook(fn func()) {
+	if ab == nil {
+		return
+	}
+	ab.teardownMu.Lock()
+	ab.teardownHook = fn
+	ab.teardownMu.Unlock()
+}
+
+// RequestTeardown triggers a single graceful teardown of the owning session.
+// Safe to call multiple times and from any goroutine; only the first call runs
+// the hook. If no hook is registered yet it falls back to closing the bridge.
+func (ab *AgentBridge) RequestTeardown() {
+	if ab == nil {
+		return
+	}
+	ab.teardownOnce.Do(func() {
+		ab.teardownMu.Lock()
+		fn := ab.teardownHook
+		ab.teardownMu.Unlock()
+		if fn != nil {
+			fn()
+			return
+		}
+		ab.Close()
+	})
 }
 
 // AttachMCPManager safely binds a late-initialized MCP manager to the bridge.

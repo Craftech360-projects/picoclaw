@@ -170,6 +170,14 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	}
 	rs.ctx, rs.cancel = context.WithCancel(ctx)
 
+	// Register the canonical full teardown so out-of-band signals (e.g. the
+	// distributed workspace lock being preempted by a newer session) can end this
+	// session gracefully: persist chat history, disconnect the room, close the
+	// bridge. Leave() is idempotent (guarded by closeOnce).
+	if rs.bridge != nil {
+		rs.bridge.SetTeardownHook(rs.Leave)
+	}
+
 	cb := lksdk.NewRoomCallback()
 	cb.OnParticipantDisconnected = func(rp *lksdk.RemoteParticipant) {
 		rs.handleParticipantDisconnected(rp)
