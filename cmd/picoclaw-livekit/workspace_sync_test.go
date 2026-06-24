@@ -41,8 +41,10 @@ func TestDownloadWorkspaceFilesWritesCanonicalFilesAndPreservesMemoryMode(t *tes
 		t.Fatalf("downloadWorkspaceFiles returned error: %v", err)
 	}
 
-	if _, err := os.ReadFile(filepath.Join(workspace, "AGENT.md")); err != nil {
-		t.Fatalf("ReadFile(AGENT.md) error = %v", err)
+	// AGENT.md is session-regenerated (ADR-0003): the download/restore path must
+	// NOT write the Manager's stored copy over the freshly-rendered file.
+	if _, err := os.Stat(filepath.Join(workspace, "AGENT.md")); !os.IsNotExist(err) {
+		t.Fatalf("AGENT.md should be skipped on restore, but it exists (err = %v)", err)
 	}
 
 	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
@@ -178,5 +180,84 @@ func TestReplayWorkspaceSyncOutboxDiscardsLegacyBinaryPayloadOn400(t *testing.T)
 func TestIsWorkspaceSyncExcluded_DeviceLock(t *testing.T) {
 	if !isWorkspaceSyncExcluded(".picoclaw/device.lock", nil) {
 		t.Fatalf("expected .picoclaw/device.lock to be excluded")
+	}
+}
+
+func TestIsSessionRegeneratedCoreFile(t *testing.T) {
+	regenerated := []string{"AGENT.md", "SOUL.md", "agent.md", "soul.md", "./AGENT.md"}
+	for _, name := range regenerated {
+		if !isSessionRegeneratedCoreFile(name) {
+			t.Errorf("isSessionRegeneratedCoreFile(%q) = false, want true", name)
+		}
+	}
+	notRegenerated := []string{"USER.md", "MEMORY.md", "HEARTBEAT.md", "memory/MEMORY.md", "user.md"}
+	for _, name := range notRegenerated {
+		if isSessionRegeneratedCoreFile(name) {
+			t.Errorf("isSessionRegeneratedCoreFile(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestWorkspaceSyncRestorePreservesSessionRegeneratedFiles asserts the
+// workspace-sync DOWNLOAD/RESTORE path does not overwrite the freshly-rendered
+// AGENT.md/SOUL.md (ADR-0003) while still restoring USER.md/MEMORY.md.
+func TestWorkspaceSyncRestorePreservesSessionRegeneratedFiles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]any{
+				"revision": "10",
+				"files": []map[string]any{
+					{"relativePath": "AGENT.md", "content": "# OLD Manager Agent\n"},
+					{"relativePath": "SOUL.md", "content": "# OLD Manager Soul\n"},
+					{"relativePath": "USER.md", "content": "# User\n"},
+					{"relativePath": "memory/MEMORY.md", "content": "# Memory\n"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	// Simulate the per-session render already on disk.
+	renderedAgent := "# Rendered Tenali Agent\n"
+	renderedSoul := "# Rendered Tenali Soul\n"
+	if err := os.WriteFile(filepath.Join(workspace, "AGENT.md"), []byte(renderedAgent), 0o644); err != nil {
+		t.Fatalf("write AGENT.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte(renderedSoul), 0o644); err != nil {
+		t.Fatalf("write SOUL.md: %v", err)
+	}
+
+	cfg := config.LiveKitServiceManagerAPIConfig{
+		BaseURL:       server.URL,
+		WorkspaceSync: config.LiveKitWorkspaceSyncConfig{Enabled: true},
+	}
+	if err := tryDownloadWorkspaceSync(context.Background(), cfg, "3c:0f:02:d3:6a:e8", workspace); err != nil {
+		t.Fatalf("tryDownloadWorkspaceSync: %v", err)
+	}
+
+	gotAgent, err := os.ReadFile(filepath.Join(workspace, "AGENT.md"))
+	if err != nil {
+		t.Fatalf("read AGENT.md: %v", err)
+	}
+	if string(gotAgent) != renderedAgent {
+		t.Errorf("AGENT.md was overwritten: got %q, want %q", string(gotAgent), renderedAgent)
+	}
+	gotSoul, err := os.ReadFile(filepath.Join(workspace, "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read SOUL.md: %v", err)
+	}
+	if string(gotSoul) != renderedSoul {
+		t.Errorf("SOUL.md was overwritten: got %q, want %q", string(gotSoul), renderedSoul)
+	}
+
+	// USER.md and MEMORY.md must still be restored from the Manager.
+	if _, err := os.Stat(filepath.Join(workspace, "USER.md")); err != nil {
+		t.Errorf("USER.md should be restored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "memory", "MEMORY.md")); err != nil {
+		t.Errorf("memory/MEMORY.md should be restored: %v", err)
 	}
 }

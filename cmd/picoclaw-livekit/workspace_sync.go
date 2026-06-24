@@ -89,6 +89,27 @@ var protectedWorkspaceCorePaths = map[string]struct{}{
 	"memory/memory.md": {},
 }
 
+// sessionRegeneratedCoreFiles are rendered fresh every session by the worker
+// from the Manager persona (per ADR-0003). They are NOT a source of truth, so
+// the workspace-sync DOWNLOAD/RESTORE path must never overwrite the freshly
+// rendered copy with the Manager's stored copy, and the UPLOAD path must not
+// re-store a per-session artifact.
+var sessionRegeneratedCoreFiles = map[string]struct{}{
+	"agent.md": {},
+	"soul.md":  {},
+}
+
+// isSessionRegeneratedCoreFile reports whether the given path/display name is a
+// core file that the worker regenerates each session (AGENT.md, SOUL.md). Such
+// files must be skipped by every download/restore (and upload) path so the
+// per-session render is preserved. The check is case-insensitive and normalizes
+// the same way as the other workspace-sync core-file checks.
+func isSessionRegeneratedCoreFile(name string) bool {
+	normalized := strings.ToLower(strings.TrimPrefix(normalizeWorkspaceRelPath(name), "./"))
+	_, ok := sessionRegeneratedCoreFiles[normalized]
+	return ok
+}
+
 func workspaceDiskMode(diskPath string) os.FileMode {
 	if filepath.Clean(diskPath) == filepath.Join("memory", "MEMORY.md") {
 		return 0o600
@@ -337,6 +358,11 @@ func collectWorkspaceSyncFiles(workspaceDir string, cfg config.LiveKitServiceMan
 			})
 			return nil
 		}
+		if isSessionRegeneratedCoreFile(rel) {
+			// Per ADR-0003 these are session-regenerated artifacts; don't upload
+			// them so the Manager doesn't keep a stale/last-character copy.
+			return nil
+		}
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -458,6 +484,14 @@ func tryDownloadWorkspaceSync(
 	for _, file := range data.Files {
 		rel := normalizeWorkspaceRelPath(file.RelativePath)
 		if rel == "." || rel == "" || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
+			continue
+		}
+		if isSessionRegeneratedCoreFile(rel) {
+			// Per ADR-0003 these are rendered fresh each session; never let the
+			// Manager's stored copy clobber the per-session render.
+			logger.WarnCF("livekit", "workspace-sync skipped session-regenerated core file restore", map[string]any{
+				"path": rel,
+			})
 			continue
 		}
 		if isProtectedWorkspaceCoreFile(rel) && strings.TrimSpace(file.Content) == "" {
@@ -854,6 +888,14 @@ func downloadWorkspaceFilesLegacy(
 
 	written := 0
 	for displayName, diskPath := range workspaceDiskPaths {
+		if isSessionRegeneratedCoreFile(displayName) {
+			// Per ADR-0003 these are rendered fresh each session; never restore
+			// the Manager's stored copy over the per-session render.
+			logger.WarnCF("livekit", "workspace-files skipped session-regenerated core file restore", map[string]any{
+				"path": displayName,
+			})
+			continue
+		}
 		entry, ok := wrapper.Data[displayName]
 		if !ok || strings.TrimSpace(entry.Content) == "" {
 			continue
@@ -943,6 +985,10 @@ func uploadWorkspaceFiles(
 
 	payload := make(map[string]string, len(workspaceDiskPaths))
 	for displayName, diskPath := range workspaceDiskPaths {
+		if isSessionRegeneratedCoreFile(displayName) {
+			// Per ADR-0003 these are session-regenerated; don't re-store them.
+			continue
+		}
 		target := filepath.Join(workspaceDir, diskPath)
 		data, err := os.ReadFile(target)
 		if err != nil {
