@@ -8,6 +8,12 @@ build/
 *.dylib
 *.test
 *.out
+
+# Exempt vendored ten-vad native libs (required to build the livekit worker)
+!third_party/ten-vad/lib/**/*.dll
+!third_party/ten-vad/lib/**/*.lib
+!third_party/ten-vad/lib/**/*.so
+!third_party/ten-vad/lib/**/*.dylib
 /picoclaw
 /picoclaw-test
 cmd/**/workspace
