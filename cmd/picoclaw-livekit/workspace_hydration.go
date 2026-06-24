@@ -32,9 +32,21 @@ type liveKitWorkspaceHydrationOptions struct {
 	PersonaSystemPrompt string // injected into the AGENT.md scaffold's <!-- PERSONA --> slot
 	SoulContent         string // written verbatim to SOUL.md
 	RegeneratePersona   bool   // true when the Manager pull succeeded -> overwrite AGENT.md/SOUL.md every session
+	SessionLanguage     string // fills the scaffold's <!-- LANGUAGE --> slot (card/character language)
 }
 
 const personaPlaceholder = "<!-- PERSONA -->"
+const languagePlaceholder = "<!-- LANGUAGE -->"
+
+// injectLanguage fills the scaffold's <!-- LANGUAGE --> slot with the session language
+// (default English) so the LLM responds in the card/character language.
+func injectLanguage(content, language string) string {
+	language = strings.TrimSpace(language)
+	if language == "" {
+		language = "English"
+	}
+	return strings.ReplaceAll(content, languagePlaceholder, language)
+}
 
 // injectPersona fills the scaffold's persona slot. Empty persona strips the slot;
 // a scaffold without the slot gets the persona prepended (legacy templates).
@@ -152,6 +164,7 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 	if strings.TrimSpace(agentContent) == "" {
 		agentContent = "# LiveKit Voice Agent\n\nNo room identity has been hydrated for this session.\n"
 	}
+	agentContent = injectLanguage(agentContent, opts.SessionLanguage)
 	if opts.RegeneratePersona && strings.TrimSpace(opts.PersonaSystemPrompt) != "" {
 		if err := writeFileWithMode(agentPath, []byte(ensureTrailingNewline(agentContent)), 0o644); err != nil {
 			return result, err

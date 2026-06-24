@@ -583,6 +583,8 @@ func main() {
 				)
 			}
 		}
+		// Fill the AGENT.md scaffold's <!-- LANGUAGE --> slot so the LLM replies in the session language.
+		hydrationOptions.SessionLanguage = sessionLanguagePolicy.DisplayName
 		if workspace != "" {
 			firstTimeWorkspace := false
 			if _, err := os.Stat(filepath.Join(workspace, "USER.md")); os.IsNotExist(err) {

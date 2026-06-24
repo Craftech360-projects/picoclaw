@@ -56,6 +56,16 @@ func TestFetchManagerCharacterSessionDecodesContract(t *testing.T) {
 	}
 }
 
+func TestInjectLanguageFillsSlotWithDefault(t *testing.T) {
+	scaffold := "Respond in: <!-- LANGUAGE -->."
+	if got := injectLanguage(scaffold, "Tamil"); got != "Respond in: Tamil." {
+		t.Fatalf("language not injected: %q", got)
+	}
+	if got := injectLanguage(scaffold, ""); got != "Respond in: English." {
+		t.Fatalf("empty language should default to English: %q", got)
+	}
+}
+
 func TestInjectPersonaFillsAndStripsPlaceholder(t *testing.T) {
 	scaffold := "intro\n\n<!-- PERSONA -->\n\n## Role\nbody"
 	if got := injectPersona(scaffold, "You are Cheeko."); !strings.Contains(got, "You are Cheeko.") ||
