@@ -157,8 +157,14 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 			return result, err
 		}
 	} else {
-		if err := writeFileIfMissingOrBlank(agentPath, ensureTrailingNewline(agentContent), 0o644); err != nil {
-			return result, err
+		// Degraded/no-persona: write the (placeholder-stripped) scaffold only if AGENT.md is
+		// missing/blank or still holds the raw <!-- PERSONA --> slot from seeding; otherwise
+		// keep the last-rendered persona (never clobber a good render when the Manager is down).
+		existing, readErr := os.ReadFile(agentPath)
+		if os.IsNotExist(readErr) || strings.TrimSpace(string(existing)) == "" || strings.Contains(string(existing), personaPlaceholder) {
+			if err := writeFileWithMode(agentPath, []byte(ensureTrailingNewline(agentContent)), 0o644); err != nil {
+				return result, err
+			}
 		}
 	}
 
@@ -364,11 +370,6 @@ func seedWorkspaceCoreFilesFromSources(workspace string, sourceDirs []string) er
 	}
 
 	for rel, spec := range workspaceTemplateFiles {
-		// AGENT.md and SOUL.md are owned by the persona regeneration logic (ADR-0003),
-		// not seeded as-is (the scaffold carries a <!-- PERSONA --> slot).
-		if rel == "AGENT.md" || rel == "SOUL.md" {
-			continue
-		}
 		target := filepath.Join(workspace, filepath.FromSlash(rel))
 		targetData, err := os.ReadFile(target)
 		if err == nil && strings.TrimSpace(string(targetData)) != "" {

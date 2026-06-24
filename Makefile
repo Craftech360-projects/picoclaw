@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test
+.PHONY: all build install uninstall clean help test test-livekit
 
 # Build variables
 BINARY_NAME=picoclaw-livekit
@@ -133,6 +133,27 @@ build-livekit:
 	@CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/picoclaw-livekit-$(PLATFORM)-$(ARCH) ./cmd/picoclaw-livekit
 	@ln -sf picoclaw-livekit-$(PLATFORM)-$(ARCH) $(BUILD_DIR)/picoclaw-livekit
 	@echo "Build complete: $(BUILD_DIR)/picoclaw-livekit"
+
+## test-livekit: Test the cgo-enabled picoclaw-livekit package (TEN VAD). On Windows, fixes the MSYS2/MinGW DLL conflict.
+#
+# Why this target exists:
+#   The picoclaw-livekit package uses cgo (pkg/voice/vad/ten_vad.go), so it cannot be
+#   tested with the default `make test` target (that runs CGO_ENABLED=0).
+#
+#   On Windows under the MSYS2 *msys* shell, a plain `go test ./cmd/picoclaw-livekit/`
+#   fails the cgo build with:
+#       runtime/cgo: .../cgo.exe: exit status 2
+#   The real cause: the msys shell's PATH exposes the MSYS2 runtime (msys-2.0.dll in
+#   /usr/bin) to the MinGW gcc that cgo spawns, so gcc/cc1 load a conflicting runtime
+#   and die silently (exit 1/2, no diagnostics). A plain `go build` only "passed"
+#   because the runtime/cgo objects were already in the build cache; `go test` forces a
+#   fresh cgo build (different flags -> cache miss) and trips the failure.
+#
+#   The fix is to run go test with a PATH where MinGW (C:\msys64\mingw64\bin) comes
+#   FIRST (correct build-time DLLs) and the TEN VAD DLL directory is present (so the
+#   test binary loads ten_vad.dll at runtime, avoiding 0xc0000135 DLL-not-found).
+test-livekit:
+	@sh scripts/test-livekit.sh $(ARGS)
 
 ## build-whatsapp-native: Build with WhatsApp native (whatsmeow) support; larger binary
 build-whatsapp-native: generate
