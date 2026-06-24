@@ -252,8 +252,9 @@ func fetchManagerCharacterSession(
 		baseURL = "http://localhost:8002/toy"
 	}
 
+	// Mounted under the /agent router on the Manager (sibling of /agent/device/:mac/...).
 	endpoint := strings.TrimRight(baseURL, "/") +
-		"/character/" + url.PathEscape(characterID) + "/session"
+		"/agent/character/" + url.PathEscape(characterID) + "/session"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
