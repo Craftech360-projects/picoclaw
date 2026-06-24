@@ -608,7 +608,7 @@ func main() {
 					"workspace_identity": workspaceIdentity,
 					"persistent":         preserveWorkspace,
 					"bootstrap_source":   workspaceBootstrapSource,
-					"identity_rendered":  strings.TrimSpace(hydrationOptions.IdentityContent) != "",
+					"identity_rendered":  strings.TrimSpace(hydrationOptions.PersonaSystemPrompt) != "" || strings.TrimSpace(hydrationOptions.IdentityContent) != "",
 					"memory_written":     hydration.MemoryWritten,
 					"skills_copied":      hydration.SkillsCopied,
 				})
