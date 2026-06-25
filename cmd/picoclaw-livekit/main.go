@@ -542,6 +542,10 @@ func main() {
 		personaResolved := false
 		characterName := strings.TrimSpace(bootstrap.Metadata.CharacterName)
 		characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID)
+		logger.InfoCF("livekit", "Character from room metadata", map[string]any{
+			"character":    characterName,
+			"character_id": characterID,
+		})
 		if (characterName != "" || characterID != "") &&
 			strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
 			csCtx, csCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -565,6 +569,15 @@ func main() {
 				personaSystemPrompt = strings.TrimSpace(session.SystemPrompt)
 				personaSoul = strings.TrimSpace(session.Soul)
 				personaResolved = true
+				logger.InfoCF("livekit", "Persona pulled from manager DB", map[string]any{
+					"character":      session.CharacterName,
+					"runtime_agent":  session.RuntimeAgentName,
+					"language":       session.Language,
+					"agent_md_bytes": len(personaSystemPrompt),
+					"soul_md_bytes":  len(personaSoul),
+					"agent_md_ok":    personaSystemPrompt != "",
+					"soul_md_ok":     personaSoul != "",
+				})
 				workspaceBootstrapSource = bootstrapSourceManagerDBPrompt
 				if lang := strings.TrimSpace(session.Language); lang != "" {
 					bootstrap.Metadata.Language = lang
