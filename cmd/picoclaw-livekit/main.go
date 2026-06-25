@@ -934,10 +934,12 @@ func main() {
 			// Get active STT provider for this session
 			sttProvider := buildSTTProvider(sttFactory)
 
-			// Character name from room metadata, for the name-aware greeting fallback.
+			// Character name for the name-aware greeting fallback. Use the SAME
+			// metadata source the bootstrap uses (room metadata, else job metadata)
+			// — room metadata is empty on card-switch dispatches.
 			sessionCharacterName := ""
-			if job != nil && job.Room != nil {
-				if bs, bsErr := parseRoomMetadataBootstrap(job.Room.Metadata); bsErr == nil {
+			if _, rawMeta, _ := resolveLiveKitJobBootstrapContext(job); strings.TrimSpace(rawMeta) != "" {
+				if bs, bsErr := parseRoomMetadataBootstrap(rawMeta); bsErr == nil {
 					sessionCharacterName = strings.TrimSpace(bs.Metadata.CharacterName)
 				}
 			}
