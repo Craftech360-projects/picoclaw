@@ -247,14 +247,45 @@ func fetchManagerCharacterSession(
 		return out, fmt.Errorf("character id is empty")
 	}
 
+	relPath := "/agent/character/" + url.PathEscape(characterID) + "/session"
+	return doFetchManagerCharacterSession(ctx, cfg, relPath, serviceKey)
+}
+
+// fetchManagerCharacterSessionByName PULLs a character's persona by NAME straight
+// from ai_agent_template (template-only; no ai_agent row, no device binding). The
+// gateway puts the character name in room metadata and the worker pulls the right
+// persona by that name — single source of truth.
+func fetchManagerCharacterSessionByName(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	characterName string,
+	serviceKey string,
+) (managerCharacterSession, error) {
+	characterName = strings.TrimSpace(characterName)
+	if characterName == "" {
+		return managerCharacterSession{}, fmt.Errorf("character name is empty")
+	}
+	relPath := "/agent/character/by-name/" + url.PathEscape(characterName) + "/session"
+	return doFetchManagerCharacterSession(ctx, cfg, relPath, serviceKey)
+}
+
+// doFetchManagerCharacterSession performs the GET + decode for a persona contract
+// endpoint (by-id or by-name).
+func doFetchManagerCharacterSession(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	relPath string,
+	serviceKey string,
+) (managerCharacterSession, error) {
+	var out managerCharacterSession
+
 	baseURL := managerAPIBaseURL(cfg)
 	if baseURL == "" {
 		baseURL = "http://localhost:8002/toy"
 	}
 
 	// Mounted under the /agent router on the Manager (sibling of /agent/device/:mac/...).
-	endpoint := strings.TrimRight(baseURL, "/") +
-		"/agent/character/" + url.PathEscape(characterID) + "/session"
+	endpoint := strings.TrimRight(baseURL, "/") + relPath
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

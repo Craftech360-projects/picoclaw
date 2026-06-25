@@ -540,13 +540,24 @@ func main() {
 		personaSystemPrompt := ""
 		personaSoul := ""
 		personaResolved := false
-		if characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID); characterID != "" &&
+		characterName := strings.TrimSpace(bootstrap.Metadata.CharacterName)
+		characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID)
+		if (characterName != "" || characterID != "") &&
 			strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
 			csCtx, csCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			session, err := fetchManagerCharacterSession(csCtx, lkCfg.ManagerAPI, characterID, managerAPIServiceKey())
+			// Prefer by-NAME (template-only single source); fall back to by-id for
+			// legacy dispatch metadata that only carries character_id.
+			var session managerCharacterSession
+			var err error
+			if characterName != "" {
+				session, err = fetchManagerCharacterSessionByName(csCtx, lkCfg.ManagerAPI, characterName, managerAPIServiceKey())
+			} else {
+				session, err = fetchManagerCharacterSession(csCtx, lkCfg.ManagerAPI, characterID, managerAPIServiceKey())
+			}
 			csCancel()
 			if err != nil {
 				logger.WarnCF("livekit", "Character persona pull failed; using degraded on-disk fallback", map[string]any{
+					"character":    characterName,
 					"character_id": characterID,
 					"error":        err.Error(),
 				})

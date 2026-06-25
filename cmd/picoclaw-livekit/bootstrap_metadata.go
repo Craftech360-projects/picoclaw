@@ -30,8 +30,9 @@ type roomMetadata struct {
 	SessionLanguageCode string `json:"session_language_code"`
 
 	// Phase 3 (ADR-0003): per-session character routing/persona from MQTT dispatch metadata.
-	CharacterID string `json:"character_id"`
-	Language    string `json:"language"`
+	CharacterID   string `json:"character_id"`
+	CharacterName string `json:"character"`
+	Language      string `json:"language"`
 }
 
 type roomMetadataChildProfile struct {
@@ -139,6 +140,7 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	metadata.SessionLanguageName = normalizeString(mustGetMapValue(payload, "session_language_name", "sessionLanguageName"))
 	metadata.SessionLanguageCode = normalizeString(mustGetMapValue(payload, "session_language_code", "sessionLanguageCode"))
 	metadata.CharacterID = normalizeString(mustGetMapValue(payload, "character_id", "characterId"))
+	metadata.CharacterName = normalizeString(mustGetMapValue(payload, "character", "character_name", "characterName"))
 	metadata.Language = normalizeString(mustGetMapValue(payload, "language"))
 	metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "primary_language", "primaryLanguage"))
 	if metadata.PrimaryLanguage == "" {
