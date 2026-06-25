@@ -921,6 +921,14 @@ func main() {
 			// Get active STT provider for this session
 			sttProvider := buildSTTProvider(sttFactory)
 
+			// Character name from room metadata, for the name-aware greeting fallback.
+			sessionCharacterName := ""
+			if job != nil && job.Room != nil {
+				if bs, bsErr := parseRoomMetadataBootstrap(job.Room.Metadata); bsErr == nil {
+					sessionCharacterName = strings.TrimSpace(bs.Metadata.CharacterName)
+				}
+			}
+
 			return livekit.NewRoomSession(livekit.RoomSessionConfig{
 				Worker:              worker,
 				JobID:               job.Id,
@@ -936,6 +944,7 @@ func main() {
 				SampleRate:          sessionTTSSampleRate,
 				FillerWords:         lkCfg.TTS.FillerWords,
 				PrimaryLanguage:     sessionLanguagePolicy.DisplayName,
+				CharacterName:       sessionCharacterName,
 				SessionLanguageName: sessionLanguagePolicy.DisplayName,
 				SessionLanguageCode: sessionLanguagePolicy.RawCode,
 				Runtime:             lkCfg.Runtime,

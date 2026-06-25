@@ -248,6 +248,7 @@ type AudioPipeline struct {
 	tts                  tts.Provider
 	vadEvent             <-chan interface{}
 	primaryLanguage      string // used for language-aware error fallback phrases
+	characterName        string // active character name for name-aware greeting fallback
 	greetingMode         string
 	asyncAnnounceMode    string
 	rateLimitCooldown    time.Duration
@@ -570,9 +571,10 @@ func (ap *AudioPipeline) maybeDrainQueuedAnnouncements() {
 }
 
 func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
-	var lang string
+	var lang, charName string
 	if session != nil {
 		lang = session.primaryLanguage
+		charName = session.characterName
 	}
 	turnTimeout := 45 * time.Second
 	if session != nil && session.runtime.TurnTimeoutSeconds > 0 {
@@ -584,6 +586,7 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 		tts:               tts,
 		vadEvent:          vadEvent,
 		primaryLanguage:   lang,
+		characterName:     charName,
 		greetingMode:      "dynamic",
 		asyncAnnounceMode: "immediate",
 		rateLimitCooldown: 2 * time.Minute,
@@ -956,19 +959,25 @@ func (ap *AudioPipeline) retryFallbackPhrase() string {
 }
 
 func (ap *AudioPipeline) greetingFallbackPhrase() string {
+	// Name-aware so the static fallback greeting matches the active character
+	// (Bheem/Tenali/…), not a hardcoded "Cheeko". Empty -> Cheeko (back-compat).
+	name := strings.TrimSpace(ap.characterName)
+	if name == "" {
+		name = "Cheeko"
+	}
 	switch strings.ToLower(ap.primaryLanguage) {
 	case "hindi":
-		return "Namaste! Main Cheeko hoon, tumhara dost. Chalo maze karte hain!"
+		return fmt.Sprintf("Namaste! Main %s hoon, tumhara dost. Chalo maze karte hain!", name)
 	case "kannada":
-		return "Namaskara! Nanu Cheeko, ninna snehita. Banni, fun madona!"
+		return fmt.Sprintf("Namaskara! Nanu %s, ninna snehita. Banni, fun madona!", name)
 	case "malayalam":
-		return "Namaskaram! Njan Cheeko anu, ninte suhruth. Namukku fun cheyyam!"
+		return fmt.Sprintf("Namaskaram! Njan %s anu, ninte suhruth. Namukku fun cheyyam!", name)
 	case "tamil":
-		return "Vanakkam! Naan Cheeko, un friend. Va, fun pannalaam!"
+		return fmt.Sprintf("Vanakkam! Naan %s, un friend. Va, fun pannalaam!", name)
 	case "telugu":
-		return "Namaskaram! Nenu Cheeko, nee friend ni. Raa, fun cheddam!"
+		return fmt.Sprintf("Namaskaram! Nenu %s, nee friend ni. Raa, fun cheddam!", name)
 	default:
-		return "Hi! I am Cheeko, your fun friend. Ready for an awesome chat?"
+		return fmt.Sprintf("Hi! I am %s, your fun friend. Ready for an awesome chat?", name)
 	}
 }
 

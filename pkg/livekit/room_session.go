@@ -54,6 +54,7 @@ type RoomSession struct {
 	sampleRate          int
 	fillerWords         []string
 	primaryLanguage     string // from room metadata, used for language-aware fallbacks
+	characterName       string // active character (e.g. "Bheem") for name-aware greeting fallback
 	SessionLanguageName string
 	SessionLanguageCode string
 	sessionLanguageName string
@@ -101,6 +102,7 @@ type RoomSessionConfig struct {
 	SampleRate          int
 	FillerWords         []string
 	PrimaryLanguage     string // e.g. "Hindi", "English" — from room metadata
+	CharacterName       string // e.g. "Bheem" — from room metadata, for name-aware greeting fallback
 	SessionLanguageName string
 	SessionLanguageCode string
 	Runtime             config.LiveKitServiceRuntimeConfig
@@ -140,6 +142,7 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		sampleRate:          cfg.SampleRate,
 		fillerWords:         cfg.FillerWords,
 		primaryLanguage:     policy.DisplayName,
+		characterName:       cfg.CharacterName,
 		sessionLanguageName: policy.DisplayName,
 		sessionLanguageCode: policy.RawCode,
 		runtime:             cfg.Runtime,
