@@ -156,8 +156,14 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 	agentPath := filepath.Join(workspace, "AGENT.md")
 	scaffold := readFirstWorkspaceTemplateFile(templateSources, "AGENT.md")
 	var agentContent string
-	if strings.TrimSpace(scaffold) != "" {
-		agentContent = injectPersona(scaffold, opts.PersonaSystemPrompt)
+	persona := strings.TrimSpace(opts.PersonaSystemPrompt)
+	if strings.Contains(persona, languagePlaceholder) {
+		// The DB system_prompt holds a FULL AGENT.md (scaffold + persona baked together,
+		// discriminated by the presence of the <!-- LANGUAGE --> slot). Use it verbatim;
+		// do not read or merge the on-disk scaffold and do not injectPersona.
+		agentContent = persona
+	} else if strings.TrimSpace(scaffold) != "" {
+		agentContent = injectPersona(scaffold, persona)
 	} else {
 		agentContent = strings.TrimSpace(opts.IdentityContent) // legacy fallback
 	}

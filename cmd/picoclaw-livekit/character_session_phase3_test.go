@@ -110,6 +110,78 @@ func TestHydratePersonaRegeneratesAgentAndSoul(t *testing.T) {
 	}
 }
 
+// full AGENT.md in system_prompt (discriminated by <!-- LANGUAGE -->): use it verbatim,
+// never merge the on-disk scaffold; only the language slot gets filled.
+func TestHydrateFullAgentMdFromSystemPromptBypassesScaffold(t *testing.T) {
+	src := t.TempDir()
+	// Scaffold carries its own PERSONA marker; the full AGENT.md path must not use it.
+	mustWrite(t, filepath.Join(src, "AGENT.md"), "SCAFFOLD INTRO\n\n<!-- PERSONA -->\n\n## Role\nscaffold rules\n")
+	mustWrite(t, filepath.Join(src, "SOUL.md"), "# Soul\n\nplaceholder soul\n")
+
+	fullAgentMd := "# Cheeko\n\nYou are Cheeko.\n\n" +
+		"## Child-Safety Rules\nBe kind and safe.\n\n" +
+		"## Runtime Guardrails\nStay in character.\n\n" +
+		"Respond in: <!-- LANGUAGE -->.\n"
+
+	ws := t.TempDir()
+	opts := liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs:  []string{src},
+		PersonaSystemPrompt: fullAgentMd,
+		SessionLanguage:     "Tamil",
+		RegeneratePersona:   true,
+		FirstTimeWorkspace:  true,
+	}
+	if _, err := hydrateLiveKitWorkspaceSkeleton(ws, opts); err != nil {
+		t.Fatalf("hydrate error: %v", err)
+	}
+
+	agent := mustRead(t, filepath.Join(ws, "AGENT.md"))
+	if !strings.Contains(agent, "## Child-Safety Rules") {
+		t.Fatalf("full AGENT.md missing its safety rules: %q", agent)
+	}
+	if !strings.Contains(agent, "Respond in: Tamil.") {
+		t.Fatalf("language slot not filled: %q", agent)
+	}
+	if strings.Contains(agent, languagePlaceholder) {
+		t.Fatalf("language placeholder still present: %q", agent)
+	}
+	if strings.Contains(agent, personaPlaceholder) {
+		t.Fatalf("full AGENT.md must not carry scaffold's PERSONA marker: %q", agent)
+	}
+	if strings.Contains(agent, "SCAFFOLD INTRO") || strings.Contains(agent, "scaffold rules") {
+		t.Fatalf("full AGENT.md must not be merged with the scaffold: %q", agent)
+	}
+}
+
+// legacy persona snippet (no <!-- LANGUAGE -->): still injected into the on-disk scaffold.
+func TestHydrateLegacyPersonaSnippetUsesScaffold(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "AGENT.md"), "intro\n\n<!-- PERSONA -->\n\n## Role\nshared rules\n")
+	mustWrite(t, filepath.Join(src, "SOUL.md"), "# Soul\n\nplaceholder soul\n")
+
+	ws := t.TempDir()
+	opts := liveKitWorkspaceHydrationOptions{
+		TemplateSourceDirs:  []string{src},
+		PersonaSystemPrompt: "You are Cheeko, a playful buddy.", // legacy snippet, no language slot
+		RegeneratePersona:   true,
+		FirstTimeWorkspace:  true,
+	}
+	if _, err := hydrateLiveKitWorkspaceSkeleton(ws, opts); err != nil {
+		t.Fatalf("hydrate error: %v", err)
+	}
+
+	agent := mustRead(t, filepath.Join(ws, "AGENT.md"))
+	if !strings.Contains(agent, "You are Cheeko, a playful buddy.") {
+		t.Fatalf("legacy persona not injected: %q", agent)
+	}
+	if !strings.Contains(agent, "## Role") || !strings.Contains(agent, "shared rules") {
+		t.Fatalf("legacy path must come from the scaffold: %q", agent)
+	}
+	if strings.Contains(agent, personaPlaceholder) {
+		t.Fatalf("legacy path left raw PERSONA placeholder: %q", agent)
+	}
+}
+
 // degraded (Manager down): keep the last-rendered AGENT.md/SOUL.md, do not overwrite.
 func TestHydrateDegradedKeepsLastRendered(t *testing.T) {
 	src := t.TempDir()
