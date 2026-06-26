@@ -1,0 +1,21 @@
+services:
+  speaches:
+    # CPU image (works everywhere). For an NVIDIA GPU, switch to :latest-cuda
+    # and uncomment the `deploy` block below.
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: speaches
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf-hub-cache:/home/ubuntu/.cache/huggingface/hub   # persist downloaded models
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  hf-hub-cache:
