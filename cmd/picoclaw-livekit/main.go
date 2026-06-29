@@ -547,7 +547,7 @@ func main() {
 			"character_id": characterID,
 		})
 		parentRuleFromMeta := strings.TrimSpace(bootstrap.Metadata.ChildProfile.ParentRule)
-		logger.InfoCF("livekit", "Parent rule from room metadata", map[string]any{
+		logger.DebugCF("livekit", "Parent rule from room metadata", map[string]any{
 			"present":     parentRuleFromMeta != "",
 			"length":      len(parentRuleFromMeta),
 			"parent_rule": parentRuleFromMeta,
