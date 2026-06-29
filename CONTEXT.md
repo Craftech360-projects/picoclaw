@@ -52,6 +52,14 @@ _Avoid_: Content pack, Q&A pack, character card
 A physical toy identified by MAC address. A Device selects its current Character through Manager API. Workspace state (USER.md, MEMORY.md) is scoped per-Device and shared across Character switches; only AGENT.md swaps when the Character changes.
 _Avoid_: User, child
 
+**Governing Prompt**:
+The fixed set of overall Cheeko rules (child-safety, runtime, voice-output) that apply to every session and override any persona or parent instruction. Authored by Cheeko, never by a parent or admin; a session can never run without it.
+_Avoid_: Main prompt, system prompt, scaffold
+
+**Parent Rule**:
+A custom instruction a parent sets for their own child (for example "bedtime is eight o'clock"), applied across every **Character** that child talks to. Parent Rules are subordinate to the **Governing Prompt**; where they conflict, the Governing Prompt wins.
+_Avoid_: User rule, custom prompt, override
+
 ## Example Dialogue
 
 Developer: "Should Cheeko Magic be a new Runtime Agent?"

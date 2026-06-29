@@ -546,6 +546,12 @@ func main() {
 			"character":    characterName,
 			"character_id": characterID,
 		})
+		parentRuleFromMeta := strings.TrimSpace(bootstrap.Metadata.ChildProfile.ParentRule)
+		logger.InfoCF("livekit", "Parent rule from room metadata", map[string]any{
+			"present":     parentRuleFromMeta != "",
+			"length":      len(parentRuleFromMeta),
+			"parent_rule": parentRuleFromMeta,
+		})
 		if (characterName != "" || characterID != "") &&
 			strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
 			csCtx, csCancel := context.WithTimeout(context.Background(), 3*time.Second)

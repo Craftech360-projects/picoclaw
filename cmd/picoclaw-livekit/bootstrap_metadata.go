@@ -41,6 +41,9 @@ type roomMetadataChildProfile struct {
 	Gender    string `json:"gender"`
 	Interests string `json:"interests"`
 	Timezone  string `json:"timezone"`
+	// ParentRule: free-text parent custom instructions for this child (subordinate
+	// to the Governing Prompt; see ADR-0004). Carried inside child_profile.
+	ParentRule string `json:"parent_rule"`
 }
 
 type roomMetadataRelation struct {
@@ -184,6 +187,7 @@ func normalizeChildProfile(payload map[string]any) roomMetadataChildProfile {
 			"time_zone",
 			"timeZone",
 		)),
+		ParentRule: normalizeString(mustGetMapValue(payload, "parent_rule", "parentRule")),
 	}
 }
 

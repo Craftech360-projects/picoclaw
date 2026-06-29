@@ -33,6 +33,7 @@ type liveKitWorkspaceHydrationOptions struct {
 	SoulContent         string // written verbatim to SOUL.md
 	RegeneratePersona   bool   // true when the Manager pull succeeded -> overwrite AGENT.md/SOUL.md every session
 	SessionLanguage     string // fills the scaffold's <!-- LANGUAGE --> slot (card/character language)
+	ParentRule          string // subordinate parent custom instructions, appended after persona (ADR-0004)
 }
 
 const personaPlaceholder = "<!-- PERSONA -->"
@@ -120,6 +121,7 @@ func buildLiveKitWorkspaceHydrationOptions(
 	opts.UserContent = formatRoomMetadataUserContent(md)
 	opts.MemoryContent = formatRoomMetadataMemoryContent(md)
 	opts.ChildProfile = md.ChildProfile
+	opts.ParentRule = strings.TrimSpace(md.ChildProfile.ParentRule)
 	return opts
 }
 
@@ -171,6 +173,9 @@ func hydrateLiveKitWorkspaceSkeleton(workspace string, opts liveKitWorkspaceHydr
 		agentContent = "# LiveKit Voice Agent\n\nNo room identity has been hydrated for this session.\n"
 	}
 	agentContent = injectLanguage(agentContent, opts.SessionLanguage)
+	// Append subordinate parent rules + absolute precedence footer (ADR-0004).
+	// No-op when no parent rule is set, keeping the prompt byte-identical to before.
+	agentContent = appendParentPreferences(agentContent, opts.ParentRule)
 	if opts.RegeneratePersona && strings.TrimSpace(opts.PersonaSystemPrompt) != "" {
 		if err := writeFileWithMode(agentPath, []byte(ensureTrailingNewline(agentContent)), 0o644); err != nil {
 			return result, err
