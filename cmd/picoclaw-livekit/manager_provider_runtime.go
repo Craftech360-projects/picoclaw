@@ -33,6 +33,7 @@ type managerActiveSTTProvider struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Language string `json:"language"`
+	APIKey   string `json:"api_key"`
 }
 
 type managerActiveTTSProvider struct {
@@ -89,6 +90,7 @@ func resolveLiveKitProviderConfigForSession(
 		liveKitActiveProvidersCache.hasData = true
 		liveKitActiveProvidersCache.mu.Unlock()
 		applyManagerActiveProviders(cloned, fetched)
+		refreshManagerSTTFactory(fetched) // STT tracks manager changes on the same TTL tick as LLM/TTS
 		return cloned, "manager_api", nil
 	}
 	if hasCached {

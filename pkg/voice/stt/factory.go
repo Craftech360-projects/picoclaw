@@ -3,6 +3,7 @@ package stt
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 
 	_ "github.com/lib/pq"
@@ -14,6 +15,7 @@ type Factory struct {
 	dbURL     string
 	db        *sql.DB
 	providers map[string]Provider
+	configs   []ProviderInfo // in-memory provider list (manager-API mode; db is nil)
 	mu        sync.RWMutex
 }
 
@@ -48,6 +50,38 @@ func NewFactory(dbURL string) (*Factory, error) {
 	return f, nil
 }
 
+// NewFactoryFromProviders builds a factory from a provider list fetched
+// out-of-band (e.g. the manager API) instead of opening a direct DB connection.
+// db stays nil, so GetActiveProvider selects from the in-memory list and the
+// DB-write helpers (Update/Seed/Activate/…) are unavailable in this mode.
+func NewFactoryFromProviders(providers []ProviderInfo) (*Factory, error) {
+	f := &Factory{
+		configs:   providers,
+		providers: make(map[string]Provider),
+	}
+	f.registerBuiltInProviders()
+	return f, nil
+}
+
+// SetActiveProvider replaces the in-memory active provider (manager-API mode).
+// No-op for DB-backed factories — there the DB stays the source of truth — or
+// when name is empty. Safe for concurrent use with GetActiveProvider.
+func (f *Factory) SetActiveProvider(name, model, language, apiKey string) {
+	if f.db != nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	f.mu.Lock()
+	f.configs = []ProviderInfo{{
+		Name:     name,
+		Model:    model,
+		Language: language,
+		APIKey:   apiKey,
+		IsActive: true,
+		Priority: 1,
+	}}
+	f.mu.Unlock()
+}
+
 // Close closes the underlying database connection.
 func (f *Factory) Close() error {
 	if f.db != nil {
@@ -61,48 +95,54 @@ func (f *Factory) GetActiveProvider() (Provider, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	// Debug: log ALL active providers to detect accidental multi-activation
-	debugRows, debugErr := f.db.Query(
-		"SELECT provider_name, model, priority, LENGTH(api_key) AS key_len FROM stt_providers WHERE is_active IS TRUE ORDER BY priority DESC",
-	)
-	if debugErr == nil {
-		defer debugRows.Close()
-		var activeList []map[string]any
-		for debugRows.Next() {
-			var name, model string
-			var priority, keyLen int
-			if scanErr := debugRows.Scan(&name, &model, &priority, &keyLen); scanErr == nil {
-				activeList = append(activeList, map[string]any{
-					"provider": name, "model": model, "priority": priority, "has_key": keyLen > 0,
-				})
-			}
-		}
-		logger.DebugCF("livekit", "All active STT providers in DB", map[string]any{
-			"active_providers": activeList,
-			"count":            len(activeList),
-		})
-	}
-
 	var providerName, apiKey, model string
-	err := f.db.QueryRow(
-		"SELECT provider_name, api_key, model FROM stt_providers WHERE is_active IS TRUE ORDER BY priority DESC LIMIT 1",
-	).Scan(&providerName, &apiKey, &model)
-
-	if err == sql.ErrNoRows {
-		// Default to deepgram if no provider is active
-		providerName = "deepgram"
-		logger.WarnCF("livekit", "No active provider found in database, using default", map[string]any{
-			"default_provider": providerName,
-		})
-	} else if err != nil {
-		return nil, fmt.Errorf("query active provider: %w", err)
+	if f.db == nil {
+		// Manager-API mode: pick the highest-priority active provider from the
+		// in-memory list fetched at startup.
+		providerName, apiKey, model = f.activeFromConfigs()
 	} else {
-		logger.DebugCF("livekit", "Found active provider in database", map[string]any{
-			"provider":    providerName,
-			"model":       model,
-			"has_api_key": len(apiKey) > 0,
-			"key_length":  len(apiKey),
-		})
+		// Debug: log ALL active providers to detect accidental multi-activation
+		debugRows, debugErr := f.db.Query(
+			"SELECT provider_name, model, priority, LENGTH(api_key) AS key_len FROM stt_providers WHERE is_active IS TRUE ORDER BY priority DESC",
+		)
+		if debugErr == nil {
+			defer debugRows.Close()
+			var activeList []map[string]any
+			for debugRows.Next() {
+				var name, model string
+				var priority, keyLen int
+				if scanErr := debugRows.Scan(&name, &model, &priority, &keyLen); scanErr == nil {
+					activeList = append(activeList, map[string]any{
+						"provider": name, "model": model, "priority": priority, "has_key": keyLen > 0,
+					})
+				}
+			}
+			logger.DebugCF("livekit", "All active STT providers in DB", map[string]any{
+				"active_providers": activeList,
+				"count":            len(activeList),
+			})
+		}
+
+		err := f.db.QueryRow(
+			"SELECT provider_name, api_key, model FROM stt_providers WHERE is_active IS TRUE ORDER BY priority DESC LIMIT 1",
+		).Scan(&providerName, &apiKey, &model)
+
+		if err == sql.ErrNoRows {
+			// Default to deepgram if no provider is active
+			providerName = "deepgram"
+			logger.WarnCF("livekit", "No active provider found in database, using default", map[string]any{
+				"default_provider": providerName,
+			})
+		} else if err != nil {
+			return nil, fmt.Errorf("query active provider: %w", err)
+		} else {
+			logger.DebugCF("livekit", "Found active provider in database", map[string]any{
+				"provider":    providerName,
+				"model":       model,
+				"has_api_key": len(apiKey) > 0,
+				"key_length":  len(apiKey),
+			})
+		}
 	}
 
 	baseProvider, ok := f.providers[providerName]
@@ -121,6 +161,26 @@ func (f *Factory) GetActiveProvider() (Provider, error) {
 	})
 
 	return provider, nil
+}
+
+// activeFromConfigs picks the highest-priority active provider from the
+// in-memory list (manager-API mode). Falls back to deepgram when none is active,
+// matching the DB path's ErrNoRows behavior.
+func (f *Factory) activeFromConfigs() (name, apiKey, model string) {
+	best := ProviderInfo{Priority: -1 << 31}
+	found := false
+	for _, p := range f.configs {
+		if p.IsActive && p.Priority > best.Priority {
+			best, found = p, true
+		}
+	}
+	if !found {
+		logger.WarnCF("livekit", "No active STT provider in manager config, using default", map[string]any{
+			"default_provider": "deepgram",
+		})
+		return "deepgram", "", ""
+	}
+	return best.Name, best.APIKey, best.Model
 }
 
 // UpdateProviderConfig updates or inserts provider configuration.

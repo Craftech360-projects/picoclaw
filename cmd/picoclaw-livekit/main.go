@@ -103,6 +103,26 @@ func main() {
 		os.Exit(1)
 	}
 	applyLiveKitRuntimeEnvOverrides(&lkCfg.Runtime)
+
+	// When the manager API is configured, seed the config with its active
+	// providers (LLM/STT/TTS) before building the startup provider — otherwise
+	// CreateProvider fails against the empty local model_list and logs a
+	// misleading "provider not found" warning. The manager is the source of truth.
+	var managerActive *managerActiveProviders
+	if strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if active, ferr := fetchManagerActiveProviders(ctx, lkCfg.ManagerAPI, managerAPIServiceKey()); ferr != nil {
+			logger.WarnCF("livekit", "Startup fetch of manager active providers failed; using local config", map[string]any{
+				"error": ferr.Error(),
+			})
+		} else {
+			applyManagerActiveProviders(cfg, active)
+			lkCfg = cfg.LiveKitService
+			managerActive = &active
+		}
+		cancel()
+	}
+
 	startupProvider, startupModelID, err := providers.CreateProvider(cfg)
 	if err != nil {
 		if strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != "" {
@@ -137,130 +157,156 @@ func main() {
 		"turn_timeout_seconds":              lkCfg.Runtime.TurnTimeoutSeconds,
 	})
 
-	// Initialize STT factory with PostgreSQL
-	sttDBSource := ""
-	sttDBURL := os.Getenv("STT_DATABASE_URL")
-	if sttDBURL == "" {
-		// Try to get from config file field if present
-		sttDBURL = cfg.LiveKitService.STT.DatabaseURL
-		if sttDBURL != "" {
-			sttDBSource = "config.livekit_service.stt.database_url"
-		}
-	} else {
-		sttDBSource = "env.STT_DATABASE_URL"
-	}
-	if sttDBURL == "" {
-		// Fallback to Supabase PostgreSQL URL from environment
-		sttDBURL = os.Getenv("DIRECT_URL")
-		if sttDBURL != "" {
-			sttDBSource = "env.DIRECT_URL"
-		}
-	}
-	if sttDBURL == "" {
-		fmt.Fprintln(os.Stderr, "Error creating STT factory: STT DB URL is empty.")
-		fmt.Fprintln(os.Stderr, "Set one of: STT_DATABASE_URL, PICOCLAW_LIVEKIT_STT_DATABASE_URL, or DIRECT_URL.")
-		os.Exit(1)
-	}
-
-	sttFactory, err := stt.NewFactory(sttDBURL)
-	if err != nil {
-		dbHost, dbUser := summarizeDBURL(sttDBURL)
-		fmt.Fprintf(os.Stderr, "Error creating STT factory: %v (source=%s, host=%s, user=%s)\n",
-			err, sttDBSource, dbHost, dbUser)
-		os.Exit(1)
-	}
-
-	logger.InfoCF("livekit", "STT factory initialized", map[string]any{
-		"db_source": sttDBSource,
-		"providers": sttFactory.ListProviders(),
-	})
-
-	// Seed providers from environment variables
-	if apiKey := lkCfg.DeepgramAPIKey(); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("deepgram", apiKey, "nova-2", 1); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Deepgram provider", map[string]any{
-				"error": err.Error(),
+	// Initialize STT factory. Prefer the manager API's active STT provider (the
+	// same /livekit/providers/active endpoint the LLM/TTS use); fall back to the
+	// Postgres stt_providers table only when the manager API is not configured.
+	var sttFactory *stt.Factory
+	sttFromManager := false
+	if managerActive != nil {
+		if mf, mErr := buildSTTFactoryFromActive(*managerActive); mErr != nil {
+			logger.WarnCF("livekit", "Manager-API STT init failed; falling back to DB", map[string]any{
+				"error": mErr.Error(),
+			})
+		} else if mf != nil {
+			sttFactory = mf
+			sttFromManager = true
+			managerModeSTTFactory = sttFactory // enable per-session live refresh
+			logger.InfoCF("livekit", "STT factory initialized", map[string]any{
+				"source":    "manager_api",
+				"providers": sttFactory.ListProviders(),
 			})
 		}
 	}
 
-	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("groq", apiKey, "whisper-large-v3", 5); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Groq provider", map[string]any{
-				"error": err.Error(),
-			})
+	if !sttFromManager {
+		sttDBSource := ""
+		sttDBURL := os.Getenv("STT_DATABASE_URL")
+		if sttDBURL == "" {
+			// Try to get from config file field if present
+			sttDBURL = cfg.LiveKitService.STT.DatabaseURL
+			if sttDBURL != "" {
+				sttDBSource = "config.livekit_service.stt.database_url"
+			}
+		} else {
+			sttDBSource = "env.STT_DATABASE_URL"
 		}
+		if sttDBURL == "" {
+			// Fallback to Supabase PostgreSQL URL from environment
+			sttDBURL = os.Getenv("DIRECT_URL")
+			if sttDBURL != "" {
+				sttDBSource = "env.DIRECT_URL"
+			}
+		}
+		if sttDBURL == "" {
+			fmt.Fprintln(os.Stderr, "Error creating STT factory: STT DB URL is empty.")
+			fmt.Fprintln(os.Stderr, "Set one of: STT_DATABASE_URL, PICOCLAW_LIVEKIT_STT_DATABASE_URL, or DIRECT_URL, or configure the manager API.")
+			os.Exit(1)
+		}
+
+		f, err := stt.NewFactory(sttDBURL)
+		if err != nil {
+			dbHost, dbUser := summarizeDBURL(sttDBURL)
+			fmt.Fprintf(os.Stderr, "Error creating STT factory: %v (source=%s, host=%s, user=%s)\n",
+				err, sttDBSource, dbHost, dbUser)
+			os.Exit(1)
+		}
+		sttFactory = f
+
+		logger.InfoCF("livekit", "STT factory initialized", map[string]any{
+			"db_source": sttDBSource,
+			"providers": sttFactory.ListProviders(),
+		})
 	}
 
-	if apiKey := os.Getenv("ASSEMBLYAI_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("assemblyai", apiKey, "universal", 2); err != nil {
-			logger.WarnCF("livekit", "Failed to configure AssemblyAI provider", map[string]any{
-				"error": err.Error(),
-			})
+	// Seed providers from environment variables (DB-backed factory only; the
+	// manager-API factory owns its provider list and has no DB to seed).
+	if !sttFromManager {
+		if apiKey := lkCfg.DeepgramAPIKey(); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("deepgram", apiKey, "nova-2", 1); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Deepgram provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
 
-	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("openai", apiKey, "whisper-1", 6); err != nil {
-			logger.WarnCF("livekit", "Failed to configure OpenAI provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("groq", apiKey, "whisper-large-v3", 5); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Groq provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
 
-	if apiKey := os.Getenv("CARTESIA_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("cartesia", apiKey, "ink-whisper", 7); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Cartesia provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("ASSEMBLYAI_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("assemblyai", apiKey, "universal", 2); err != nil {
+				logger.WarnCF("livekit", "Failed to configure AssemblyAI provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
 
-	if apiKey := os.Getenv("ELEVENLABS_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("elevenlabs", apiKey, "scribe_v2", 8); err != nil {
-			logger.WarnCF("livekit", "Failed to configure ElevenLabs provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("openai", apiKey, "whisper-1", 6); err != nil {
+				logger.WarnCF("livekit", "Failed to configure OpenAI provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
 
-	if apiKey := os.Getenv("GRADIUM_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("gradium", apiKey, "default", 15); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Gradium provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("CARTESIA_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("cartesia", apiKey, "ink-whisper", 7); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Cartesia provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
 
-	if apiKey := os.Getenv("MISTRAL_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("mistral", apiKey, "voxtral-mini-latest", 16); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Mistral provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("ELEVENLABS_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("elevenlabs", apiKey, "scribe_v2", 8); err != nil {
+				logger.WarnCF("livekit", "Failed to configure ElevenLabs provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-		// Alias for users who want provider_name=voxtral in database.
-		if err := sttFactory.SeedProviderConfig("voxtral", apiKey, "voxtral-mini-latest", 17); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Voxtral provider", map[string]any{
-				"error": err.Error(),
-			})
-		}
-	}
 
-	if apiKey := os.Getenv("SARVAM_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("sarvam", apiKey, "saaras:v3", 18); err != nil {
-			logger.WarnCF("livekit", "Failed to configure Sarvam provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("GRADIUM_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("gradium", apiKey, "default", 15); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Gradium provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
 
-	if apiKey := os.Getenv("XAI_API_KEY"); apiKey != "" {
-		if err := sttFactory.SeedProviderConfig("xai", apiKey, "stt", 19); err != nil {
-			logger.WarnCF("livekit", "Failed to configure xAI provider", map[string]any{
-				"error": err.Error(),
-			})
+		if apiKey := os.Getenv("MISTRAL_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("mistral", apiKey, "voxtral-mini-latest", 16); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Mistral provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
+			// Alias for users who want provider_name=voxtral in database.
+			if err := sttFactory.SeedProviderConfig("voxtral", apiKey, "voxtral-mini-latest", 17); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Voxtral provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
-	}
+
+		if apiKey := os.Getenv("SARVAM_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("sarvam", apiKey, "saaras:v3", 18); err != nil {
+				logger.WarnCF("livekit", "Failed to configure Sarvam provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
+		}
+
+		if apiKey := os.Getenv("XAI_API_KEY"); apiKey != "" {
+			if err := sttFactory.SeedProviderConfig("xai", apiKey, "stt", 19); err != nil {
+				logger.WarnCF("livekit", "Failed to configure xAI provider", map[string]any{
+					"error": err.Error(),
+				})
+			}
+		}
+	} // end seeding (DB-backed factory only)
 
 	ttsProvider, ttsSampleRate := buildTTSProvider(cfg, lkCfg)
 	managerAPIConfigured := strings.TrimSpace(managerAPIBaseURL(lkCfg.ManagerAPI)) != ""
@@ -1031,6 +1077,12 @@ func configureLiveKitSDKLogger() {
 func defaultConfigPath() string {
 	if configPath := os.Getenv(config.EnvConfig); configPath != "" {
 		return configPath
+	}
+
+	// Prefer a config.json in the current working directory (project folder)
+	// so `picoclaw-livekit.exe` run from the repo picks up the local file.
+	if _, err := os.Stat("config.json"); err == nil {
+		return "config.json"
 	}
 
 	home := os.Getenv(config.EnvHome)
