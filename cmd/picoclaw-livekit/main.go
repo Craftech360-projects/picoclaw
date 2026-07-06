@@ -820,6 +820,14 @@ func main() {
 				}
 			}
 		}
+		// Voice LLM sampling temperature. Use the configured value
+		// (agents.defaults.temperature) so it is tunable without a rebuild; fall
+		// back to 0.8 for storytelling variety. The old hardcoded 0.3 was
+		// near-greedy and made every child hear the same story.
+		voiceTemperature := 0.8
+		if t := sessionCfg.Agents.Defaults.Temperature; t != nil {
+			voiceTemperature = *t
+		}
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
 			Config:            sessionCfg,
 			Provider:          sessionProvider,
@@ -829,7 +837,7 @@ func main() {
 			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
 			LLMOptions: map[string]any{
 				"max_tokens":  voiceMaxTokens,
-				"temperature": 0.3,
+				"temperature": voiceTemperature,
 			},
 			SessionLanguageName:  sessionLanguagePolicy.DisplayName,
 			SessionLanguageCode:  sessionLanguagePolicy.RawCode,
