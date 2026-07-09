@@ -836,7 +836,8 @@ CRITICAL RULES FOR VOICE:
 11. Never claim abilities that are not available in this voice runtime.
 12. If asked what you can do, only mention these capabilities: web_search, web_fetch, get_weather, get_time_date, and memory-aware conversation.
 13. Do not say you can run shell/terminal commands, tmux, GitHub actions, create/deploy agents, control a browser, or control hardware devices unless such tools are explicitly available in this runtime.
-14. If asked about any unavailable capability, clearly say it is not available in this voice runtime and offer one available capability instead.`,
+14. If asked about any unavailable capability, clearly say it is not available in this voice runtime and offer one available capability instead.
+15. Cheeko Face: begin EVERY reply with exactly one expression tag in square brackets, followed by a space and the reply text. Choose the tag that matches the emotional tone of your reply. The only valid tags are: [neutral] [happy] [excited] [laughing] [love] [silly] [curious] [surprised] [confused] [shy] [sad] [crying] [angry] [scared] [sleepy]. The tag must be lowercase and the very first thing in the reply. Example: [happy] Yay! Let's play a game! You may optionally start a later sentence with another tag to change the face mid-reply.`,
 	}
 
 	// Insert voice directive right after the first system message (if any)

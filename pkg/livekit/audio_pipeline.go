@@ -25,6 +25,12 @@ import (
 
 var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
 var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
+
+// Cheeko Face expression tag: "[" + 2-12 lowercase letters + "]" at the start of a
+// speech chunk (mirrors the firmware parser). Stripped before TTS so it is never
+// spoken; the tagged text still reaches the device via speech_created so the
+// firmware can drive the face.
+var voiceExpressionTagRE = regexp.MustCompile(`^\s*(?:\[[a-z]{2,12}\]\s*)+`)
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
 var dynamicGreetingCooldownUntilUnix atomic.Int64
 
@@ -67,6 +73,7 @@ func isRateLimitError(err error) bool {
 }
 
 func sanitizeVoiceTextForTTS(text string) string {
+	text = voiceExpressionTagRE.ReplaceAllString(text, "")
 	text = voiceReasoningBlockRE.ReplaceAllString(text, "")
 	text = voiceReasoningLineRE.ReplaceAllString(text, "")
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")
@@ -144,7 +151,8 @@ func mergeFinalTranscriptChunk(current, next string) string {
 }
 
 type speechChunkDeduper struct {
-	last string
+	last      string
+	announced bool
 }
 
 func (d *speechChunkDeduper) ShouldSpeak(text string) bool {
@@ -255,7 +263,7 @@ type AudioPipeline struct {
 	failureCooldown      time.Duration
 	turnTimeout          time.Duration
 	turns                voiceTurnController
-	publishSpeechCreated func()
+	publishSpeechCreated func(text string)
 	publishAgentState    func(oldState, newState string)
 	queueMu              sync.Mutex
 	queuedAnnouncements  []AsyncEvent
@@ -609,9 +617,9 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 			ap.failureCooldown = time.Duration(sec) * time.Second
 		}
 	}
-	ap.publishSpeechCreated = func() {
+	ap.publishSpeechCreated = func(text string) {
 		if ap.session != nil {
-			_ = ap.session.PublishSpeechCreated("")
+			_ = ap.session.PublishSpeechCreated(text)
 		}
 	}
 	ap.publishAgentState = func(oldState, newState string) {
@@ -704,7 +712,7 @@ func (ap *AudioPipeline) speakTurnTimeoutFallback(sessionKey string, cause error
 	})
 	ap.setTTSCancel(cancel)
 	ap.publishState("thinking", "speaking")
-	ap.publishSpeechCreated()
+	ap.publishSpeechCreated("")
 	ap.synthesizeAndPlay(ctx, ap.retryFallbackPhrase())
 }
 
@@ -787,7 +795,6 @@ func (ap *AudioPipeline) HandleUtterance(ctx context.Context, sessionKey string,
 			}
 			if ap.session != nil {
 				ap.publishState("thinking", "speaking")
-				ap.publishSpeechCreated()
 			}
 			if fillerCancel != nil {
 				fillerCancel()                       // Cancel filler if LLM starts responding quickly
@@ -1013,7 +1020,7 @@ func (ap *AudioPipeline) TriggerGreetingFallbackOnly(ctx context.Context, sessio
 	if ap.session != nil {
 		ap.publishState("listening", "speaking")
 	}
-	ap.publishSpeechCreated()
+	ap.publishSpeechCreated("")
 	ap.synthesizeAndPlay(turn.ctx, ap.greetingFallbackPhrase())
 	if ap.turns.IsActive(turn) {
 		ap.flushSilenceForContext(turn.ctx, 300)
@@ -1050,7 +1057,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 		})
 		ap.setTTSCancel(turn.cancel)
 		ap.publishState("listening", "speaking")
-		ap.publishSpeechCreated()
+		ap.publishSpeechCreated("")
 		ap.synthesizeAndPlay(turn.ctx, ap.greetingFallbackPhrase())
 		if ap.turns.IsActive(turn) {
 			ap.flushSilenceForContext(turn.ctx, 300)
@@ -1096,7 +1103,6 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 					ap.logTurnLatency(meta, "llm_first_token", time.Since(meta.LLMStart), nil)
 				}
 				ap.publishState("thinking", "speaking")
-				ap.publishSpeechCreated()
 			}
 			for _, r := range chunk {
 				if sentence := splitter.Feed(r); sentence != "" {
@@ -1129,7 +1135,7 @@ func (ap *AudioPipeline) TriggerGreeting(ctx context.Context, sessionKey string)
 				if ap.session != nil {
 					ap.publishState("listening", "speaking")
 				}
-				ap.publishSpeechCreated()
+				ap.publishSpeechCreated("")
 				ap.synthesizeAndPlay(turn.ctx, ap.greetingFallbackPhrase())
 				ap.flushSilenceForContext(turn.ctx, 300)
 				if ap.session != nil {
@@ -1694,7 +1700,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		ap.setTTSCancel(turn.cancel)
 		if ap.session != nil {
 			ap.publishState("listening", "speaking")
-			ap.publishSpeechCreated()
+			ap.publishSpeechCreated("")
 		}
 		ap.synthesizeAndPlay(turn.ctx, content)
 		if ap.turns.IsActive(turn) && ap.session != nil {
@@ -1725,7 +1731,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 		ap.setTTSCancel(turn.cancel)
 		if ap.session != nil {
 			ap.publishState("listening", "speaking")
-			ap.publishSpeechCreated()
+			ap.publishSpeechCreated("")
 		}
 		ap.synthesizeAndPlay(turn.ctx, ap.proactiveAnnouncementFallbackPhrase())
 		if ap.turns.IsActive(turn) && ap.session != nil {
@@ -1776,7 +1782,6 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 				}
 				if ap.session != nil {
 					ap.publishState("thinking", "speaking")
-					ap.publishSpeechCreated()
 				}
 			}
 			for _, r := range chunk {
@@ -1808,7 +1813,7 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 			if shouldFallback {
 				if ap.session != nil {
 					ap.publishState("listening", "speaking")
-					ap.publishSpeechCreated()
+					ap.publishSpeechCreated("")
 				}
 				ap.synthesizeAndPlay(turn.ctx, ap.proactiveAnnouncementFallbackPhrase())
 				ap.flushSilenceForContext(turn.ctx, 300)
@@ -2065,6 +2070,15 @@ func (ap *AudioPipeline) synthesizeDeduped(ctx context.Context, deduper *speechC
 			"text_redacted": ap.logTextRedacted(sessionKey),
 		})
 		return
+	}
+	// First spoken chunk of the turn carries the raw (possibly expression-tagged)
+	// text to the device via speech_created; the gateway's tts-start dedup means
+	// only this first publish reaches the device with text.
+	if deduper != nil && !deduper.announced {
+		deduper.announced = true
+		if ap.publishSpeechCreated != nil {
+			ap.publishSpeechCreated(strings.TrimSpace(text))
+		}
 	}
 	ap.synthesizeAndPlay(ctx, text)
 }

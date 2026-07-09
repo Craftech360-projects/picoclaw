@@ -540,7 +540,7 @@ func TestTriggerGreetingPublishesSpeechCreatedOnFirstChunk(t *testing.T) {
 		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
 	}, bridge, nil, nil)
 	speechCreated := make(chan struct{}, 1)
-	pipeline.publishSpeechCreated = func() {
+	pipeline.publishSpeechCreated = func(string) {
 		speechCreated <- struct{}{}
 	}
 
@@ -566,7 +566,7 @@ func TestTriggerGreetingPublishesSpeechCreatedOnRateLimitFallback(t *testing.T) 
 		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
 	}, bridge, nil, nil)
 	speechCreated := make(chan struct{}, 1)
-	pipeline.publishSpeechCreated = func() {
+	pipeline.publishSpeechCreated = func(string) {
 		select {
 		case speechCreated <- struct{}{}:
 		default:
@@ -595,7 +595,7 @@ func TestHandleAsyncEventRateLimitedPublishesFallbackSpeechCreated(t *testing.T)
 		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
 	}, bridge, nil, nil)
 	speechCreated := make(chan struct{}, 1)
-	pipeline.publishSpeechCreated = func() {
+	pipeline.publishSpeechCreated = func(string) {
 		select {
 		case speechCreated <- struct{}{}:
 		default:
@@ -630,7 +630,7 @@ func TestHandleAsyncEventCooldownSkipsSpontaneousLLMCall(t *testing.T) {
 		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
 	}, bridge, nil, nil)
 	speechCreated := make(chan struct{}, 1)
-	pipeline.publishSpeechCreated = func() {
+	pipeline.publishSpeechCreated = func(string) {
 		select {
 		case speechCreated <- struct{}{}:
 		default:
@@ -995,4 +995,38 @@ func waitForCancelCount(t *testing.T, counter *atomic.Int32, want int32) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("cancel count = %d, want %d", counter.Load(), want)
+}
+
+func TestSanitizeVoiceTextStripsExpressionTags(t *testing.T) {
+	cases := map[string]string{
+		"[happy] Yay! Let's play a game!": "Yay! Let's play a game!",
+		"[zzzz] hi":                       "hi", // unknown lowercase tag still stripped (firmware parity)
+		"[sleepy][silly] night":           "night",
+		"[OK!] hi":                        "[OK!] hi", // uppercase/punctuation: not a tag
+		"[3] hi":                          "[3] hi",   // digits: not a tag
+		"[verylongtagnamex] hi":           "[verylongtagnamex] hi",
+		"no tag here":                     "no tag here",
+	}
+	for in, want := range cases {
+		if got := sanitizeVoiceTextForTTS(in); got != want {
+			t.Errorf("sanitizeVoiceTextForTTS(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSynthesizeDedupedAnnouncesFirstChunkWithTag(t *testing.T) {
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: &ParticipantState{identity: "device-a", sessionKey: "livekit:device:a"},
+	}, nil, nil, nil)
+	var announced []string
+	pipeline.publishSpeechCreated = func(text string) { announced = append(announced, text) }
+
+	deduper := &speechChunkDeduper{}
+	pipeline.synthesizeDeduped(context.Background(), deduper, "[happy] Hello there, friend!")
+	pipeline.synthesizeDeduped(context.Background(), deduper, "[sad] Second sentence goes here.")
+
+	if len(announced) != 1 || announced[0] != "[happy] Hello there, friend!" {
+		t.Fatalf("expected one announce carrying the tagged first chunk, got %v", announced)
+	}
 }

@@ -544,7 +544,7 @@ func (rs *RoomSession) handleEndPrompt(prompt string) {
 	}
 	rs.PublishAgentState("listening", "thinking")
 	rs.PublishAgentState("thinking", "speaking")
-	pipeline.publishSpeechCreated()
+	pipeline.publishSpeechCreated("")
 	pipeline.synthesizeAndPlay(ctx, farewellText)
 	pipeline.flushSilenceForContext(ctx, liveKitFinalTransportTailMs)
 	rs.PublishAgentState("speaking", "listening")
@@ -790,7 +790,7 @@ func (rs *RoomSession) speakSTTUnavailableFallback(cause error) {
 	})
 	pipeline.setTTSCancel(cancel)
 	pipeline.publishState("listening", "speaking")
-	pipeline.publishSpeechCreated()
+	pipeline.publishSpeechCreated("")
 	pipeline.synthesizeAndPlay(ctx, sttUnavailableFallbackPhrase())
 	pipeline.publishState("speaking", "listening")
 }
