@@ -7,6 +7,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 // MemoryStore manages persistent memory for the agent.
@@ -63,6 +65,55 @@ func (ms *MemoryStore) WriteLongTerm(content string) error {
 	// Use unified atomic write utility with explicit sync for flash storage reliability.
 	// Using 0o600 (owner read/write only) for secure default permissions.
 	return fileutil.WriteFileAtomic(ms.memoryFile, []byte(content), 0o600)
+}
+
+// LongTermSize returns the byte size of MEMORY.md (0 if it does not exist).
+func (ms *MemoryStore) LongTermSize() int {
+	if info, err := os.Stat(ms.memoryFile); err == nil {
+		return int(info.Size())
+	}
+	return 0
+}
+
+// ConsolidateLongTerm compresses MEMORY.md via one LLM pass when it exceeds
+// thresholdBytes: it merges duplicate/related entries into fewer durable lines,
+// PRESERVING facts, then rewrites the file. It never truncates or drops facts
+// blindly, and on an empty LLM reply it leaves the file unchanged. Returns
+// (true, nil) only when the file was rewritten.
+func (ms *MemoryStore) ConsolidateLongTerm(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	model string,
+	thresholdBytes int,
+) (bool, error) {
+	if provider == nil {
+		return false, nil
+	}
+	current := ms.ReadLongTerm()
+	if len(current) == 0 || len(current) <= thresholdBytes {
+		return false, nil
+	}
+
+	prompt := "You are compacting a long-term memory file for a children's voice assistant.\n" +
+		"Rewrite the memories below as a SHORTER bullet list that preserves every distinct fact.\n" +
+		"Merge duplicates and related notes into one line (e.g. 'loves dinosaurs' + 'asked about T-rex' -> 'Loves dinosaurs, especially T-rex.').\n" +
+		"Do NOT invent facts. Do NOT drop any distinct fact. Output ONLY the rewritten bullet list.\n\n" +
+		"MEMORIES:\n" + current
+
+	resp, err := provider.Chat(ctx,
+		[]providers.Message{{Role: "user", Content: prompt}},
+		nil, model, map[string]any{"temperature": 0.2})
+	if err != nil {
+		return false, err
+	}
+	consolidated := strings.TrimSpace(resp.Content)
+	if consolidated == "" {
+		return false, nil // never overwrite good memory with nothing
+	}
+	if err := ms.WriteLongTerm(consolidated + "\n"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ReadToday reads today's daily note.
