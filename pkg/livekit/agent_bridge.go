@@ -574,6 +574,20 @@ func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey st
 
 	ab.sessions.SetSummary(sessionKey, newSummary)
 	_ = ab.sessions.Save(sessionKey)
+
+	// Bound MEMORY.md so it stops inflating the per-turn prefix on non-caching
+	// models. Runs at session end only; consolidation preserves facts.
+	if ab.contextBuilder != nil && ab.provider != nil {
+		if mem := ab.contextBuilder.Memory(); mem != nil {
+			const memConsolidateThresholdBytes = 4096 // ~1k tokens
+			if changed, cErr := mem.ConsolidateLongTerm(ctx, ab.provider, ab.modelID, memConsolidateThresholdBytes); cErr != nil {
+				logger.WarnCF("livekit", "MEMORY.md consolidation failed", map[string]any{"error": cErr.Error()})
+			} else if changed {
+				logger.InfoCF("livekit", "MEMORY.md consolidated at session end", nil)
+			}
+		}
+	}
+
 	return newSummary, len(batch), nil
 }
 

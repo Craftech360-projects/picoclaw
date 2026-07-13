@@ -58,6 +58,11 @@ func (cb *ContextBuilder) WithSplitOnMarker(enabled bool) *ContextBuilder {
 	return cb
 }
 
+// Memory returns the ContextBuilder's underlying MemoryStore.
+func (cb *ContextBuilder) Memory() *MemoryStore {
+	return cb.memory
+}
+
 func getGlobalConfigDir() string {
 	if home := os.Getenv(config.EnvHome); home != "" {
 		return home

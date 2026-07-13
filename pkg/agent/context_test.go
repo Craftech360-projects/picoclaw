@@ -306,3 +306,10 @@ func TestSanitizeHistoryForProvider_PartialToolResultsInMiddle(t *testing.T) {
 	}
 	assertRoles(t, result, "user", "assistant", "tool", "assistant", "user", "user", "assistant", "tool", "assistant")
 }
+
+func TestContextBuilder_MemoryAccessor(t *testing.T) {
+	cb := NewContextBuilder(t.TempDir())
+	if cb.Memory() == nil {
+		t.Fatal("ContextBuilder.Memory() should not be nil")
+	}
+}
