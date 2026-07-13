@@ -264,6 +264,8 @@ func applyManagerTTSProvider(cfg *config.Config, ttsCfg managerActiveTTSProvider
 		cfg.LiveKitService.SetCartesiaAPIKey(key)
 	case "deepgram":
 		cfg.LiveKitService.SetDeepgramAPIKey(key)
+	case "smallest", "smallestai":
+		cfg.LiveKitService.SetSmallestAPIKey(key)
 	case "inworld":
 		cfg.LiveKitService.SetInworldAPIKey(key)
 	default:

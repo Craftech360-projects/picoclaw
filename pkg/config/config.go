@@ -920,6 +920,7 @@ type LiveKitServiceConfig struct {
 	deepgramAPIKey string
 	inworldAPIKey  string
 	cartesiaAPIKey string
+	smallestAPIKey string
 	secDirty       bool
 }
 
@@ -933,6 +934,8 @@ func (c *LiveKitServiceConfig) InworldAPIKey() string      { return c.inworldAPI
 func (c *LiveKitServiceConfig) SetInworldAPIKey(k string)  { c.inworldAPIKey = k; c.secDirty = true }
 func (c *LiveKitServiceConfig) CartesiaAPIKey() string     { return c.cartesiaAPIKey }
 func (c *LiveKitServiceConfig) SetCartesiaAPIKey(k string) { c.cartesiaAPIKey = k; c.secDirty = true }
+func (c *LiveKitServiceConfig) SmallestAPIKey() string     { return c.smallestAPIKey }
+func (c *LiveKitServiceConfig) SetSmallestAPIKey(k string) { c.smallestAPIKey = k; c.secDirty = true }
 
 // ModelConfig represents a model-centric provider configuration.
 // It allows adding new providers (especially OpenAI-compatible ones) via configuration only.
@@ -1691,6 +1694,9 @@ func applySecurityConfig(cfg *Config, sec *SecurityConfig) error {
 		if sec.LiveKitService.CartesiaAPIKey != "" {
 			cfg.LiveKitService.SetCartesiaAPIKey(sec.LiveKitService.CartesiaAPIKey)
 		}
+		if sec.LiveKitService.SmallestAPIKey != "" {
+			cfg.LiveKitService.SetSmallestAPIKey(sec.LiveKitService.SmallestAPIKey)
+		}
 	}
 
 	cfg.security = sec
@@ -1922,6 +1928,7 @@ func SaveConfig(path string, cfg *Config) error {
 			DeepgramAPIKey: cfg.LiveKitService.DeepgramAPIKey(),
 			InworldAPIKey:  cfg.LiveKitService.InworldAPIKey(),
 			CartesiaAPIKey: cfg.LiveKitService.CartesiaAPIKey(),
+			SmallestAPIKey: cfg.LiveKitService.SmallestAPIKey(),
 		}
 		cfg.LiveKitService.secDirty = false
 	}

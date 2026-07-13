@@ -33,6 +33,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/inworld_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/smallest_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
@@ -1485,6 +1486,8 @@ func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tt
 	factory.Register("inworld", inworld_tts.NewBuilder())
 	factory.Register("cartesia", cartesia_tts.NewBuilder())
 	factory.Register("deepgram", deepgram_tts.NewBuilder())
+	factory.Register("smallest", smallest_tts.NewBuilder())
+	factory.Register("smallestai", smallest_tts.NewBuilder())
 
 	return factory.Create(cfg, lkCfg)
 }

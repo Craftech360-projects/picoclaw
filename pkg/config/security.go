@@ -151,6 +151,7 @@ type LiveKitServiceSecurity struct {
 	DeepgramAPIKey string `yaml:"deepgram_api_key,omitempty" env:"PICOCLAW_LIVEKIT_DEEPGRAM_API_KEY"`
 	InworldAPIKey  string `yaml:"inworld_api_key,omitempty"  env:"PICOCLAW_LIVEKIT_INWORLD_API_KEY"`
 	CartesiaAPIKey string `yaml:"cartesia_api_key,omitempty" env:"PICOCLAW_LIVEKIT_CARTESIA_API_KEY"`
+	SmallestAPIKey string `yaml:"smallest_api_key,omitempty" env:"PICOCLAW_LIVEKIT_SMALLEST_API_KEY"`
 }
 
 type WebToolsSecurity struct {
