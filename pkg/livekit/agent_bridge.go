@@ -259,6 +259,15 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		languageLockEnabled:       cfg.LanguageLockEnabled,
 		allowedToolNames:          normalizeAllowedToolNames(cfg.AllowedToolNames),
 	}
+	// If the manager API supplied no tool allowlist, fall back to the voice
+	// default so unusable tool schemas don't inflate every turn's prefix. An
+	// explicit config allowlist always wins.
+	if len(ab.allowedToolNames) == 0 {
+		ab.allowedToolNames = normalizeAllowedToolNames(defaultVoiceToolAllowlist())
+		logger.InfoCF("livekit", "Applied default voice tool allowlist", map[string]any{
+			"count": len(ab.allowedToolNames),
+		})
+	}
 	// Pin a stable prompt_cache_key so OpenAI/Azure route this agent's turns to
 	// the same prefix cache (mirrors AgentLoop, which keys on agent.ID). The
 	// static system prefix is identical across every session of this agent, so
@@ -1437,6 +1446,17 @@ func toolExecutionContextErrorResult(toolName string, err error) *tools.ToolResu
 		return tools.ErrorResult(fmt.Sprintf("tool %q canceled: %v", toolName, err)).WithError(err)
 	}
 	return tools.ErrorResult(fmt.Sprintf("tool %q canceled", toolName))
+}
+
+// defaultVoiceToolAllowlist is the set of tools the voice runtime actually
+// exposes (mirrors the Voice Mode directive and prioritizeVoiceToolDefs). Used
+// as a fallback when the manager API supplies no explicit allowlist, so we stop
+// shipping unusable tool schemas in the per-turn prefix.
+func defaultVoiceToolAllowlist() []string {
+	return []string{
+		"get_weather", "get_time_date", "web_search", "web_fetch",
+		"read_file", "write_file", "list_dir",
+	}
 }
 
 func normalizeAllowedToolNames(names []string) map[string]struct{} {
