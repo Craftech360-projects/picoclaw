@@ -102,6 +102,7 @@ type usageState struct {
 	totalResponseDurationSecond float64
 	inputTokens                 int
 	inputTextTokens             int
+	inputCachedTokens           int
 	outputTokens                int
 	outputTextTokens            int
 }
@@ -247,7 +248,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		maxIterations:             cfg.MaxIterations,
 		toolExecutionTimeout:      toolTimeout,
 		logContentPolicy:          newLogContentPolicy(cfg.DetailedTraceEnabled, cfg.TraceSampleRate),
-		llmOptions:                cfg.LLMOptions,
+		llmOptions:                cloneOptions(cfg.LLMOptions),
 		proactiveLLMOptions:       buildProactiveLLMOptions(cfg.LLMOptions),
 		asyncEventChan:            asyncChan,
 		runtimeEventChan:          runtimeChan,
@@ -258,6 +259,23 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		languageLockEnabled:       cfg.LanguageLockEnabled,
 		allowedToolNames:          normalizeAllowedToolNames(cfg.AllowedToolNames),
 	}
+	// Pin a stable prompt_cache_key so OpenAI/Azure route this agent's turns to
+	// the same prefix cache (mirrors AgentLoop, which keys on agent.ID). The
+	// static system prefix is identical across every session of this agent, so
+	// keying on the agent ID maximizes reuse. Gated host-side by
+	// supportsPromptCacheKey — non-OpenAI hosts drop the field. A config-supplied
+	// key wins (cloneOptions preserves it, so we only set when absent).
+	if cfg.AgentInstance != nil {
+		if id := strings.TrimSpace(cfg.AgentInstance.ID); id != "" {
+			if _, ok := ab.llmOptions["prompt_cache_key"]; !ok {
+				ab.llmOptions["prompt_cache_key"] = id
+			}
+			if _, ok := ab.proactiveLLMOptions["prompt_cache_key"]; !ok {
+				ab.proactiveLLMOptions["prompt_cache_key"] = id
+			}
+		}
+	}
+
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
 	ab.sessionLanguageName = policy.DisplayName
 	ab.sessionLanguageCode = policy.RawCode
@@ -1770,6 +1788,26 @@ func (ab *AgentBridge) recordUsage(usage *providers.UsageInfo, elapsed time.Dura
 	ab.usage.outputTokens += usage.CompletionTokens
 	ab.usage.inputTextTokens += usage.PromptTokens
 	ab.usage.outputTextTokens += usage.CompletionTokens
+
+	cached := 0
+	if usage.PromptTokensDetails != nil {
+		cached = usage.PromptTokensDetails.CachedTokens
+	}
+	ab.usage.inputCachedTokens += cached
+
+	// Per-turn token log. cache_hit_ratio = cached / prompt_tokens is the
+	// signal for whether the static prefix is actually being reused; a ratio
+	// stuck near 0 across a long session means the cache is missing every turn.
+	cacheHitRatio := 0.0
+	if usage.PromptTokens > 0 {
+		cacheHitRatio = float64(cached) / float64(usage.PromptTokens)
+	}
+	logger.InfoCF("livekit", "LLM token usage", map[string]any{
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"cached_tokens":     cached,
+		"cache_hit_ratio":   cacheHitRatio,
+	})
 }
 
 // UsageSnapshot returns aggregated usage counters for this voice session.
@@ -1790,7 +1828,7 @@ func (ab *AgentBridge) UsageSnapshot() UsageSnapshot {
 		InputTokens:                 ab.usage.inputTokens,
 		InputAudioTokens:            0,
 		InputTextTokens:             ab.usage.inputTextTokens,
-		InputCachedTokens:           0,
+		InputCachedTokens:           ab.usage.inputCachedTokens,
 		OutputTokens:                ab.usage.outputTokens,
 		OutputAudioTokens:           0,
 		OutputTextTokens:            ab.usage.outputTextTokens,

@@ -937,6 +937,42 @@ func TestProviderChat_PromptCacheKeyOmittedForNonOpenAI(t *testing.T) {
 	}
 }
 
+// TestProviderChatStream_RequestsUsageAndParsesCachedTokens verifies the
+// streaming path asks for a final usage chunk (stream_options.include_usage) —
+// without it OpenAI/OpenRouter omit usage entirely — and that the usage-only
+// chunk's prompt_tokens_details.cached_tokens is parsed into the response.
+func TestProviderChatStream_RequestsUsageAndParsesCachedTokens(t *testing.T) {
+	var requestBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A text delta, then a final usage-only chunk (empty choices), then DONE.
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":768}}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	resp, err := p.ChatStream(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4.1-mini", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+
+	so, ok := requestBody["stream_options"].(map[string]any)
+	if !ok || so["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage not requested; got %v", requestBody["stream_options"])
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokensDetails == nil ||
+		resp.Usage.PromptTokensDetails.CachedTokens != 768 {
+		t.Fatalf("cached_tokens not parsed from stream usage chunk: %+v", resp.Usage)
+	}
+}
+
 func TestSupportsPromptCacheKey(t *testing.T) {
 	tests := []struct {
 		apiBase string

@@ -253,6 +253,11 @@ func (p *Provider) ChatStream(
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	requestBody["stream"] = true
+	// Ask for a final usage chunk. OpenAI-spec streaming omits the usage object
+	// entirely unless this is set, which would zero out all token accounting
+	// (incl. prompt_tokens_details.cached_tokens) on the streaming path. This is
+	// standard OpenAI-compat and honored by OpenRouter/OpenAI/Azure/etc.
+	requestBody["stream_options"] = map[string]any{"include_usage": true}
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {

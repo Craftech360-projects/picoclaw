@@ -42,9 +42,18 @@ type ReasoningDetail struct {
 }
 
 type UsageInfo struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails carries the breakdown of prompt_tokens returned by
+// OpenAI-compatible providers. CachedTokens is the portion of the prompt that
+// hit the provider's prefix cache (billed at a discount) — the single most
+// important number for judging whether prompt caching is actually working.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // CacheControl marks a content block for LLM-side prefix caching.
