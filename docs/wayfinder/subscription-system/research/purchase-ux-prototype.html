@@ -1,0 +1,198 @@
+<!-- PROTOTYPE — throwaway UX mockup for wayfinder ticket 014. Not production code. Delete or absorb after reaction. -->
+<title>Cheeko Subscription UX — Prototype</title>
+<style>
+  :root{
+    --pg-bg:#faf9f7; --pg-ink:#2a2723; --pg-mut:#8a857d; --pg-line:#e6e2db; --pg-chip:#efece6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --pg-bg:#191817; --pg-ink:#ece9e4; --pg-mut:#8f8a82; --pg-line:#33312e; --pg-chip:#242321; }
+  }
+  :root[data-theme="dark"]{ --pg-bg:#191817; --pg-ink:#ece9e4; --pg-mut:#8f8a82; --pg-line:#33312e; --pg-chip:#242321; }
+  :root[data-theme="light"]{ --pg-bg:#faf9f7; --pg-ink:#2a2723; --pg-mut:#8a857d; --pg-line:#e6e2db; --pg-chip:#efece6; }
+
+  body{ background:var(--pg-bg); color:var(--pg-ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; margin:0; padding:20px 16px 96px; }
+  .wrap{ max-width:980px; margin:0 auto; }
+  h1{ font-size:19px; margin:0 0 2px; }
+  .sub{ color:var(--pg-mut); font-size:13px; margin:0 0 18px; }
+  .tabs{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px; }
+  .tab{ border:1px solid var(--pg-line); background:transparent; color:var(--pg-ink); border-radius:999px; padding:7px 14px; font-size:13px; cursor:pointer; }
+  .tab[aria-selected="true"]{ background:var(--pg-ink); color:var(--pg-bg); border-color:var(--pg-ink); }
+  .tab:focus-visible,.vbtn:focus-visible{ outline:2px solid #0B5FFF; outline-offset:2px; }
+  .stage{ border:1px solid var(--pg-line); border-radius:16px; overflow:hidden; }
+  .statebar{ font-size:12px; color:var(--pg-mut); padding:10px 4px 0; }
+  .vbar{ position:fixed; left:50%; transform:translateX(-50%); bottom:16px; display:flex; gap:6px; background:var(--pg-chip); border:1px solid var(--pg-line); border-radius:999px; padding:6px; box-shadow:0 6px 24px rgba(0,0,0,.14); }
+  .vbtn{ border:0; background:transparent; color:var(--pg-ink); border-radius:999px; padding:8px 16px; font-size:13px; cursor:pointer; }
+  .vbtn[aria-pressed="true"]{ background:var(--pg-ink); color:var(--pg-bg); }
+  @media (prefers-reduced-motion: no-preference){ .canvas{ transition:background .25s; } }
+
+  /* ---------- variant canvas ---------- */
+  .canvas{ padding:32px 28px 40px; min-height:520px;
+    background:var(--c-bg); color:var(--c-ink); font-family:var(--c-font); }
+  .canvas h2{ font-size:var(--c-h2,26px); line-height:1.15; margin:0 0 4px; text-wrap:balance; font-weight:var(--c-h2w,800); letter-spacing:var(--c-h2ls,0); }
+  .canvas .lead{ color:var(--c-mut); margin:0 0 22px; font-size:14px; }
+
+  /* variant tokens */
+  .vA{ --c-bg:#FFF8ED; --c-card:#ffffff; --c-ink:#023047; --c-mut:#6b7d8a; --c-line:#f2e4c9;
+       --c-acc:#FB8500; --c-acc2:#FFB703; --c-good:#2a9d8f; --c-r:22px; --c-font:ui-rounded,"SF Pro Rounded","Segoe UI",system-ui,sans-serif; --c-h2:28px; }
+  .vB{ --c-bg:#ffffff; --c-card:#ffffff; --c-ink:#101828; --c-mut:#667085; --c-line:#e4e7ec;
+       --c-acc:#0B5FFF; --c-acc2:#0B5FFF; --c-good:#12805c; --c-r:10px; --c-font:system-ui,-apple-system,"Segoe UI",sans-serif; --c-h2:24px; --c-h2w:700; }
+  .vC{ --c-bg:#1A1B3A; --c-card:#242552; --c-ink:#F3EFFF; --c-mut:#9a94c2; --c-line:#34356b;
+       --c-acc:#FFB59E; --c-acc2:#B8A9E8; --c-good:#7fd4b5; --c-r:18px; --c-font:Georgia,"Times New Roman",serif; --c-h2:30px; --c-h2w:600; --c-h2ls:.2px; }
+
+  .banner{ background:var(--c-card); border:1.5px dashed var(--c-acc); border-radius:var(--c-r); padding:12px 16px; font-size:14px; margin-bottom:22px; }
+  .toggle{ display:inline-flex; border:1px solid var(--c-line); border-radius:999px; overflow:hidden; margin-bottom:20px; }
+  .toggle button{ border:0; padding:8px 18px; font-size:13px; background:transparent; color:var(--c-ink); cursor:pointer; font-family:inherit; }
+  .toggle button[aria-pressed="true"]{ background:var(--c-acc); color:var(--c-bg); font-weight:700; }
+  .plans{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; }
+  .plan{ background:var(--c-card); border:1px solid var(--c-line); border-radius:var(--c-r); padding:20px; position:relative; }
+  .plan.hero{ border:2px solid var(--c-acc); box-shadow:0 8px 28px rgba(0,0,0,.10); }
+  .plan .tag{ position:absolute; top:-11px; left:18px; background:var(--c-acc); color:var(--c-bg); font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; border-radius:999px; padding:3px 10px; font-family:system-ui,sans-serif; }
+  .plan h3{ margin:2px 0 2px; font-size:16px; }
+  .price{ font-size:30px; font-weight:800; font-variant-numeric:tabular-nums; margin:6px 0 2px; }
+  .price small{ font-size:13px; font-weight:400; color:var(--c-mut); }
+  .was{ font-size:12px; color:var(--c-mut); text-decoration:line-through; min-height:16px; display:block; }
+  .plan ul{ list-style:none; margin:12px 0 16px; padding:0; font-size:13.5px; display:grid; gap:7px; }
+  .plan li::before{ content:"✓ "; color:var(--c-good); font-weight:700; }
+  .cta{ width:100%; border:0; border-radius:calc(var(--c-r) - 8px); padding:12px; font-size:14px; font-weight:700; cursor:pointer; background:var(--c-chipbg,transparent); border:1.5px solid var(--c-acc); color:var(--c-acc); font-family:inherit; }
+  .hero .cta{ background:var(--c-acc); color:var(--c-bg); }
+  .fine{ font-size:12px; color:var(--c-mut); margin-top:18px; }
+
+  .sheet{ max-width:430px; margin:0 auto; background:var(--c-card); border:1px solid var(--c-line); border-radius:var(--c-r); padding:22px; }
+  .row{ display:flex; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid var(--c-line); font-size:14px; }
+  .row:last-of-type{ border-bottom:0; }
+  .row b{ font-variant-numeric:tabular-nums; }
+  .paybtn{ width:100%; margin-top:14px; border:0; border-radius:10px; padding:14px; background:var(--c-acc); color:var(--c-bg); font-size:15px; font-weight:800; cursor:pointer; font-family:inherit; }
+  .upinote{ font-size:12.5px; color:var(--c-mut); margin-top:12px; line-height:1.55; }
+  .rzp{ display:flex; align-items:center; gap:8px; justify-content:center; margin-top:14px; font-size:12px; color:var(--c-mut); }
+  .rzp span{ background:#072654; color:#fff; border-radius:4px; padding:2px 7px; font-size:11px; font-weight:700; font-family:system-ui,sans-serif; }
+
+  .pill{ display:inline-block; border-radius:999px; padding:3px 10px; font-size:11.5px; font-weight:700; font-family:system-ui,sans-serif; }
+  .pill.ok{ background:color-mix(in srgb,var(--c-good) 18%, transparent); color:var(--c-good); }
+  .pill.warn{ background:color-mix(in srgb,var(--c-acc) 20%, transparent); color:var(--c-acc); }
+
+  .phone{ width:340px; margin:0 auto; background:var(--c-bg); border:10px solid #111; border-radius:38px; overflow:hidden; box-shadow:0 16px 40px rgba(0,0,0,.22); }
+  .phone .top{ height:26px; background:#111; }
+  .phone .app{ padding:18px 18px 26px; }
+  .ring{ width:120px; height:120px; border-radius:50%; margin:6px auto 10px; display:grid; place-items:center;
+         background:conic-gradient(var(--c-acc) calc(var(--pct)*1%), var(--c-line) 0); }
+  .ring .in{ width:92px; height:92px; border-radius:50%; background:var(--c-card); display:grid; place-items:center; text-align:center; font-size:11px; color:var(--c-mut); }
+  .ring .in b{ display:block; font-size:22px; color:var(--c-ink); font-variant-numeric:tabular-nums; }
+  .meter{ background:var(--c-card); border:1px solid var(--c-line); border-radius:14px; padding:12px 14px; margin-top:10px; font-size:13px; }
+  .bar{ height:8px; border-radius:99px; background:var(--c-line); margin-top:8px; overflow:hidden; }
+  .bar i{ display:block; height:100%; width:var(--w); background:var(--c-acc2); }
+  .push{ background:var(--c-card); border:1px solid var(--c-line); border-radius:14px; padding:12px 14px; font-size:12.5px; display:flex; gap:10px; margin-bottom:14px; }
+  .push .ic{ width:34px; height:34px; border-radius:9px; background:var(--c-acc); flex:none; display:grid; place-items:center; font-size:17px; }
+  .linkout{ display:block; text-align:center; margin-top:14px; font-size:13px; color:var(--c-acc); font-weight:700; }
+  .muted-note{ font-size:11px; color:var(--c-mut); text-align:center; margin-top:6px; }
+</style>
+
+<div class="wrap">
+  <h1>Cheeko subscription UX — prototype</h1>
+  <p class="sub">Throwaway mockup for ticket 014. Five surfaces × three design directions. Switch screens above, directions below.</p>
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="stage"><div class="canvas vB" id="canvas"></div></div>
+  <p class="statebar" id="statebar"></p>
+</div>
+<nav class="vbar" aria-label="Design direction">
+  <button class="vbtn" data-v="vA">A · Sunshine</button>
+  <button class="vbtn" data-v="vB" aria-pressed="true">B · Trust</button>
+  <button class="vbtn" data-v="vC">C · Bedtime</button>
+</nav>
+
+<script>
+const state = { screen:"plans", variant:"vB", annual:false };
+const SCREENS = [
+  ["plans","Portal · Plans"], ["checkout","Portal · Checkout"], ["manage","Portal · Manage"],
+  ["usage","App · Plan & Usage"], ["gate","App · Gate moment"]
+];
+const P = { // monthly, annual(=10 months)
+  starter:{name:"Starter", m:199, feats:["100 questions a month","Up to 15 a day","150 AI drawings a month","All characters & story cards"]},
+  family:{name:"Family", m:499, feats:["300 questions a month — about 10 a day","Up to 40 a day","Unlimited AI drawings (25/day)","Cheeko remembers your child","Weekly summary for you"]},
+  premium:{name:"Premium", m:999, feats:["800 questions a month","Up to 80 a day","Unlimited AI drawings","2 kid profiles","Deep insights & priority help"]}
+};
+const rupee = n => "₹" + n.toLocaleString("en-IN");
+
+function planCard(key, hero){
+  const p = P[key], annual = state.annual;
+  const price = annual ? rupee(p.m*10) : rupee(p.m);
+  const per = annual ? "/year" : "/month";
+  const was = annual ? `<span class="was">${rupee(p.m*12)} — 2 months free</span>` : `<span class="was"></span>`;
+  return `<div class="plan ${hero?"hero":""}">
+    ${hero?'<span class="tag">Most families pick this</span>':""}
+    <h3>${p.name}</h3><div class="price">${price}<small> ${per}</small></div>${was}
+    <ul>${p.feats.map(f=>`<li>${f}</li>`).join("")}</ul>
+    <button class="cta" onclick="state.screen='checkout';render()">${hero?"Start "+p.name:"Choose "+p.name}</button>
+  </div>`;
+}
+
+const VIEWS = {
+plans(){ return `
+  <h2>Keep the conversations going</h2>
+  <p class="lead">Chintu's toy runs on a plan. Every new Cheeko gets the first month free.</p>
+  <div class="banner">🎁 <b>Free month ends in 7 days</b> — pick a plan and Chintu won't miss a day.</div>
+  <div class="toggle" role="group" aria-label="Billing period">
+    <button aria-pressed="${!state.annual}" onclick="state.annual=false;render()">Monthly</button>
+    <button aria-pressed="${state.annual}" onclick="state.annual=true;render()">Annual · 2 months free</button>
+  </div>
+  <div class="plans">${planCard("starter")}${planCard("family",true)}${planCard("premium")}</div>
+  <p class="fine">Prices include GST. Pay by UPI Autopay or card. Cancel anytime — Cheeko's stories and music cards keep working without a plan.</p>`; },
+
+checkout(){ const p=P.family, annual=state.annual, amt=annual?p.m*10:p.m; return `
+  <h2>Checkout</h2>
+  <p class="lead">Family plan for Chintu's Cheeko (toy ending ·f3a0)</p>
+  <div class="sheet">
+    <div class="row"><span>Family plan · ${annual?"annual":"monthly"}</span><b>${rupee(amt)}</b></div>
+    <div class="row"><span>First charge</span><b>Today</b></div>
+    <div class="row"><span>Renews</span><b>${annual?"14 Jul 2027":"14 Aug 2026"} · auto</b></div>
+    <button class="paybtn" onclick="alert('PROTOTYPE: Razorpay sheet opens here — UPI Autopay mandate approval in the parent\\'s UPI app.')">Pay ${rupee(amt)} with UPI Autopay</button>
+    <p class="upinote">You'll approve a payment mandate once in your UPI app (GPay, PhonePe…). We remind you 24&nbsp;hours before every renewal — no surprise charges. Card option available.</p>
+    <div class="rzp">Secured by <span>Razorpay</span></div>
+  </div>`; },
+
+manage(){ return `
+  <h2>Your subscription</h2>
+  <p class="lead">canva.bht@gmail.com · toy ending ·f3a0</p>
+  <div class="sheet">
+    <div class="row"><span>Plan</span><b>Family · ${rupee(499)}/month <span class="pill ok">Active</span></b></div>
+    <div class="row"><span>Renews</span><b>14 Aug 2026</b></div>
+    <div class="row"><span>Payment</span><b>UPI Autopay <span class="pill ok">Mandate active</span></b></div>
+    <div class="row"><span>This month</span><b>143 / 300 questions</b></div>
+    <button class="cta" style="margin-top:14px" onclick="alert('PROTOTYPE: plan change on UPI = cancel current + approve a new mandate (Razorpay limitation). Flow explains this before switching.')">Change plan</button>
+    <button class="cta" style="margin-top:8px" onclick="alert('PROTOTYPE: cancel keeps the plan till 14 Aug, then Cheeko\\'s AI pauses. Stories & music cards keep working.')">Cancel plan</button>
+    <p class="upinote">Changing plans re-approves UPI Autopay once — your bank requires a fresh mandate for the new amount.</p>
+  </div>`; },
+
+usage(){ return phone(`
+  <h2 style="font-size:20px">Chintu's plan</h2>
+  <div class="ring" style="--pct:52"><div class="in"><b>143</b>of 300 questions</div></div>
+  <p style="text-align:center;font-size:13px;margin:0"><span class="pill ok">Family plan</span></p>
+  <div class="meter">Today · 6 of 40 questions<div class="bar"><i style="--w:15%"></i></div></div>
+  <div class="meter">AI drawings today · 12 of 25<div class="bar"><i style="--w:48%"></i></div></div>
+  <a class="linkout" href="#" onclick="return false">Manage plan at pay.cheekoai.in</a>
+  <p class="muted-note">Opens in your browser · On iOS this line is view-only wording (no purchase CTA)</p>`); },
+
+gate(){ return phone(`
+  <div class="push"><div class="ic">🧸</div><div><b>Cheeko is waiting</b><br>Chintu's free month has ended. Pick a plan so the conversations can continue.</div></div>
+  <h2 style="font-size:20px">The free month is over</h2>
+  <p style="font-size:13.5px;color:var(--c-mut)">This morning Cheeko told Chintu: <i>“Ask Mumma or Papa to check the Cheeko app so we can keep playing!”</i></p>
+  <div class="meter">Still working without a plan ✓ Story & music cards ✓ Downloaded content</div>
+  <div class="meter">Paused ✕ Conversations ✕ AI drawings</div>
+  <a class="linkout" href="#" onclick="return false">See plans at pay.cheekoai.in</a>
+  <p class="muted-note">Android may deep-link; iOS shows the address only</p>`); }
+};
+function phone(inner){ return `<div class="phone"><div class="top"></div><div class="app">${inner}</div></div>`; }
+
+function render(){
+  document.getElementById("tabs").innerHTML = SCREENS.map(([id,label]) =>
+    `<button class="tab" role="tab" aria-selected="${state.screen===id}" onclick="state.screen='${id}';render()">${label}</button>`).join("");
+  const c = document.getElementById("canvas");
+  c.className = "canvas " + state.variant;
+  c.innerHTML = VIEWS[state.screen]();
+  document.querySelectorAll(".vbtn").forEach(b=>b.setAttribute("aria-pressed", String(b.dataset.v===state.variant)));
+  const names={vA:"A · Sunshine (toy-brand playful)",vB:"B · Trust (fintech clean)",vC:"C · Bedtime (warm premium dark)"};
+  document.getElementById("statebar").textContent =
+    `state → screen: ${state.screen} · direction: ${names[state.variant]} · billing: ${state.annual?"annual (pay 10 months)":"monthly"}`;
+}
+document.querySelectorAll(".vbtn").forEach(b=>b.addEventListener("click",()=>{state.variant=b.dataset.v;render();}));
+render();
+</script>

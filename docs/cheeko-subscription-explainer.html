@@ -1,0 +1,311 @@
+<title>How Cheeko Subscriptions Work</title>
+<style>
+:root{
+  --bg:#FFF8ED; --card:#FFFFFF; --ink:#023047; --mut:#5d7486; --line:#F2E4C9;
+  --amber:#FFB703; --coral:#FB8500; --good:#2A9D8F; --bad:#E76F51;
+  --r:22px; --shadow:0 10px 30px rgba(2,48,71,.08);
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0E1B26; --card:#14283A; --ink:#F3EDE0; --mut:#93a8b8; --line:#1f3a50; --shadow:0 10px 30px rgba(0,0,0,.3); }
+}
+:root[data-theme="dark"]{ --bg:#0E1B26; --card:#14283A; --ink:#F3EDE0; --mut:#93a8b8; --line:#1f3a50; --shadow:0 10px 30px rgba(0,0,0,.3); }
+:root[data-theme="light"]{ --bg:#FFF8ED; --card:#FFFFFF; --ink:#023047; --mut:#5d7486; --line:#F2E4C9; --shadow:0 10px 30px rgba(2,48,71,.08); }
+
+*{box-sizing:border-box}
+body{ margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.6 ui-rounded,"SF Pro Rounded","Segoe UI",system-ui,sans-serif; }
+.wrap{ max-width:920px; margin:0 auto; padding:0 20px; }
+section{ padding:56px 0; }
+h1{ font-size:clamp(34px,6vw,54px); line-height:1.05; margin:0 0 14px; text-wrap:balance; font-weight:800; }
+h2{ font-size:clamp(24px,4vw,32px); margin:0 0 6px; text-wrap:balance; font-weight:800; }
+.kicker{ text-transform:uppercase; letter-spacing:.14em; font-size:12px; font-weight:800; color:var(--coral); margin-bottom:10px; }
+.lead{ color:var(--mut); max-width:62ch; margin:0 0 26px; }
+.card{ background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:24px; box-shadow:var(--shadow); }
+
+/* reveal on scroll */
+.rv{ opacity:0; transform:translateY(24px); }
+.rv.in{ opacity:1; transform:none; transition:opacity .7s ease, transform .7s ease; }
+@media (prefers-reduced-motion: reduce){ .rv{opacity:1; transform:none} *{animation:none!important; transition:none!important} }
+
+/* hero */
+.hero{ position:relative; overflow:hidden; padding:88px 0 72px; }
+.blob{ position:absolute; border-radius:50%; filter:blur(60px); opacity:.5; pointer-events:none; }
+.b1{ width:340px; height:340px; background:var(--amber); top:-120px; right:-80px; animation:float 9s ease-in-out infinite; }
+.b2{ width:260px; height:260px; background:var(--coral); bottom:-120px; left:-60px; animation:float 11s ease-in-out infinite reverse; }
+@keyframes float{ 0%,100%{transform:translateY(0)} 50%{transform:translateY(26px)} }
+.toy{ font-size:56px; display:inline-block; animation:bob 3s ease-in-out infinite; }
+@keyframes bob{ 0%,100%{transform:rotate(-4deg)} 50%{transform:rotate(5deg) translateY(-6px)} }
+.pillrow{ display:flex; gap:8px; flex-wrap:wrap; margin-top:18px; }
+.pill{ background:var(--card); border:1px solid var(--line); border-radius:999px; padding:7px 14px; font-size:13px; font-weight:700; }
+.pill b{ color:var(--coral); }
+
+/* journey */
+.steps{ display:grid; gap:14px; }
+.step{ display:grid; grid-template-columns:52px 1fr; gap:16px; align-items:start; }
+.dot{ width:52px; height:52px; border-radius:50%; background:var(--amber); color:#023047; display:grid; place-items:center; font-size:24px; flex:none; box-shadow:var(--shadow); }
+.step h3{ margin:4px 0 4px; font-size:17px; }
+.step p{ margin:0; color:var(--mut); font-size:14.5px; max-width:60ch; }
+.day{ font-size:11px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; color:var(--coral); }
+
+/* simulator */
+.sim{ display:grid; grid-template-columns:1fr; gap:18px; }
+.states{ display:flex; flex-wrap:wrap; gap:10px; justify-content:center; }
+.st{ border:2px solid var(--line); border-radius:16px; padding:12px 18px; font-weight:800; font-size:14px; min-width:96px; text-align:center; transition:all .35s; background:var(--card); }
+.st small{ display:block; font-weight:600; color:var(--mut); font-size:11px; }
+.st.on{ border-color:var(--coral); background:var(--coral); color:#fff; transform:scale(1.08); box-shadow:0 8px 24px rgba(251,133,0,.35); }
+.st.on small{ color:#ffe9d2; }
+.evts{ display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
+.evt{ border:0; border-radius:999px; padding:10px 16px; font:inherit; font-size:13.5px; font-weight:800; cursor:pointer; background:var(--ink); color:var(--bg); transition:transform .15s, opacity .2s; }
+.evt:hover{ transform:translateY(-2px); }
+.evt:disabled{ opacity:.25; cursor:not-allowed; transform:none; }
+.evt:focus-visible{ outline:3px solid var(--amber); outline-offset:2px; }
+.narr{ text-align:center; min-height:52px; font-size:15px; background:var(--bg); border-radius:14px; padding:12px 16px; border:1.5px dashed var(--amber); }
+
+/* flow animation */
+.flow{ position:relative; }
+.lane{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; text-align:center; font-size:13px; font-weight:700; }
+.node{ background:var(--card); border:1.5px solid var(--line); border-radius:16px; padding:14px 8px; position:relative; transition:border-color .3s, box-shadow .3s; }
+.node .em{ font-size:26px; display:block; }
+.node.hot{ border-color:var(--coral); box-shadow:0 0 0 4px rgba(251,133,0,.18); }
+.track{ height:46px; position:relative; margin:6px 4% 2px; }
+.track svg{ width:100%; height:100%; }
+.pulse{ width:14px; height:14px; border-radius:50%; background:var(--coral); position:absolute; top:16px; left:0; opacity:0; box-shadow:0 0 12px var(--coral); }
+.verdict{ text-align:center; font-size:14px; min-height:44px; font-weight:700; }
+.switch{ display:flex; gap:6px; justify-content:center; margin-bottom:14px; }
+.sw{ border:1.5px solid var(--line); background:var(--card); color:var(--ink); border-radius:999px; padding:8px 16px; font:inherit; font-size:13px; font-weight:800; cursor:pointer; }
+.sw[aria-pressed="true"]{ background:var(--good); border-color:var(--good); color:#fff; }
+.sw.lapsed[aria-pressed="true"]{ background:var(--bad); border-color:var(--bad); }
+.play{ display:block; margin:0 auto 8px; border:0; border-radius:999px; background:var(--coral); color:#fff; font:inherit; font-weight:800; font-size:14px; padding:11px 24px; cursor:pointer; }
+.play:hover{ filter:brightness(1.06); }
+
+/* bucket demo */
+.bucketwrap{ display:grid; grid-template-columns:150px 1fr; gap:22px; align-items:center; }
+.ringB{ width:150px; height:150px; border-radius:50%; display:grid; place-items:center;
+  background:conic-gradient(var(--amber) calc(var(--p)*1%), var(--line) 0); transition:background .4s; }
+.ringB .inb{ width:112px; height:112px; border-radius:50%; background:var(--card); display:grid; place-items:center; text-align:center; font-size:12px; color:var(--mut); }
+.ringB b{ display:block; font-size:26px; color:var(--ink); font-variant-numeric:tabular-nums; }
+.askbtn{ border:0; border-radius:14px; background:var(--amber); color:#023047; font:inherit; font-weight:800; font-size:15px; padding:13px 22px; cursor:pointer; }
+.askbtn:active{ transform:scale(.96); }
+.bubble{ background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:10px 14px; font-size:14px; margin-top:10px; min-height:44px; }
+
+/* plans */
+.plans{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+.plan{ position:relative; }
+.plan.hero-p{ border:2.5px solid var(--coral); }
+.tag{ position:absolute; top:-12px; left:18px; background:var(--coral); color:#fff; font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; border-radius:999px; padding:4px 11px; }
+.price{ font-size:32px; font-weight:800; margin:4px 0 0; font-variant-numeric:tabular-nums; }
+.price small{ font-size:13px; color:var(--mut); font-weight:600; }
+.plan ul{ list-style:none; padding:0; margin:12px 0 0; font-size:14px; display:grid; gap:7px; }
+.plan li::before{ content:"✓ "; color:var(--good); font-weight:800; }
+
+/* phases */
+.ph{ display:grid; grid-template-columns:44px 1fr; gap:14px; padding:12px 0; border-bottom:1px dashed var(--line); font-size:14.5px; }
+.ph:last-child{ border-bottom:0; }
+.ph b.n{ width:44px; height:44px; border-radius:12px; background:var(--ink); color:var(--bg); display:grid; place-items:center; font-size:16px; }
+.ph .where{ color:var(--coral); font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+
+table{ border-collapse:collapse; width:100%; font-size:14px; }
+.tblwrap{ overflow-x:auto; }
+th,td{ text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); }
+th{ font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--mut); }
+td b{ font-variant-numeric:tabular-nums; }
+footer{ padding:40px 0 64px; color:var(--mut); font-size:13px; text-align:center; }
+</style>
+
+<div class="hero"><div class="blob b1"></div><div class="blob b2"></div>
+  <div class="wrap">
+    <span class="toy">🧸</span>
+    <h1>How Cheeko subscriptions work</h1>
+    <p class="lead">Cheeko is the AI toy your child talks to. Every conversation costs real money to run — so the toy runs on a simple monthly plan, with the <b>first month free</b> on every new toy. This page walks through the whole system: the trial, the plans, and exactly what happens under the hood.</p>
+    <div class="pillrow">
+      <span class="pill">🎁 <b>1 month free</b> on first activation</span>
+      <span class="pill">💬 Plans measured in <b>questions</b></span>
+      <span class="pill">🇮🇳 Pay by <b>UPI Autopay</b></span>
+      <span class="pill">🔒 Stories &amp; music cards <b>always work</b></span>
+    </div>
+  </div>
+</div>
+
+<section><div class="wrap rv">
+  <div class="kicker">The parent journey</div>
+  <h2>From unboxing to subscribed</h2>
+  <p class="lead">The clock starts only when a real family connects the toy — never in the factory.</p>
+  <div class="steps">
+    <div class="step rv"><div class="dot">📦</div><div><span class="day">Day 0</span><h3>Unbox &amp; connect</h3><p>The parent app connects the toy to WiFi (Bluetooth setup), the toy shows a 6-digit code, and the parent enters it. That first-ever <b>bind</b> starts the free month — at Family-plan limits, no card needed.</p></div></div>
+    <div class="step rv"><div class="dot">💬</div><div><span class="day">Days 1–22</span><h3>Just play</h3><p>The child asks, Cheeko answers. The app quietly shows a "free month" countdown and how many questions were used.</p></div></div>
+    <div class="step rv"><div class="dot">🔔</div><div><span class="day">Days 23 · 27 · 30</span><h3>Three gentle reminders</h3><p>"One week left" → "3 days — pick a plan" → "trial ended". Never more than three pushes.</p></div></div>
+    <div class="step rv"><div class="dot">💳</div><div><span class="day">Any time</span><h3>Subscribe on the web portal</h3><p>Plans are bought at <b>pay.cheekoai.in</b> — same Google sign-in as the app. One UPI Autopay approval, and renewals are automatic with a 24-hour heads-up before every charge.</p></div></div>
+    <div class="step rv"><div class="dot">🌤️</div><div><span class="day">If they don't</span><h3>The toy never bricks</h3><p>Only the AI pauses. Story cards, music and downloaded content keep working — and Cheeko gently says: <i>"Ask Mumma or Papa to check the Cheeko app so we can keep playing!"</i></p></div></div>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">The plans</div>
+  <h2>Three sizes, one simple meter</h2>
+  <p class="lead">A "question" is one exchange — the child asks, Cheeko replies. Parents see questions; an invisible daily time limit underneath keeps marathon story-loops from gaming the bucket.</p>
+  <div class="plans">
+    <div class="plan card"><h3>Starter</h3><div class="price">₹199<small>/month</small></div><ul><li>100 questions a month</li><li>Up to 15 a day</li><li>150 AI drawings</li><li>All characters &amp; cards</li></ul></div>
+    <div class="plan card hero-p"><span class="tag">Most families pick this</span><h3>Family</h3><div class="price">₹499<small>/month</small></div><ul><li>300 questions — ~10 a day</li><li>Up to 40 a day</li><li>Unlimited drawings (25/day)</li><li>Cheeko remembers your child</li><li>Weekly summary for you</li></ul></div>
+    <div class="plan card"><h3>Premium</h3><div class="price">₹999<small>/month</small></div><ul><li>800 questions a month</li><li>Up to 80 a day</li><li>Unlimited drawings</li><li>2 kid profiles</li><li>Deep insights &amp; priority help</li></ul></div>
+  </div>
+  <p class="lead" style="margin-top:16px;font-size:14px">Buckets reset on your billing date. The free month runs at Family limits. Monthly only at launch — annual comes later.</p>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Try it yourself</div>
+  <h2>The life of a subscription</h2>
+  <p class="lead">Every toy's subscription is a little machine with five states. Press the buttons — you're the parent (and sometimes the bank).</p>
+  <div class="card sim">
+    <div class="states" id="states"></div>
+    <div class="narr" id="narr">A brand-new toy. No subscription exists yet — press <b>First bind</b>.</div>
+    <div class="evts" id="evts"></div>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Under the hood</div>
+  <h2>What happens when a child says “Hi Cheeko”</h2>
+  <p class="lead">Before any AI wakes up, the gateway asks one question: <i>is this toy allowed a session right now?</i> Flip the plan state and press play.</p>
+  <div class="card flow">
+    <div class="switch">
+      <button class="sw" aria-pressed="true" id="swOk">Plan active ✓</button>
+      <button class="sw lapsed" aria-pressed="false" id="swNo">Plan lapsed ✕</button>
+    </div>
+    <button class="play" id="play">▶ Play the flow</button>
+    <div class="lane">
+      <div class="node" id="n0"><span class="em">🧸</span>Toy<br><small style="color:var(--mut)">"Hi Cheeko!"</small></div>
+      <div class="node" id="n1"><span class="em">🚪</span>Gateway<br><small style="color:var(--mut)">session request</small></div>
+      <div class="node" id="n2"><span class="em">🧮</span>Manager API<br><small style="color:var(--mut)">session-verdict</small></div>
+      <div class="node" id="n3"><span class="em">🤖</span>AI worker<br><small style="color:var(--mut)">LiveKit room</small></div>
+    </div>
+    <div class="track"><div class="pulse" id="pulse"></div></div>
+    <div class="verdict" id="verdict"></div>
+  </div>
+  <p class="lead" style="font-size:14px;margin-top:14px">The verdict checks: active plan or trial? questions left this month? under today's caps? If our own server is down, the toy is <b>allowed anyway</b> — a Cheeko outage must never look like an unpaid bill. Mid-conversation, a session is never cut for an empty bucket; only the invisible daily time cap can end one early ("time for a break!").</p>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">The meter</div>
+  <h2>Watch a question bucket work</h2>
+  <div class="card bucketwrap">
+    <div class="ringB" id="ring" style="--p:100"><div class="inb"><b id="qleft">300</b>of 300 left</div></div>
+    <div>
+      <button class="askbtn" id="ask">💬 Ask Cheeko something</button>
+      <div class="bubble" id="bub">Each tap = one question (child asks + Cheeko answers). At 80% used, the parent gets one heads-up push. At zero, the next session gets the gentle gate — this one finishes normally.</div>
+    </div>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Money flow</div>
+  <h2>Payments, renewals &amp; safety nets</h2>
+  <div class="tblwrap card">
+  <table>
+    <tr><th>Moment</th><th>What happens</th><th>Who acts</th></tr>
+    <tr><td><b>Purchase</b></td><td>Parent approves a UPI Autopay mandate once on <b>pay.cheekoai.in</b> (or pays by card)</td><td>Parent · Razorpay</td></tr>
+    <tr><td><b>Every renewal</b></td><td>24-hour advance notice, then automatic charge on the billing date</td><td>Razorpay</td></tr>
+    <tr><td><b>Payment fails</b></td><td><b>3 days of grace</b> — AI keeps working; parent gets a fix-payment link</td><td>Cheeko</td></tr>
+    <tr><td><b>Still unpaid</b></td><td>AI pauses (stories/music keep working); resubscribe any time</td><td>—</td></tr>
+    <tr><td><b>Cancel</b></td><td>Plan runs to the end of the paid period, then pauses. No fees, no calls.</td><td>Parent</td></tr>
+    <tr><td><b>Refunds</b></td><td>Handled by support, executed in Razorpay — 7-day no-questions policy</td><td>Support</td></tr>
+  </table>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Build plan</div>
+  <h2>Shipping it — 8 phases</h2>
+  <div class="card">
+    <div class="ph"><b class="n">0</b><div><span class="where">picoclaw worker</span><br><b>Prerequisites</b> — usage-tracking fixes + 5-min heartbeat; Bulbul TTS swap (margin math depends on it)</div></div>
+    <div class="ph"><b class="n">1</b><div><span class="where">manager-api</span><br><b>Schema</b> — 4 tables: plan catalog, MAC-keyed subscriptions, webhook ledger, admin audit + tested state machine</div></div>
+    <div class="ph"><b class="n">2</b><div><span class="where">manager-api</span><br><b>Trials</b> — trial starts at first bind; expiry job; session-verdict endpoint (works before payments exist)</div></div>
+    <div class="ph"><b class="n">3</b><div><span class="where">mqtt-gateway</span><br><b>Gating</b> — verdict check before every session &amp; drawing; the gentle gate clip; fail-open safety</div></div>
+    <div class="ph"><b class="n">4</b><div><span class="where">manager-api</span><br><b>Razorpay</b> — checkout, webhooks, grace logic, cancel &amp; plan change</div></div>
+    <div class="ph"><b class="n">5</b><div><span class="where">new repo</span><br><b>Portal</b> — pay.cheekoai.in: plans, checkout, manage (Sunshine design)</div></div>
+    <div class="ph"><b class="n">6</b><div><span class="where">parent app</span><br><b>App views</b> — plan &amp; usage screen, trial countdown, gate screen, pushes (no buy button — store policy)</div></div>
+    <div class="ph"><b class="n">7</b><div><span class="where">manager-api</span><br><b>Admin</b> — support tools with audit trail, metrics dashboard, alerts</div></div>
+    <div class="ph"><b class="n">8</b><div><span class="where">everything</span><br><b>Launch</b> — every existing toy gets a fresh free month; one kill-switch to revert instantly</div></div>
+  </div>
+</div></section>
+
+<footer>Cheeko subscription system · design spec at <b>docs/cheeko-subscription-spec.md</b> · decision trail in the wayfinder map · 2026-07-14</footer>
+
+<script>
+/* reveal on scroll */
+const io = new IntersectionObserver(es=>es.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} }),{threshold:.12});
+document.querySelectorAll('.rv').forEach(el=>io.observe(el));
+
+/* ---- lifecycle simulator ---- */
+const S = ['none','trial','active','grace','lapsed','cancelled'];
+const LABEL = {none:['🥚 New toy','no subscription'],trial:['🎁 Trial','free month'],active:['✅ Active','paid & happy'],grace:['⏳ Grace','3 days to fix'],lapsed:['😴 Lapsed','AI paused'],cancelled:['👋 Cancelled','runs out, then pauses']};
+const EVENTS = {
+  none:      [['First bind','trial','The parent enters the 6-digit code. Free month starts — Family limits, no card. This can only ever happen once per toy.']],
+  trial:     [['30 days pass','lapsed','Trial over. Cheeko plays the gentle "ask your parents" clip; stories & music still work.'],
+              ['Parent subscribes','active','Paid on the portal with one UPI Autopay approval. Bucket anchors to the billing date.']],
+  active:    [['Renewal charge fails','grace','Razorpay retries; the parent gets a fix-payment push. The AI keeps working for 3 days.'],
+              ['Parent cancels','cancelled','No penalty — the plan runs to the end of the paid period.']],
+  grace:     [['Payment fixed','active','Charge succeeds — back to normal, nobody noticed.'],
+              ['3 days pass','lapsed','Grace over. AI pauses until the parent resubscribes.']],
+  lapsed:    [['Parent subscribes','active','Any time — the toy wakes right back up. (No new trial: one per toy, forever.)']],
+  cancelled: [['Period ends','lapsed','Paid days used up; AI pauses.'],
+              ['Parent re-subscribes','active','Changed their mind — instant reactivation.']]
+};
+let cur='none';
+const stBox=document.getElementById('states'), evBox=document.getElementById('evts'), narr=document.getElementById('narr');
+function draw(){
+  stBox.innerHTML = S.map(s=>`<div class="st ${s===cur?'on':''}">${LABEL[s][0]}<small>${LABEL[s][1]}</small></div>`).join('');
+  evBox.innerHTML = (EVENTS[cur]||[]).map((e,i)=>`<button class="evt" onclick="fire(${i})">${e[0]}</button>`).join('');
+}
+window.fire = i => { const e=EVENTS[cur][i]; cur=e[1]; narr.innerHTML=e[2]; draw(); };
+draw();
+
+/* ---- session flow ---- */
+let planOk = true;
+const swOk=document.getElementById('swOk'), swNo=document.getElementById('swNo');
+function setPlan(ok){ planOk=ok; swOk.setAttribute('aria-pressed',ok); swNo.setAttribute('aria-pressed',!ok); }
+swOk.onclick=()=>setPlan(true); swNo.onclick=()=>setPlan(false);
+const nodes=[...Array(4)].map((_,i)=>document.getElementById('n'+i));
+const pulse=document.getElementById('pulse'), verdict=document.getElementById('verdict');
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+function hop(fromPct,toPct,ms){ return new Promise(res=>{
+  if(reduced){ res(); return; }
+  const t0=performance.now();
+  pulse.style.opacity=1;
+  (function step(t){ const k=Math.min(1,(t-t0)/ms);
+    pulse.style.left=(fromPct+(toPct-fromPct)*k)+'%';
+    if(k<1) requestAnimationFrame(step); else res(); })(t0+0.001);
+});}
+async function playFlow(){
+  verdict.textContent=''; nodes.forEach(n=>n.classList.remove('hot'));
+  const P=[6,34,62,90];
+  nodes[0].classList.add('hot'); await hop(P[0],P[1],650); nodes[1].classList.add('hot');
+  await hop(P[1],P[2],650); nodes[2].classList.add('hot');
+  await new Promise(r=>setTimeout(r,reduced?0:450));
+  if(planOk){
+    verdict.innerHTML='<span style="color:var(--good)">✓ verdict: allowed — 157 questions left, under today\'s caps</span>';
+    await hop(P[2],P[3],650); nodes[3].classList.add('hot');
+    verdict.innerHTML+='<br>🤖 AI joins the room — the conversation begins.';
+  } else {
+    verdict.innerHTML='<span style="color:var(--bad)">✕ verdict: no active plan — no AI is started (zero cost)</span>';
+    await hop(P[2],P[0],800); nodes[0].classList.add('hot');
+    verdict.innerHTML+='<br>🔊 Toy plays the gentle clip: “Ask Mumma or Papa to check the Cheeko app!” + parent gets a push.';
+  }
+  pulse.style.opacity=0;
+}
+document.getElementById('play').onclick=playFlow;
+
+/* ---- bucket demo ---- */
+let q=300; const ring=document.getElementById('ring'), qleft=document.getElementById('qleft'), bub=document.getElementById('bub');
+const LINES=['“Why is the moon following our car?” 🌙','“Tell me a story about a brave samosa!” 🥟','“Do fish get thirsty?” 🐠','“What sound does a giraffe make?” 🦒','“Can we count to a million?” 🔢'];
+document.getElementById('ask').onclick=()=>{
+  if(q>0){ q-=15; if(q<0)q=0;
+    qleft.textContent=q; ring.style.setProperty('--p',(q/300*100));
+    let extra='';
+    if(q===60) extra='<br><b style="color:var(--coral)">📲 80% used — parent gets the one heads-up push.</b>';
+    if(q===0)  extra='<br><b style="color:var(--bad)">Bucket empty — this chat finishes normally; the NEXT session gets the gentle gate.</b>';
+    bub.innerHTML=LINES[Math.floor(Math.random()*LINES.length)]+' <span style="color:var(--mut)">(−1 question)</span>'+extra;
+  } else {
+    bub.innerHTML='😴 <b>Next month (or an upgrade) refills the bucket.</b> Stories & music cards still work today.';
+  }
+};
+</script>

@@ -1,7 +1,7 @@
 # Cheeko Platform — Complete System Overview
 
 > Cross-repo reference for the Cheeko kids' voice-AI toy platform. Compiled 2026-07-09 from code
-> exploration of all five components. Repo paths are local dev paths on this machine.
+> exploration of all components (parent app added 2026-07-14). Repo paths are local dev paths on this machine.
 
 ## Components at a glance
 
@@ -12,6 +12,7 @@
 | LiveKit Voice Worker | `D:\picoclaw` (`cmd/picoclaw-livekit`) | Go, LiveKit agent worker, in-process picoclaw agent | health port optional |
 | Line-Art / AI-Imagine server | `D:\line_art` | Python FastAPI + FLUX image gen | 8090 (WS `/ws`), deps: Speaches 8001, ComfyUI 8188 |
 | Device simulator | `D:\cheeko-backend\client.py` | Python (paho-mqtt, pyaudio, opuslib) | — |
+| Parent App | `D:\Cheeko-mobile_app\CheekoAI-Parent-App` | Flutter/Dart (Firebase Auth, mqtt_client, esp_blufi), Shorebird code-push | mobile app (talks to `ota.cheekoai.in`) |
 
 Other pieces referenced: EMQX broker (1883), Cerebrium media API (music/story bots), Qdrant (RFID RAG),
 Mem0 (memories), AWS S3 + CloudFront (`cdn.cheekoai.in` / `dsmzc13oafp54.cloudfront.net`), Firebase (parent app auth).
@@ -19,18 +20,19 @@ Mem0 (memories), AWS S3 + CloudFront (`cdn.cheekoai.in` / `dsmzc13oafp54.cloudfr
 ## Big picture
 
 ```
-ESP32 toy (mic/speaker, RFID, LCD/printer)
-   │  MQTT (JSON control)          │  UDP (AES-128-CTR encrypted Opus audio)
-   ▼                               ▼
-EMQX broker ──republish──> mqtt-gateway ────────────── UDP :8884
-                              │      │
-        HTTP X-Service-Key    │      │ LiveKit room + AgentDispatch
-                              ▼      ▼
-                       manager-api-node    LiveKit Cloud/server
-                       (personas, devices,        │ job dispatch
-                        providers, RFID,          ▼
-                        S3 uploads)        picoclaw-livekit worker (Go)
-                              ▲            STT → picoclaw agent (LLM) → TTS
+Parent App (Flutter)                ESP32 toy (mic/speaker, RFID, LCD/printer)
+   │  BLE/WiFi provisioning ────────────►│
+   │  MQTT app/p2p (live control/status) │  MQTT (JSON control)   │ UDP (AES-128-CTR Opus)
+   │  HTTPS (Firebase Bearer)            ▼                        ▼
+   │        │                       EMQX broker ──republish──> mqtt-gateway ─── UDP :8884
+   │        ▼                                                      │      │
+   └──►manager-api-node ◄─── HTTP X-Service-Key ───────────────────┘      │ LiveKit room + AgentDispatch
+       (personas, devices,                                                ▼
+        providers, RFID,          LiveKit Cloud/server ◄── job dispatch ──┘
+        S3 uploads, /api/mobile)         │ job dispatch
+                              ▲          ▼
+                              │   picoclaw-livekit worker (Go)
+                              │   STT → picoclaw agent (LLM) → TTS
                               │ HTTP (persona, providers,
                               │  workspace sync, token usage)
                               │
@@ -113,6 +115,30 @@ Python CLI mimicking the ESP32 toy. Modes: `--mode voice` (default), `rfid`, `im
 - **Imagine mode**: `hello` with `feature:"ai_imagine"`, hold-SPACE push-to-talk, `speech_end` triggers generation, waits for `image{url}` and downloads it.
 - Encryption/framing code in `encrypt_packet` matches the gateway's UDP protocol exactly (header-as-IV AES-CTR).
 
+## 6. Parent App (`CheekoAI-Parent-App`)
+
+Flutter mobile app (`cheekoai_parent_app` v3.8.17+113, Dart ^3.7.2) for parents to activate toys, customize personas, and monitor usage. It is a **client of manager-api** (never talks to picoclaw/line_art) and — uniquely among the clients — also connects to the **MQTT broker directly** as a remote control.
+
+- **Bootstrap** (`lib/main.dart`): Firebase init → `dotenv.load(.env)` → `ApiConfigService.initialize()` → `AuthProvider.init()`. Wrapped in `UpgradeAlert` (soft update prompt) + `ConnectivityListener`. **Shorebird** code-push (`shorebird.yaml`, auto-update) ships Dart patches without app-store review. State via `provider`: `AuthProvider`, `DeviceProvider` (owns the MQTT `DeviceCommandService`), `DeviceSettingsProvider` (polling+backoff), `AssistiveButtonProvider`.
+- **Auth**: Firebase Auth only — Google Sign-In (Android) / Apple Sign-In (iOS), in `auth_service.dart`. No phone/OTP (`pinput` is for the 6-digit activation code, not auth). Every backend call sends the Firebase **ID token** as `Authorization: Bearer` (`JavaApiService._getHeaders`); backend envelope `{code,msg,data}` with `code:401` ⇒ re-auth. Post-login routing keys off `GET /api/mobile/user-state` + kids list to decide onboarding.
+- **Backend base URL** (`api_config_service.dart`): `.env` `MOBILE_API_BASE_URL`/`API_BASE_URL_PRODUCTION` = `https://ota.cheekoai.in` (dev `otadev.cheekoai.in`), overridable from Developer Options. Almost everything is under **`/toy/api/mobile/*`**:
+  - Agents/persona: `GET/POST/PUT/DELETE /agents`, `/agents/{id}`, `/agents/{id}/sessions`, `/agents/{id}/chat-history/{sessionId}`, `/agents/{id}/devices`, bind `POST /agents/{id}/bind/{deviceCode}` (`java_agent_service.dart`).
+  - Devices: `GET /devices` (+ `/user-devices` fallback), `GET/PATCH /devices/{mac}/settings`, `/devices/{mac}/state`, `/devices/{mac}/imagine` (gallery feed), `/devices/{mac}/sync-events`, `/devices/{mac}/analytics/events`, assign `PUT /devices/assign-kid-by-mac`.
+  - Kids: `GET/POST/PUT/DELETE /kids`, `/active-kid`, `POST /switch-active-kid` (`kids_service.dart`).
+  - Home/progress: `/homepage-activity(/details)`, `/homepage-recommendations`, `/progress/{summary,details,trend}`.
+  - Profile: `GET/POST/PUT /parent-profile`, FCM token `POST/DELETE /parent-profile/fcm-token`, `DELETE /account`.
+  - Activation: `/api/mobile/activation/{check-code,validate,devices,...}` (`java_activation_service.dart`).
+  - Other bases: analytics `/toy/analytics/*` (`usage/{daily,weekly,monthly}/{mac}`, `user-progress`, `overall`, `attempts/stats`), content `/toy/content/library*`, character switch `/toy/agent/device/{mac}/{current-character,set-character}`, `GET /toy/ota/` (fetches device MQTT credentials).
+- **MQTT (direct, second real-time channel)** `device_command_service.dart`: `mqtt_client` → EMQX (v3.1.1, keep-alive 60s), credentials per device from `GET /toy/ota/` (stored on `Device`: `mqttClientId/Username/Password/Broker/Port/PublishTopic`). Subscribes **`app/p2p/{mac}`** for live playback+battery status; publishes commands to `device-server` and `devices/{mac}/data` (play/stop, volume, battery query). The app deliberately sends **no `hello`/session handshake** — it's a remote control, not a device. Parallel to the REST `/devices/{mac}/state` polling.
+- **Provisioning** (`provisioning_coordinator.dart`, BLE-first w/ WiFi fallback; design in `BLE Provisioning Integration Plan (Flutter App).md`):
+  - **BLE (primary)** `ble_provisioning_service.dart` via vendored `esp_blufi` — scans name prefix `BLUFI`, writes WiFi creds, waits for ack (timeouts: scan/connect 15s, configure 20s, ack 45s).
+  - **WiFi/AP (fallback)** `wifi_connection_service.dart` — joins toy SoftAP SSID `CheekoAI` at `http://192.168.4.1`, HTTP `/status,/scan,/submit,/reboot,/device-info` (`wifi_iot`+`wifi_scan`; iOS uses `NEHotspotConfiguration` via MethodChannel).
+  - UI wizard `toy_activation_screen.dart` (+ `widgets/toy_activation/*`): method choice → provision → 6-digit activation code (`pinput`) → binds device↔agent via `POST /agents/{id}/bind/{deviceCode}`.
+- **Screens** (`main_navigation_screen` tabs): home (progress dashboard, recommendations, chit-chat), agent/`character_management` (persona customization), analytics (usage/attempts), chat history + audio playback, content/music library, device settings (+quiet hours), gallery (imagine feed), profile, onboarding (splash/walkthrough/parent+kid setup), developer options (env switch).
+- **Push**: FCM (`firebase_messaging`) — `push_notification_registration_service.dart` gets token, pushes to backend `POST /parent-profile/fcm-token`, refreshes on `onTokenRefresh`. ⚠️ `flutter_local_notifications` is a dependency but **unwired** (no foreground/background handler in `lib/`).
+- **Legacy**: `.env` still carries Supabase URL/keys and a `2026-03-02` Supabase→Firebase migration plan exists, but the live auth/data path is Firebase + manager-api; Supabase is dead.
+- ⚠️ `.env` + `cheekoai-firebase-adminsdk-*.json` (Firebase service account) are committed in the working tree.
+
 ---
 
 ## End-to-end flows (cheat sheet)
@@ -125,9 +151,14 @@ Python CLI mimicking the ESP32 toy. Modes: `--mode voice` (default), `rfid`, `im
 
 **Settings sync**: parent app → manager-api `/device-sync` → gateway internal `POST :8091/internal/settings/publish-update` → MQTT `settings_update` → device acks.
 
+**Toy activation (parent app)**: parent signs in (Firebase) → BLE (`BLUFI`) or WiFi-AP (`CheekoAI` @ 192.168.4.1) provisioning writes WiFi creds to toy → toy comes online, OTA-registers → parent enters 6-digit code → `POST /toy/api/mobile/agents/{id}/bind/{deviceCode}` binds device↔agent(persona)↔kid.
+
+**Remote control (parent app)**: app fetches per-device MQTT creds from `GET /toy/ota/` → connects to EMQX directly → publishes play/stop/volume/battery to `device-server`/`devices/{mac}/data`, subscribes `app/p2p/{mac}` for live playback+battery status (no session handshake).
+
 ## Shared secrets / auth map
 
 - `SERVICE_SECRET_KEY` — one shared service key: gateway→manager-api, picoclaw→manager-api, line_art→manager-api, manager-api→gateway internal.
 - `MQTT_SIGNATURE_KEY` — HMAC for device MQTT passwords (gateway + OTA credential issuance + client.py).
 - LiveKit `API_KEY/API_SECRET` — gateway (tokens + dispatch) and picoclaw worker.
-- Firebase — parent app only. JWT — web admin only.
+- Firebase — parent app ⇄ manager-api (`/api/mobile/*`, ID token as Bearer) + FCM push. JWT — web admin only.
+- `MQTT_SIGNATURE_KEY`-derived creds — also issued to the parent app via `GET /toy/ota/` for its direct `app/p2p/{mac}` control channel.
