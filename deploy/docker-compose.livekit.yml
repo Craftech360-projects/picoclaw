@@ -12,7 +12,7 @@ services:
       - ./config.json:/etc/picoclaw/config.json:ro
       - ./.security.yml:/etc/picoclaw/.security.yml:ro
       - picoclaw-data:/opt/picoclaw
-    command: ["picoclaw-livekit", "--agent-name", "cheeko-agent1", "--config", "/etc/picoclaw/config.json"]
+    command: ["picoclaw-livekit", "--agent-name", "cheeko-agent", "--config", "/etc/picoclaw/config.json"]
 
 volumes:
   picoclaw-data:

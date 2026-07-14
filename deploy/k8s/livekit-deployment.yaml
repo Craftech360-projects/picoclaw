@@ -58,7 +58,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          args: ["--agent-name", "cheeko-agent1", "--config", "/etc/picoclaw/config.json"]
+          args: ["--agent-name", "cheeko-agent", "--config", "/etc/picoclaw/config.json"]
           ports:
             - name: health
               containerPort: 8192
