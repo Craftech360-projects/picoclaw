@@ -29,10 +29,13 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/voice/azure_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/cartesia_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/deepgram_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/edge_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/elevenlabs_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/inworld_tts"
+	"github.com/sipeed/picoclaw/pkg/voice/sarvam_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/smallest_tts"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
@@ -374,6 +377,13 @@ func main() {
 				"source": sessionSelectionSource,
 			})
 			return nil
+		}
+		// Resolve the session language for language-aware TTS (Sarvam). Uses the
+		// same metadata source as the bootstrap; other providers ignore it.
+		if _, rawMeta, _ := resolveLiveKitJobBootstrapContext(job); strings.TrimSpace(rawMeta) != "" {
+			if bs, bsErr := parseRoomMetadataBootstrap(rawMeta); bsErr == nil {
+				sessionCfg.LiveKitService.TTS.Language = strings.TrimSpace(bs.Metadata.SessionLanguageCode)
+			}
 		}
 		sessionTTSProvider, sessionTTSSampleRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)
 		if sessionTTSProvider == nil {
@@ -1488,6 +1498,10 @@ func buildTTSProvider(cfg *config.Config, lkCfg config.LiveKitServiceConfig) (tt
 	factory.Register("deepgram", deepgram_tts.NewBuilder())
 	factory.Register("smallest", smallest_tts.NewBuilder())
 	factory.Register("smallestai", smallest_tts.NewBuilder())
+	factory.Register("sarvam", sarvam_tts.NewBuilder())
+	factory.Register("azure", azure_tts.NewBuilder())
+	factory.Register("edge", edge_tts.NewBuilder())
+	factory.Register("edgetts", edge_tts.NewBuilder())
 
 	return factory.Create(cfg, lkCfg)
 }

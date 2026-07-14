@@ -850,6 +850,11 @@ type LiveKitServiceTTSConfig struct {
 	SampleRateHz int      `json:"sample_rate_hz,omitempty"   env:"PICOCLAW_LIVEKIT_TTS_SAMPLE_RATE_HZ"`
 	Temperature  float64  `json:"temperature,omitempty"      env:"PICOCLAW_LIVEKIT_TTS_TEMPERATURE"`
 	FillerWords  []string `json:"filler_words,omitempty"     env:"PICOCLAW_LIVEKIT_TTS_FILLER_WORDS"`
+
+	// Language is the resolved session language code (e.g. "hi-IN"), populated
+	// per session from room metadata. In-memory only (never serialized or
+	// DB-backed); currently read by the Sarvam TTS provider to pick language_code.
+	Language string `json:"-"`
 }
 
 // LiveKitServiceSTTConfig configures STT for the LiveKit voice agent.
@@ -921,6 +926,8 @@ type LiveKitServiceConfig struct {
 	inworldAPIKey  string
 	cartesiaAPIKey string
 	smallestAPIKey string
+	sarvamAPIKey   string
+	azureAPIKey    string
 	secDirty       bool
 }
 
@@ -936,6 +943,10 @@ func (c *LiveKitServiceConfig) CartesiaAPIKey() string     { return c.cartesiaAP
 func (c *LiveKitServiceConfig) SetCartesiaAPIKey(k string) { c.cartesiaAPIKey = k; c.secDirty = true }
 func (c *LiveKitServiceConfig) SmallestAPIKey() string     { return c.smallestAPIKey }
 func (c *LiveKitServiceConfig) SetSmallestAPIKey(k string) { c.smallestAPIKey = k; c.secDirty = true }
+func (c *LiveKitServiceConfig) SarvamAPIKey() string       { return c.sarvamAPIKey }
+func (c *LiveKitServiceConfig) SetSarvamAPIKey(k string)   { c.sarvamAPIKey = k; c.secDirty = true }
+func (c *LiveKitServiceConfig) AzureAPIKey() string        { return c.azureAPIKey }
+func (c *LiveKitServiceConfig) SetAzureAPIKey(k string)    { c.azureAPIKey = k; c.secDirty = true }
 
 // ModelConfig represents a model-centric provider configuration.
 // It allows adding new providers (especially OpenAI-compatible ones) via configuration only.
@@ -1696,6 +1707,12 @@ func applySecurityConfig(cfg *Config, sec *SecurityConfig) error {
 		}
 		if sec.LiveKitService.SmallestAPIKey != "" {
 			cfg.LiveKitService.SetSmallestAPIKey(sec.LiveKitService.SmallestAPIKey)
+		}
+		if sec.LiveKitService.SarvamAPIKey != "" {
+			cfg.LiveKitService.SetSarvamAPIKey(sec.LiveKitService.SarvamAPIKey)
+		}
+		if sec.LiveKitService.AzureAPIKey != "" {
+			cfg.LiveKitService.SetAzureAPIKey(sec.LiveKitService.AzureAPIKey)
 		}
 	}
 

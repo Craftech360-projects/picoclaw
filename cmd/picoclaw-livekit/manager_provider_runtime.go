@@ -268,6 +268,12 @@ func applyManagerTTSProvider(cfg *config.Config, ttsCfg managerActiveTTSProvider
 		cfg.LiveKitService.SetSmallestAPIKey(key)
 	case "inworld":
 		cfg.LiveKitService.SetInworldAPIKey(key)
+	case "sarvam":
+		cfg.LiveKitService.SetSarvamAPIKey(key)
+	case "azure":
+		cfg.LiveKitService.SetAzureAPIKey(key)
+	case "edge", "edgetts":
+		// Edge TTS is keyless; nothing to route.
 	default:
 		cfg.Voice.ElevenLabsAPIKey = key
 	}

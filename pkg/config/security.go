@@ -152,6 +152,8 @@ type LiveKitServiceSecurity struct {
 	InworldAPIKey  string `yaml:"inworld_api_key,omitempty"  env:"PICOCLAW_LIVEKIT_INWORLD_API_KEY"`
 	CartesiaAPIKey string `yaml:"cartesia_api_key,omitempty" env:"PICOCLAW_LIVEKIT_CARTESIA_API_KEY"`
 	SmallestAPIKey string `yaml:"smallest_api_key,omitempty" env:"PICOCLAW_LIVEKIT_SMALLEST_API_KEY"`
+	SarvamAPIKey   string `yaml:"sarvam_api_key,omitempty"   env:"PICOCLAW_LIVEKIT_SARVAM_API_KEY"`
+	AzureAPIKey    string `yaml:"azure_api_key,omitempty"    env:"PICOCLAW_LIVEKIT_AZURE_API_KEY"`
 }
 
 type WebToolsSecurity struct {
