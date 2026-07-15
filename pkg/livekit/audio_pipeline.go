@@ -1956,6 +1956,10 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 			if wroteAudio {
 				ap.writeTTSAudioTail(ctx, liveKitTTSAudioTailMs)
 			}
+			// Pace to ~real playback time so the next chunk's speech_created text
+			// lines up with its audio instead of racing ahead, and the device
+			// buffer stays shallow. Cancel-aware for barge-in.
+			ap.paceToAudioDuration(ctx, samplesWritten, started)
 			return
 		}
 		if err != nil {
@@ -2082,6 +2086,30 @@ func (ap *AudioPipeline) synthesizeDeduped(ctx context.Context, deduper *speechC
 		ap.publishSpeechCreated(strings.TrimSpace(text))
 	}
 	ap.synthesizeAndPlay(ctx, text)
+}
+
+// paceToAudioDuration blocks until roughly the just-written audio would finish
+// playing (samples / sampleRate) minus the time already spent streaming it, so
+// callers advance at ~real playback speed. This keeps the device jitter buffer
+// shallow and lets each chunk's speech_created text arrive in step with its
+// audio rather than all up front. Cancel-aware so a barge-in/abort stops at once.
+func (ap *AudioPipeline) paceToAudioDuration(ctx context.Context, samples int, started time.Time) {
+	if samples <= 0 || ap.session == nil {
+		return
+	}
+	rate := ap.session.sampleRate
+	if rate <= 0 {
+		rate = 24000
+	}
+	audioDur := time.Duration(float64(samples) / float64(rate) * float64(time.Second))
+	remaining := audioDur - time.Since(started)
+	if remaining <= 0 {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(remaining):
+	}
 }
 
 func (ap *AudioPipeline) cancelTTS(reason string) {
