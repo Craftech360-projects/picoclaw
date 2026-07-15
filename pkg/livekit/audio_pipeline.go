@@ -2071,14 +2071,15 @@ func (ap *AudioPipeline) synthesizeDeduped(ctx context.Context, deduper *speechC
 		})
 		return
 	}
-	// First spoken chunk of the turn carries the raw (possibly expression-tagged)
-	// text to the device via speech_created; the gateway's tts-start dedup means
-	// only this first publish reaches the device with text.
-	if deduper != nil && !deduper.announced {
+	// Every spoken chunk carries its raw (expression-tagged) text to the device
+	// via speech_created, so the client can show the per-sentence emotion. The
+	// gateway turns the first chunk of a turn into tts_start and the rest into
+	// tts_sentence_start.
+	if deduper != nil {
 		deduper.announced = true
-		if ap.publishSpeechCreated != nil {
-			ap.publishSpeechCreated(strings.TrimSpace(text))
-		}
+	}
+	if ap.publishSpeechCreated != nil {
+		ap.publishSpeechCreated(strings.TrimSpace(text))
 	}
 	ap.synthesizeAndPlay(ctx, text)
 }

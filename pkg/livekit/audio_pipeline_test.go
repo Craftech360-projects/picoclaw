@@ -1026,7 +1026,9 @@ func TestSynthesizeDedupedAnnouncesFirstChunkWithTag(t *testing.T) {
 	pipeline.synthesizeDeduped(context.Background(), deduper, "[happy] Hello there, friend!")
 	pipeline.synthesizeDeduped(context.Background(), deduper, "[sad] Second sentence goes here.")
 
-	if len(announced) != 1 || announced[0] != "[happy] Hello there, friend!" {
-		t.Fatalf("expected one announce carrying the tagged first chunk, got %v", announced)
+	if len(announced) != 2 ||
+		announced[0] != "[happy] Hello there, friend!" ||
+		announced[1] != "[sad] Second sentence goes here." {
+		t.Fatalf("expected each tagged chunk announced in order, got %v", announced)
 	}
 }
