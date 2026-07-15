@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
@@ -27,6 +28,17 @@ func NewBuilder() tts.ProviderBuilder {
 		var client tts.Provider
 		if strings.TrimSpace(providerCfg.APIKey) != "" && strings.TrimSpace(providerCfg.Endpoint) != "" {
 			client = NewAzureTTS(providerCfg)
+			logger.InfoCF("azure_tts", "Azure TTS initialised", map[string]any{
+				"tts_provider": "azure",
+				"tts_voice_id": providerCfg.VoiceID,
+				"endpoint":     providerCfg.Endpoint,
+			})
+		} else {
+			logger.WarnCF("azure_tts", "Azure TTS not initialised: missing key and/or region — TTS will be silent. Set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION (or AZURE_SPEECH_ENDPOINT)", map[string]any{
+				"tts_provider": "azure",
+				"has_api_key":  strings.TrimSpace(providerCfg.APIKey) != "",
+				"has_endpoint": strings.TrimSpace(providerCfg.Endpoint) != "",
+			})
 		}
 
 		_, sampleRate := azureOutputFormat(providerCfg.SampleRateHz)

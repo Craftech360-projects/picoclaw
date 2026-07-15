@@ -17,9 +17,12 @@ import (
 )
 
 const (
-	defaultBaseURL    = "wss://api.sarvam.ai"
-	defaultModelID    = "bulbul:v3"
-	defaultSampleRate = 22050
+	defaultBaseURL = "wss://api.sarvam.ai"
+	defaultModelID = "bulbul:v3"
+	// defaultSampleRate matches the rest of the voice pipeline (Deepgram,
+	// ElevenLabs, the device audio params) so the LiveKit PCM track and gateway
+	// resampler line up. 22050 produced a track other stages didn't expect.
+	defaultSampleRate = 24000
 	fallbackLanguage  = "hi-IN"
 	// outputAudioCodec "linear16" makes Sarvam stream raw 16-bit little-endian
 	// PCM, which the voice pipeline consumes directly (no mp3/wav decoding).
@@ -110,10 +113,25 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 	header.Set("Api-Subscription-Key", strings.TrimSpace(t.cfg.APIKey))
 	conn, resp, err := t.dialer.DialContext(ctx, endpoint, header)
 	if err != nil {
-		if resp != nil && resp.Body != nil {
-			defer resp.Body.Close()
-			data, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("sarvam websocket dial: %w (status=%s body=%s)", err, resp.Status, strings.TrimSpace(string(data)))
+		status := ""
+		body := ""
+		if resp != nil {
+			status = resp.Status
+			if resp.Body != nil {
+				defer resp.Body.Close()
+				data, _ := io.ReadAll(resp.Body)
+				body = strings.TrimSpace(string(data))
+			}
+		}
+		logger.ErrorCF("sarvam_tts", "Sarvam TTS websocket dial failed", map[string]any{
+			"tts_provider": "sarvam",
+			"tts_voice_id": t.cfg.VoiceID,
+			"status":       status,
+			"body":         body,
+			"error":        err.Error(),
+		})
+		if body != "" || status != "" {
+			return nil, fmt.Errorf("sarvam websocket dial: %w (status=%s body=%s)", err, status, body)
 		}
 		return nil, fmt.Errorf("sarvam websocket dial: %w", err)
 	}
@@ -194,10 +212,17 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 			}
 			continue
 		case "error":
-			if strings.TrimSpace(frame.Data.Message) != "" {
-				return nil, fmt.Errorf("sarvam tts stream error: %s", frame.Data.Message)
+			msg := strings.TrimSpace(frame.Data.Message)
+			if msg == "" {
+				msg = strings.TrimSpace(string(data))
 			}
-			return nil, fmt.Errorf("sarvam tts stream error: %s", strings.TrimSpace(string(data)))
+			// Common cause: voice_id is not a valid speaker for the model
+			// (e.g. bulbul:v2 "meera" against bulbul:v3).
+			logger.ErrorCF("sarvam_tts", "Sarvam TTS stream error", map[string]any{
+				"tts_provider": "sarvam",
+				"error":        msg,
+			})
+			return nil, fmt.Errorf("sarvam tts stream error: %s", msg)
 		default:
 			continue
 		}

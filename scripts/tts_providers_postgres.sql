@@ -50,7 +50,7 @@ VALUES
     ('deepgram', '', '', 'aura-2-asteria-en', 'pcm_24000', 24000, FALSE, 30),
     -- Sarvam bulbul: language_code is resolved per session from the child's
     -- language (not stored here). sample_rate_hz feeds the request sample_rate.
-    ('sarvam', '', 'pooja', 'bulbul:v3', 'pcm_22050', 22050, FALSE, 40),
+    ('sarvam', '', 'pooja', 'bulbul:v3', 'pcm_24000', 24000, FALSE, 40),
     -- Edge TTS: free, keyless, developer path. voice_id is an Edge voice name.
     ('edge', '', 'en-US-AnaNeural', '', 'pcm_24000', 24000, FALSE, 50),
     -- Azure Speech: region/endpoint + key come from the worker env

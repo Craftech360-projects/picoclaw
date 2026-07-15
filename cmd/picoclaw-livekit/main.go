@@ -387,6 +387,11 @@ func main() {
 		}
 		sessionTTSProvider, sessionTTSSampleRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)
 		if sessionTTSProvider == nil {
+			logger.WarnCF("livekit", "Configured TTS provider built no client; falling back to startup TTS (audio may be silent if fallback is also nil)", map[string]any{
+				"tts_provider":         sessionCfg.LiveKitService.TTS.Provider,
+				"tts_voice_id":         sessionCfg.LiveKitService.TTS.VoiceID,
+				"has_startup_fallback": ttsProvider != nil,
+			})
 			sessionTTSProvider = ttsProvider
 			sessionTTSSampleRate = ttsSampleRate
 		}
