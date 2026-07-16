@@ -30,6 +30,8 @@ MQTT_BROKER_HOST ="192.168.0.82"
 MQTT_BROKER_PORT = int(os.getenv("TEST_MQTT_BROKER_PORT", "1883"))
 MANAGER_API_BASE = os.getenv("TEST_MANAGER_API_BASE", "http://192.168.0.28:8001/toy")
 MQTT_SIGNATURE_KEY = os.getenv("TEST_MQTT_SIGNATURE_KEY", "test-signature-key-12345")
+# Must match manager-api's SERVICE_SECRET_KEY to read the session verdict.
+SERVICE_KEY = os.getenv("TEST_SERVICE_KEY", "")
 # DEVICE_MAC is now dynamically generated for uniqueness
 # Minimum frames to have in buffer to continue playback
 PLAYBACK_BUFFER_MIN_FRAMES = 3
@@ -706,6 +708,42 @@ class TestClient:
             logger.error(f"   Broker: {mqtt_broker}:{mqtt_port}")
             return False
 
+    def log_session_verdict(self, phase: str) -> Optional[dict]:
+        """Reports the subscription verdict for this device (SUB-1).
+
+        The real device never asks for this — the gateway does, inside its
+        deferred setup right after the hello response goes out. We poll the same
+        endpoint at the same two points in the flow so the simulator shows the
+        verdict the session is actually gated on.
+
+        Never raises: manager-api being down must not stop a session, mirroring
+        the gateway's fail-open path.
+        """
+        # Same manager-api the OTA step talks to — MANAGER_API_BASE points at a
+        # different host/port and would make every verdict a false fail-open.
+        base = os.getenv("TEST_MANAGER_API_BASE") or f"http://{SERVER_IP}:{OTA_PORT}/toy"
+        url = f"{base}/device/{self.device_mac_formatted}/session-verdict"
+        try:
+            response = requests.get(
+                url, headers={"X-Service-Key": SERVICE_KEY}, timeout=3)
+            body = response.json()
+            if body.get("code") != 0:
+                logger.warning(
+                    f"[VERDICT] ({phase}) refused by manager-api: HTTP {response.status_code} {body.get('msg')}")
+                return None
+            verdict = body["data"]
+            logger.info(
+                f"[VERDICT] ({phase}) allowed={verdict['allowed']} reason={verdict['reason']} "
+                f"remaining={verdict.get('remaining')}")
+            if not verdict["allowed"]:
+                logger.warning(
+                    f"[VERDICT] ({phase}) this session would be GATED once SUB-2 lands "
+                    f"(no LiveKit room, gate clip streamed instead)")
+            return verdict
+        except Exception as exc:
+            logger.warning(f"[VERDICT] ({phase}) fail-open, session continues: {exc}")
+            return None
+
     def send_hello_and_get_session(self, feature: Optional[str] = None) -> bool:
         """Sends 'hello' message and waits for session details.
 
@@ -713,6 +751,8 @@ class TestClient:
         gateway routes the whole session to that feature (spec Option A).
         """
         logger.info("[STEP] STEP 3: Sending 'hello' and pinging UDP...")
+        # Pre-session state, before the gateway has looked at anything.
+        self.log_session_verdict("before hello")
         # Use the client_id from our generated MQTT credentials
         hello_message = {
             "type": "hello",
@@ -751,6 +791,9 @@ class TestClient:
                 if encrypted_ping:
                     self.udp_socket.sendto(encrypted_ping, server_udp_addr)
                     logger.info(f"[OK] UDP Ping sent. Session configured.")
+                    # The gateway's deferred setup is running now — this is the
+                    # verdict it dispatches (or, from SUB-2, gates) on.
+                    self.log_session_verdict("after hello")
                     return True
             logger.error(f"[ERROR] Received unexpected message: {response}")
             return False
