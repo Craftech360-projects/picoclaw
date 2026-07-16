@@ -48,7 +48,27 @@ all-null (unknown) until SUB-3 makes it true.
 
 ### Remaining work, with the groundwork already scouted
 
-**Gate clip + refusal** (criterion 3) — the substantial piece:
+**Gate clip + refusal** (criterion 3) — ⚠️ **code landed, e2e proof still owed.**
+The refusal branch, the clip asset, and the race fix are all in and unit-tested
+(5 new tests in `tests/subscription-gate.test.js`; gateway suite 44/46, the 2
+failures pre-existing). What is *not* done is the criterion as written: `client.py`
+has not yet been observed receiving the audio. That needs the real stack
+(manager-api + gateway + sim + a device with an expired trial) and is the only
+thing between this criterion and a tick. **Do not tick it on the unit tests.**
+
+Scouting kept below for that run; three things it did not predict:
+- `streamAudioViaUdp` (`mqtt-gateway.js` ~:3176) already did the whole job —
+  PCM read, 60ms/1440-sample Opus encode, pacing, `tts start/stop`. Reused it
+  with a new optional `text` arg instead of writing a streaming loop.
+- It carried a **live bug**: `Date.Now()` (capital N) threw a TypeError inside
+  its own try/catch *before* the first frame, so character-change audio feedback
+  has never played. Fixed — it was in the reuse path.
+- The `remoteAddress` race is real but self-healing: `client.py` (~:218) sends a
+  UDP keepalive *on receipt of* `tts:start`, which is what teaches the gateway
+  the address. Still poll for it (3s) rather than trust the old fixed 200ms sleep.
+  Real firmware may not answer the same way — watch this during the e2e.
+
+Original scouting:
 - Frames go out via `virtual-connection.js` `sendUdpMessage(payload, timestamp)`
   (~:347), which already owns sequence numbering, header, and encryption. Feed
   it Opus frames; do not re-implement that.
