@@ -3,7 +3,10 @@
 > Assembled 2026-07-14 from the wayfinder map `docs/wayfinder/subscription-system/` (17 tickets, all decisions
 > linked below). Pricing basis: `docs/cheeko-pricing-strategy.md`. Metering basis: `docs/plan-usage-tracking-and-limits.md`.
 > Architecture context: `docs/cheeko-system-overview.md`.
-> **Design-complete; no code was written.** Ready for `/to-issues`.
+> **Design-complete; no code was written.** Implementation tickets: `docs/issues/subscription/` (SUB-1…13).
+> On implementation detail, the **issue bodies override this spec** — they carry the newer edge-case work
+> (lazy trial expiry, webhook/checkout race, nightly Razorpay reconciliation, `paused` mapping, refund→lapse,
+> account-deletion mandate cleanup; full catalog in `docs/cheeko-subscription-backend.html`).
 
 ## 0. Decisions summary (with ticket links)
 

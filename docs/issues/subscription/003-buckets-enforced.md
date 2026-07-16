@@ -17,6 +17,8 @@ Make the verdict actually meter. Monthly questions = `SUM(message_count)` over `
 
 Clock edges: day boundaries at IST midnight; a session counts toward the day it started; period timestamps stored/compared in UTC.
 
+Also owned here: **`GET /api/mobile/devices/:mac/subscription`** (Firebase Bearer) — status, plan, period, usage summary, trial countdown. It exposes exactly the numbers this ticket computes, and SUB-10 (parent app) consumes it, which is why SUB-10 is blocked by this ticket.
+
 ## Acceptance criteria
 
 - [ ] Device over its monthly question bucket ⇒ `monthly_bucket_empty`; over daily questions ⇒ `daily_questions`; over daily minutes ⇒ `daily_minutes`
@@ -25,6 +27,7 @@ Clock edges: day boundaries at IST midnight; a session counts toward the day it 
 - [ ] Bucket empties mid-session ⇒ session completes; the next session is refused
 - [ ] IST midnight rollover resets daily counters (test with a mocked clock)
 - [ ] Verdict latency < 100ms at current fleet size (live SUMs, no counters)
+- [ ] `GET /api/mobile/devices/:mac/subscription` returns status/plan/period/usage/trial-countdown for the caller's own device (Firebase auth enforced)
 
 ## Blocked by
 

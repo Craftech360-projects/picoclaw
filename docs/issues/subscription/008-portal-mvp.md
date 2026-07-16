@@ -25,6 +25,7 @@ Device selection: the signed-in parent's devices come from the existing devices 
 - [ ] Mandate-halted state surfaces on Manage with fix-payment path
 - [ ] Screens match the Sunshine direction; responsive at phone widths (parents will open this from WhatsApp)
 - [ ] No purchase deep-link required from the apps — portal is reachable and usable standalone
+- [ ] Manage offers per-charge invoice downloads (GST-compliant tax invoices are our responsibility — verify whether Razorpay's auto-invoices qualify; if not, generate our own)
 
 ## Blocked by
 
