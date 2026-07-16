@@ -1,0 +1,448 @@
+<title>Cheeko Subscriptions — Backend Design</title>
+<style>
+:root{
+  --bg:#FFF8ED; --card:#FFFFFF; --ink:#0B2A3C; --mut:#5d7486; --line:#EBDDC2;
+  --amber:#E8A200; --coral:#FB8500; --good:#2A9D8F; --bad:#E76F51; --blue:#2176AE;
+  --code:#F6EEDD; --shadow:0 10px 28px rgba(2,48,71,.08); --r:18px;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0C1926; --card:#122536; --ink:#EDE7D9; --mut:#8fa5b5; --line:#1e3a52;
+         --amber:#FFB703; --code:#0A1420; --shadow:0 10px 28px rgba(0,0,0,.35); }
+}
+:root[data-theme="dark"]{ --bg:#0C1926; --card:#122536; --ink:#EDE7D9; --mut:#8fa5b5; --line:#1e3a52; --amber:#FFB703; --code:#0A1420; --shadow:0 10px 28px rgba(0,0,0,.35); }
+:root[data-theme="light"]{ --bg:#FFF8ED; --card:#FFFFFF; --ink:#0B2A3C; --mut:#5d7486; --line:#EBDDC2; --amber:#E8A200; --code:#F6EEDD; --shadow:0 10px 28px rgba(2,48,71,.08); }
+
+*{box-sizing:border-box}
+body{ margin:0; background:var(--bg); color:var(--ink); font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+.wrap{ max-width:1020px; margin:0 auto; padding:0 20px; }
+section{ padding:44px 0; }
+h1{ font-size:clamp(30px,5vw,44px); margin:0 0 10px; font-weight:800; letter-spacing:-.5px; }
+h2{ font-size:24px; margin:0 0 6px; font-weight:800; }
+.kicker{ text-transform:uppercase; letter-spacing:.16em; font-size:11.5px; font-weight:800; color:var(--coral); margin-bottom:8px; }
+.lead{ color:var(--mut); max-width:70ch; margin:0 0 22px; font-size:14.5px; }
+.card{ background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:20px; box-shadow:var(--shadow); }
+code,pre,.mono{ font-family:ui-monospace,"Cascadia Code",Consolas,monospace; }
+pre{ background:var(--code); border:1px solid var(--line); border-radius:12px; padding:14px 16px; font-size:12.5px; overflow-x:auto; line-height:1.55; margin:10px 0 0; }
+.rv{ opacity:0; transform:translateY(20px); }
+.rv.in{ opacity:1; transform:none; transition:opacity .6s, transform .6s; }
+@media (prefers-reduced-motion: reduce){ .rv{opacity:1;transform:none} *{animation:none!important;transition:none!important} }
+
+/* architecture */
+.archwrap{ overflow-x:auto; }
+svg text{ fill:var(--ink); }
+.comp rect{ fill:var(--card); stroke:var(--line); stroke-width:1.5; rx:12; }
+.comp.ext rect{ stroke-dasharray:5 4; }
+.comp .t{ font-size:12.5px; font-weight:800; }
+.comp .s{ font-size:10px; fill:var(--mut); }
+.wire{ stroke:var(--line); stroke-width:2; fill:none; }
+.wire.hot{ stroke:var(--coral); stroke-width:3; }
+.fpulse{ fill:var(--coral); }
+.flowbtns{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.fb{ border:1.5px solid var(--line); background:var(--card); color:var(--ink); border-radius:999px; padding:8px 15px; font:inherit; font-size:13px; font-weight:700; cursor:pointer; }
+.fb[aria-pressed="true"]{ background:var(--coral); border-color:var(--coral); color:#fff; }
+.fb:focus-visible{ outline:3px solid var(--amber); outline-offset:2px; }
+.steps{ margin-top:12px; font-size:13.5px; display:grid; gap:6px; }
+.stp{ padding:8px 12px; border-radius:10px; background:var(--code); border:1px solid var(--line); opacity:.45; transition:opacity .3s, border-color .3s; }
+.stp.on{ opacity:1; border-color:var(--coral); }
+
+/* schema */
+.erd{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; }
+.tbl{ border:1.5px solid var(--line); border-radius:14px; overflow:hidden; background:var(--card); }
+.tbl h4{ margin:0; padding:10px 14px; background:var(--code); font-size:13px; font-family:ui-monospace,monospace; border-bottom:1px solid var(--line); }
+.tbl h4 small{ color:var(--mut); font-weight:400; }
+.tbl ul{ list-style:none; margin:0; padding:8px 14px 12px; font-size:12.3px; font-family:ui-monospace,monospace; line-height:1.9; }
+.tbl .pk{ color:var(--coral); font-weight:700; }
+.tbl .fk{ color:var(--blue); }
+.tbl .en{ color:var(--good); }
+.note{ font-size:13px; color:var(--mut); background:var(--code); border-left:3px solid var(--amber); padding:10px 14px; border-radius:0 10px 10px 0; margin-top:14px; }
+
+/* api */
+.ep{ border-bottom:1px dashed var(--line); padding:13px 0; }
+.ep:last-child{ border:0; }
+.method{ display:inline-block; font-family:ui-monospace,monospace; font-size:11px; font-weight:800; border-radius:6px; padding:2px 8px; margin-right:8px; color:#fff; }
+.GET{ background:var(--good);} .POST{ background:var(--coral);} .HOOK{ background:var(--blue);}
+.ep code.path{ font-size:13px; font-weight:700; }
+.ep .who{ float:right; font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
+.ep p{ margin:6px 0 0; font-size:13px; color:var(--mut); }
+details{ margin-top:6px; } summary{ font-size:12px; color:var(--coral); cursor:pointer; font-weight:700; }
+
+/* sequence player */
+.seqrow{ display:grid; grid-template-columns:170px 1fr; gap:10px; align-items:center; padding:9px 10px; border-radius:10px; border:1px solid transparent; opacity:.4; transition:all .3s; font-size:13px; }
+.seqrow.on{ opacity:1; background:var(--code); border-color:var(--coral); }
+.seqrow .actors{ font-family:ui-monospace,monospace; font-size:11.5px; color:var(--coral); font-weight:700; }
+.playbtn{ border:0; border-radius:999px; background:var(--coral); color:#fff; font:inherit; font-weight:800; font-size:13px; padding:9px 18px; cursor:pointer; margin-bottom:10px; }
+.seqtabs{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+
+/* state machine */
+.smwrap{ overflow-x:auto; }
+.sm-state rect{ fill:var(--card); stroke:var(--line); stroke-width:2; rx:16; cursor:pointer; transition:all .25s; }
+.sm-state text{ pointer-events:none; }
+.sm-state .nm{ font-size:14px; font-weight:800; }
+.sm-state .ds{ font-size:9.5px; fill:var(--mut); }
+.sm-state.sel rect{ stroke:var(--coral); stroke-width:3; filter:drop-shadow(0 4px 12px rgba(251,133,0,.35)); }
+.sm-state.dim rect{ opacity:.35; } .sm-state.dim text{ opacity:.35; }
+.sm-edge path{ fill:none; stroke:var(--mut); stroke-width:1.8; opacity:.55; transition:all .25s; }
+.sm-edge text{ font-size:10px; fill:var(--mut); font-weight:700; transition:all .25s; }
+.sm-edge.hot path{ stroke:var(--coral); stroke-width:3; opacity:1; marker-end:url(#arrC); }
+.sm-edge.hot text{ fill:var(--coral); }
+.sm-edge.dim path,.sm-edge.dim text{ opacity:.12; }
+.smpanel{ margin-top:12px; background:var(--code); border:1.5px dashed var(--amber); border-radius:12px; padding:12px 16px; font-size:13.5px; min-height:64px; }
+.smpanel b{ color:var(--coral); }
+
+/* edge cases */
+.ecgrid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:14px; }
+.ec{ border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:var(--card); font-size:13px; }
+.ec h4{ margin:0 0 6px; font-size:13.5px; display:flex; gap:8px; align-items:center; }
+.ec .sev{ font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; border-radius:999px; padding:2px 8px; flex:none; }
+.sev.p0{ background:var(--bad); color:#fff; } .sev.p1{ background:var(--amber); color:#0B2A3C; } .sev.p2{ background:var(--line); color:var(--mut); }
+.ec p{ margin:0; color:var(--mut); }
+.ec p b{ color:var(--ink); }
+footer{ padding:36px 0 60px; color:var(--mut); font-size:12.5px; text-align:center; }
+</style>
+
+<section style="padding-top:70px"><div class="wrap">
+  <div class="kicker">Engineering companion · spec: docs/cheeko-subscription-spec.md</div>
+  <h1>Subscription backend — how it actually flows</h1>
+  <p class="lead">System design, DB schema, API surface and the four sequences that matter. Everything here is decided (17-ticket wayfinder trail); this page is the build map. Parent-facing explainer is a separate page.</p>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">System design</div>
+  <h2>Components & data flow</h2>
+  <p class="lead">Pick a flow — the path lights up and a pulse traces the actual call order.</p>
+  <div class="card">
+    <div class="flowbtns" id="fbtns"></div>
+    <div class="archwrap">
+    <svg viewBox="0 0 960 380" width="100%" style="min-width:760px" aria-label="Architecture diagram">
+      <!-- wires -->
+      <path id="w-toy-gw"   class="wire" d="M148,120 H255"/>
+      <path id="w-gw-mgr"   class="wire" d="M375,120 H480"/>
+      <path id="w-gw-lk"    class="wire" d="M315,150 V220 H480"/>
+      <path id="w-lk-wk"    class="wire" d="M600,250 H700"/>
+      <path id="w-wk-mgr"   class="wire" d="M760,220 V120 H600"/>
+      <path id="w-app-mgr"  class="wire" d="M148,40 H480 V90"/>
+      <path id="w-portal-mgr" class="wire" d="M540,40 V90"/>
+      <path id="w-rzp-mgr"  class="wire" d="M860,60 H540 V90" />
+      <path id="w-mgr-db"   class="wire" d="M540,150 V310"/>
+      <!-- components -->
+      <g class="comp"><rect x="28" y="90" width="120" height="60"/><text x="88" y="115" text-anchor="middle" class="t">🧸 Toy</text><text x="88" y="133" text-anchor="middle" class="s">MQTT + UDP audio</text></g>
+      <g class="comp"><rect x="255" y="90" width="120" height="60"/><text x="315" y="115" text-anchor="middle" class="t">🚪 mqtt-gateway</text><text x="315" y="133" text-anchor="middle" class="s">gate + clip player</text></g>
+      <g class="comp"><rect x="480" y="90" width="120" height="60"/><text x="540" y="115" text-anchor="middle" class="t">🧮 manager-api</text><text x="540" y="133" text-anchor="middle" class="s">verdict · webhooks</text></g>
+      <g class="comp ext"><rect x="480" y="220" width="120" height="60"/><text x="540" y="245" text-anchor="middle" class="t">📡 LiveKit</text><text x="540" y="263" text-anchor="middle" class="s">rooms + dispatch</text></g>
+      <g class="comp"><rect x="700" y="220" width="120" height="60"/><text x="760" y="245" text-anchor="middle" class="t">🤖 picoclaw worker</text><text x="760" y="263" text-anchor="middle" class="s">STT→LLM→TTS · heartbeat</text></g>
+      <g class="comp"><rect x="28" y="10" width="120" height="60"/><text x="88" y="35" text-anchor="middle" class="t">📱 Parent app</text><text x="88" y="53" text-anchor="middle" class="s">view-only (no buy)</text></g>
+      <g class="comp"><rect x="480" y="10" width="120" height="60"/><text x="540" y="35" text-anchor="middle" class="t">🌐 pay.cheekoai.in</text><text x="540" y="53" text-anchor="middle" class="s">portal (new repo)</text></g>
+      <g class="comp ext"><rect x="820" y="30" width="120" height="60"/><text x="880" y="55" text-anchor="middle" class="t">💳 Razorpay</text><text x="880" y="73" text-anchor="middle" class="s">subs + webhooks</text></g>
+      <g class="comp"><rect x="480" y="310" width="120" height="58"/><text x="540" y="334" text-anchor="middle" class="t">🗄️ Postgres</text><text x="540" y="352" text-anchor="middle" class="s">4 new tables</text></g>
+      <circle id="fp" class="fpulse" r="7" opacity="0"/>
+    </svg>
+    </div>
+    <div class="steps" id="fsteps"></div>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Data model</div>
+  <h2>DB schema — 4 new tables</h2>
+  <p class="lead">Prisma models on the existing Supabase Postgres. The spine is keyed by <code>mac_address</code>, <b>not</b> a FK to <code>ai_device</code> — unbind deletes that row (<code>device.service.js:184</code>) and subscription state must survive it.</p>
+  <div class="erd">
+    <div class="tbl"><h4>subscription_plans <small>· catalog, DB-driven</small></h4><ul>
+      <li><span class="pk">id</span> PK</li>
+      <li>tier <span class="en">'starter'|'family'|'premium'</span> UNIQUE</li>
+      <li>name · price_inr</li>
+      <li>monthly_question_limit · daily_question_limit</li>
+      <li>daily_minutes_limit <i>(invisible backstop)</i></li>
+      <li>monthly_image_limit (null=∞) · daily_image_limit</li>
+      <li>features JSON <i>(memory, kid_profiles…)</i></li>
+      <li>razorpay_plan_id · is_active · timestamps</li>
+    </ul></div>
+    <div class="tbl"><h4>device_subscriptions <small>· the spine</small></h4><ul>
+      <li><span class="pk">id</span> PK · <span class="pk">mac_address UNIQUE</span></li>
+      <li>status <span class="en">'trial'|'active'|'grace'|'lapsed'|'cancelled'</span></li>
+      <li><span class="fk">plan_id → subscription_plans</span> <i>(Family during trial)</i></li>
+      <li>user_id <i>(payer; survives unbind)</i></li>
+      <li>trial_started_at · trial_ends_at · <b>trial_used</b> <i>(permanent)</i></li>
+      <li>billing_cycle <span class="en">'monthly'</span></li>
+      <li>current_period_start / end <i>(bucket anchor)</i></li>
+      <li>grace_until · cancel_at_period_end</li>
+      <li>razorpay_customer_id · razorpay_subscription_id</li>
+    </ul></div>
+    <div class="tbl"><h4>subscription_events <small>· webhook ledger</small></h4><ul>
+      <li><span class="pk">id</span> PK</li>
+      <li><span class="pk">razorpay_event_id UNIQUE</span> <i>← idempotency key</i></li>
+      <li>event_type · mac_address</li>
+      <li>razorpay_subscription_id</li>
+      <li>payload JSON · processed_at · created_at</li>
+    </ul></div>
+    <div class="tbl"><h4>subscription_admin_audit</h4><ul>
+      <li><span class="pk">id</span> PK · admin_user</li>
+      <li>action <span class="en">'comp_extend'|'trial_regrant'|'plan_override'</span></li>
+      <li>mac_address · reason</li>
+      <li>before_state JSON · after_state JSON · created_at</li>
+    </ul></div>
+  </div>
+  <div class="note"><b>Usage is computed, not stored:</b> monthly questions = <code>SUM(message_count)</code> over existing <code>device_token_usage_session</code> WHERE <code>created_at ≥ current_period_start</code>; daily = same over the IST day; images from the imagine-upload path. No counter columns at &lt;100 devices — add a rollup only if the verdict query slows. Phase 2's per-device limit fields are subsumed: limits always come off the plan row.</div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">API surface</div>
+  <h2>Endpoints (manager-api)</h2>
+  <div class="card">
+    <div class="ep"><span class="who">gateway · X-Service-Key</span><span class="method GET">GET</span><code class="path">/device/:mac/session-verdict</code>
+      <p>Called in <code>_deferredSetup</code> before LiveKit dispatch AND before the imagine WS handoff. No cache. <b>Fail-open + alert</b> on error.</p>
+      <details><summary>response</summary><pre>{ "allowed": true,
+  "reason": "ok",   // no_plan | monthly_bucket_empty | daily_questions | daily_minutes | daily_images
+  "remaining": { "questions_month": 157, "questions_today": 34, "minutes_today": 12, "images_today": 25 } }</pre></details></div>
+    <div class="ep"><span class="who">worker · X-Service-Key</span><span class="method POST">POST</span><code class="path">/device/:mac/usage-heartbeat</code>
+      <p>Every 5 min per live session (Phase 1.4 — launch prerequisite). Response may order a cutoff when the daily minute cap is breached → gateway sends <code>end_prompt</code>.</p>
+      <details><summary>response</summary><pre>{ "cutoff": false }   // true ⇒ hard "time's up" mid-session</pre></details></div>
+    <div class="ep"><span class="who">portal/app · Firebase Bearer</span><span class="method GET">GET</span><code class="path">/api/mobile/subscription/plans</code><p>Active catalog rows.</p></div>
+    <div class="ep"><span class="who">portal/app · Firebase Bearer</span><span class="method GET">GET</span><code class="path">/api/mobile/devices/:mac/subscription</code><p>Status, plan, period, usage summary, trial countdown — drives the app's plan/usage view and the portal's manage screen.</p></div>
+    <div class="ep"><span class="who">portal only</span><span class="method POST">POST</span><code class="path">/api/mobile/devices/:mac/subscription/checkout</code><p>Creates Razorpay customer + subscription; returns checkout params for the Razorpay JS sheet.</p></div>
+    <div class="ep"><span class="who">portal only</span><span class="method POST">POST</span><code class="path">/api/mobile/devices/:mac/subscription/cancel</code><p>Sets <code>cancel_at_period_end</code> — plan runs out the paid period.</p></div>
+    <div class="ep"><span class="who">portal only</span><span class="method POST">POST</span><code class="path">/api/mobile/devices/:mac/subscription/change-plan</code><p>UPI limitation: orchestrates cancel current Razorpay sub + create new (fresh mandate approval). Card subs may PATCH in place.</p></div>
+    <div class="ep"><span class="who">razorpay</span><span class="method HOOK">HOOK</span><code class="path">POST /webhooks/razorpay</code>
+      <p>HMAC-SHA256 verify → insert-or-skip by <code>razorpay_event_id</code> → state transition. Events arrive at-least-once and <b>unordered</b>: on conflict, re-fetch subscription status from Razorpay and derive state.</p>
+      <details><summary>events handled</summary><pre>subscription.authenticated | activated | charged | pending | halted | paused | resumed | cancelled | completed
+refund.processed (full current-period refund ⇒ lapsed)
+(no payment-failure event exists — failures surface as pending → halted)
++ nightly reconciliation job: poll active|grace subs vs Razorpay API, repair drift, alert
+  (webhooks auto-disable after 24h of failed retries — reconciliation is the backstop)</pre></details></div>
+    <div class="ep"><span class="who">admin · ADMIN_PASSWORD</span><span class="method GET">GET</span><code class="path">/admin-dashboard/subscriptions…</code><p>Search/view · comp/extend · trial re-grant — every write lands in <code>subscription_admin_audit</code>. Metrics page over SQL views (funnel, churn, MRR, gate-hits).</p></div>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Sequences</div>
+  <h2>The four flows, step by step</h2>
+  <p class="lead">Press play — each row lights in call order.</p>
+  <div class="card">
+    <div class="seqtabs" id="seqtabs"></div>
+    <button class="playbtn" id="seqplay">▶ Play sequence</button>
+    <div id="seqbody"></div>
+  </div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">State machine</div>
+  <h2>device_subscriptions.status</h2>
+  <p class="lead">Click a state to see its transitions. Coral = outgoing, and the panel explains each trigger.</p>
+  <div class="card smwrap">
+    <svg id="smsvg" viewBox="0 0 920 400" width="100%" style="min-width:740px" aria-label="Subscription state machine">
+      <defs>
+        <marker id="arrM" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#8fa5b5" opacity=".6"/></marker>
+        <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#FB8500"/></marker>
+      </defs>
+      <g id="smedges"></g><g id="smnodes"></g>
+    </svg>
+    <div class="smpanel" id="smpanel">Click any state — e.g. <b>GRACE</b> to see how a failed UPI renewal plays out.</div>
+  </div>
+  <div class="note"><b>Safety invariants:</b> ① verdict fails <b>open</b> (our outage ≠ unpaid bill) + alert; ② question bucket start-gated only — in-flight sessions finish; only the daily <i>minute</i> cap cuts mid-session (via heartbeat); ③ one trial per MAC ever (<code>trial_used</code> permanent, admin re-grant is audited); ④ global <code>ENFORCEMENT_ENABLED</code> kill-switch returns <code>allowed=true</code> for all; ⑤ webhook ledger idempotent + order-tolerant.</div>
+</div></section>
+
+<section><div class="wrap rv">
+  <div class="kicker">Edge cases & failure modes</div>
+  <h2>The corners that bite</h2>
+  <p class="lead">Severity = how bad it goes if unhandled. P0 = money or child-facing breakage · P1 = wrong state, self-healing possible · P2 = cosmetic/ops.</p>
+  <div class="ecgrid">
+    <div class="ec"><h4><span class="sev p0">P0</span>Resold / re-gifted toy with a live mandate</h4><p>New parent binds a device whose subscription is <b>active and paid by the previous owner</b> — old payer keeps getting charged. On bind where <code>user_id ≠ payer</code>: keep the sub running (kid keeps AI), <b>notify the old payer with a one-tap cancel link</b>, and show "paid by previous owner" in the new parent's app. Never auto-cancel — gifting within a family is the common case.</p></div>
+    <div class="ec"><h4><span class="sev p0">P0</span>Webhooks silently dead >24h</h4><p>Razorpay retries for 24h then <b>auto-disables the webhook</b>. A charge that succeeded while dead = parent paid, toy lapsed. Fix: <b>nightly reconciliation job</b> — poll every <code>active|grace|pending</code> subscription against the Razorpay API and repair status; alert on any drift found.</p></div>
+    <div class="ec"><h4><span class="sev p0">P0</span>Trial-expiry cron dies</h4><p>If lapse only happened via the daily job, a dead cron = free unlimited AI. The verdict must <b>compute expiry lazily</b>: <code>status='trial' AND now() > trial_ends_at ⇒ treat as lapsed</code> (and repair the row). Cron is just the notifier, never the enforcer.</p></div>
+    <div class="ec"><h4><span class="sev p1">P1</span>Customer pauses the mandate from their UPI app</h4><p><code>subscription.paused</code> arrives — and per Razorpay, <b>only the customer can resume it</b>. Map paused ⇒ GRACE behavior (3-day timer + "resume in your UPI app" push); unresumed ⇒ LAPSED. Don't try to resume server-side; it will fail.</p></div>
+    <div class="ec"><h4><span class="sev p1">P1</span>Webhook races the checkout response</h4><p><code>subscription.activated</code> can land <b>before</b> the portal's checkout POST returns. Handler must upsert by <code>razorpay_subscription_id</code> even when the local row still says trial/lapsed — never assume checkout wrote first.</p></div>
+    <div class="ec"><h4><span class="sev p1">P1</span>subscription.completed (total_count exhausted)</h4><p>A "monthly" Razorpay sub has a finite cycle count. Seed <code>total_count</code> high (e.g. 120 cycles = 10 years) and treat <code>completed</code> like cancelled-at-period-end with a re-subscribe push — never let it surprise you at month 12.</p></div>
+    <div class="ec"><h4><span class="sev p1">P1</span>Refund issued for the current period</h4><p>Support refunds in the Razorpay dashboard → <code>refund.processed</code>. Full refund of the running period ⇒ set LAPSED immediately (they got the money back); partial/goodwill refunds change nothing. Log to the ledger either way.</p></div>
+    <div class="ec"><h4><span class="sev p1">P1</span>Account deletion with live subscriptions</h4><p><code>DELETE /api/mobile/account</code> must enumerate the parent's device subscriptions and <b>cancel the Razorpay subs first</b> — an orphaned mandate that keeps charging a deleted account is a chargeback machine.</p></div>
+    <div class="ec"><h4><span class="sev p1">P1</span>Plan change mid-flight (UPI)</h4><p>Cancel-old + create-new leaves a window where the new mandate is <b>authenticated but not yet charged</b>. Keep the row on the old plan until <code>activated</code> for the new sub arrives; if the parent abandons mandate approval, nothing changed — old plan simply ran out its period.</p></div>
+    <div class="ec"><h4><span class="sev p2">P2</span>Clock edges</h4><p>Daily caps roll at <b>IST midnight</b>; period boundaries come from Razorpay timestamps (UTC) — convert once at write, compare in UTC. A session spanning midnight counts toward the day it <i>started</i>.</p></div>
+    <div class="ec"><h4><span class="sev p2">P2</span>Admin re-grant vs trial_used</h4><p><code>trial_used</code> is permanent by policy; the audited admin re-grant sets a fresh <code>trial_ends_at</code> <b>without clearing the flag</b> — the flag means "no automatic trial ever again", not "no trial ever".</p></div>
+    <div class="ec"><h4><span class="sev p2">P2</span>Verdict during the migration window</h4><p>Between schema deploy and fleet seeding, bound devices have <b>no subscription row</b>. Verdict must treat missing-row as <code>allowed</code> while <code>ENFORCEMENT_ENABLED=false</code>, and as lapsed once live — the seed script must run before the flag flips.</p></div>
+  </div>
+</div></section>
+
+<footer>Spec: docs/cheeko-subscription-spec.md · decisions: docs/wayfinder/subscription-system/ · parent-facing explainer is a separate artifact · 2026-07-14</footer>
+
+<script>
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.1});
+document.querySelectorAll('.rv').forEach(el=>io.observe(el));
+const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---- architecture flows ---- */
+const FLOWS={
+ "Voice session":{wires:["w-toy-gw","w-gw-mgr","w-gw-lk","w-lk-wk","w-wk-mgr"],steps:[
+   ["w-toy-gw",false,"1 · Toy sends MQTT hello → gateway fast-path replies UDP params (<50ms, unchanged)"],
+   ["w-gw-mgr",false,"2 · Gateway calls GET /device/:mac/session-verdict (fail-open on error + alert)"],
+   ["w-gw-mgr",true, "3 · allowed:false ⇒ stream gate clip over UDP, stop here (zero AI cost) — allowed:true ⇒ continue"],
+   ["w-gw-lk",false, "4 · Gateway creates LiveKit room + AgentDispatch (as today)"],
+   ["w-lk-wk",false, "5 · picoclaw worker joins, pulls persona/providers, conversation runs"],
+   ["w-wk-mgr",false,"6 · Worker heartbeats usage every 5 min → minute-cap breach ⇒ {cutoff:true} ⇒ end_prompt; session end ⇒ usage summary POST"]]},
+ "Purchase":{wires:["w-portal-mgr","w-rzp-mgr","w-mgr-db"],steps:[
+   ["w-portal-mgr",false,"1 · Portal (Firebase Bearer) → POST /subscription/checkout → manager-api creates Razorpay customer + subscription"],
+   ["w-rzp-mgr",false,"2 · Parent approves the UPI Autopay mandate in the Razorpay sheet (₹15k silent-debit cap — all tiers fit)"],
+   ["w-rzp-mgr",true, "3 · Webhooks: subscription.authenticated → activated → charged (at-least-once, unordered)"],
+   ["w-mgr-db",false, "4 · Ledger insert by razorpay_event_id (dupe ⇒ skip) → status=active, period anchored to billing date"]]},
+ "Renewal fails":{wires:["w-rzp-mgr","w-mgr-db","w-app-mgr"],steps:[
+   ["w-rzp-mgr",false,"1 · Renewal charge fails → subscription.pending webhook (there is no payment-failure event)"],
+   ["w-mgr-db",false, "2 · status=grace, grace_until=+3d — verdict keeps allowing sessions"],
+   ["w-app-mgr",false,"3 · FCM push to parent with fix-payment link (portal manage screen)"],
+   ["w-rzp-mgr",true, "4 · charged within grace ⇒ active · halted / grace expiry ⇒ lapsed (gate closes, plan-gate push fires)"]]},
+ "Trial at bind":{wires:["w-app-mgr","w-mgr-db"],steps:[
+   ["w-app-mgr",false,"1 · Parent enters 6-digit code → POST bind (deviceBind, device.service.js:81)"],
+   ["w-mgr-db",false, "2 · No device_subscriptions row for MAC ⇒ create status=trial, +30d, plan=family, trial_used=true"],
+   ["w-mgr-db",true,  "3 · Row exists (rebind/resale) ⇒ no new trial, keep prior status — trial is once per MAC, ever"],
+   ["w-app-mgr",false,"4 · Trial-expiry job (daily): past trial_ends_at ⇒ lapsed · pushes at day 23/27/30"]]}
+};
+let curFlow="Voice session", playing=false;
+const fbtns=document.getElementById('fbtns'), fsteps=document.getElementById('fsteps'), fp=document.getElementById('fp');
+function drawFlow(){
+  fbtns.innerHTML=Object.keys(FLOWS).map(k=>`<button class="fb" aria-pressed="${k===curFlow}" onclick="pick('${k}')">${k}</button>`).join('');
+  document.querySelectorAll('.wire').forEach(w=>w.classList.remove('hot'));
+  FLOWS[curFlow].wires.forEach(id=>document.getElementById(id).classList.add('hot'));
+  fsteps.innerHTML=FLOWS[curFlow].steps.map((s,i)=>`<div class="stp" id="stp${i}">${s[2]}</div>`).join('');
+  animate();
+}
+window.pick=k=>{curFlow=k;drawFlow();};
+async function animate(){
+  if(playing) return; playing=true;
+  const steps=FLOWS[curFlow].steps;
+  for(let i=0;i<steps.length;i++){
+    document.querySelectorAll('.stp').forEach(s=>s.classList.remove('on'));
+    const el=document.getElementById('stp'+i); if(el) el.classList.add('on');
+    const wire=document.getElementById(steps[i][0]);
+    if(wire && !reduced){
+      const len=wire.getTotalLength(), t0=performance.now(), ms=850;
+      fp.setAttribute('opacity',1);
+      await new Promise(res=>{(function f(t){const k=Math.min(1,(t-t0)/ms);const p=wire.getPointAtLength(len*(steps[i][1]?1-k:k));fp.setAttribute('cx',p.x);fp.setAttribute('cy',p.y);if(k<1)requestAnimationFrame(f);else res();})(t0+.001)});
+    } else { await new Promise(r=>setTimeout(r,reduced?150:500)); }
+  }
+  fp.setAttribute('opacity',0); playing=false;
+}
+drawFlow();
+
+/* ---- sequence player ---- */
+const SEQ={
+ "Session start (gated)":[
+  ["toy → gateway","MQTT hello · UDP session established (fast path, <50ms — unchanged)"],
+  ["gateway → manager","GET /device/:mac/session-verdict"],
+  ["manager → postgres","status lookup + SUM(message_count) this period + today (IST) + minutes"],
+  ["manager → gateway","{allowed, reason, remaining} — error ⇒ gateway treats as allowed + alert fires"],
+  ["gateway (refused)","skip LiveKit dispatch · stream pre-recorded gate clip over existing UDP · plan-gate push if plan-related"],
+  ["gateway (allowed)","create room + AgentDispatch → worker joins → conversation"]],
+ "Webhook processing":[
+  ["razorpay → manager","POST /webhooks/razorpay (at-least-once, unordered)"],
+  ["manager","verify HMAC-SHA256 against raw body"],
+  ["manager → postgres","INSERT subscription_events ON CONFLICT (razorpay_event_id) DO NOTHING — dupe ⇒ 200 and stop"],
+  ["manager","map event → transition; if out-of-order suspected, re-fetch subscription from Razorpay and derive state"],
+  ["manager → postgres","UPDATE device_subscriptions (status, period, grace_until…) + mark event processed_at"],
+  ["manager → FCM","push on pending (fix-payment) and on lapse (plan-gate)"]],
+ "Heartbeat cutoff":[
+  ["worker → manager","POST /device/:mac/usage-heartbeat every 5 min (in-flight session usage)"],
+  ["manager → postgres","update session row · recompute minutes_today"],
+  ["manager → worker","{cutoff:true} when daily minute cap breached"],
+  ["worker → gateway","session teardown signal (end_prompt path)"],
+  ["gateway → toy","graceful 'time for a break' — crash-safe billing: ≤5 min of usage ever lost"]],
+ "Launch migration":[
+  ["ops","seed subscription_plans (3 rows) + create Razorpay plan objects (test → live)"],
+  ["script → postgres","INSERT device_subscriptions (status=trial, trial_started_at=now) for every bound MAC (<100)"],
+  ["manager → FCM","pre-launch announcement push + in-app banner ('plans are coming, first month free')"],
+  ["ops","flip ENFORCEMENT_ENABLED · watch funnel views + alerts (webhook fail, fail-open, halted spike)"],
+  ["ops (if bad)","kill-switch off ⇒ verdict returns allowed for everyone — instant revert"]]
+};
+let curSeq=Object.keys(SEQ)[0], seqPlaying=false;
+const seqtabs=document.getElementById('seqtabs'), seqbody=document.getElementById('seqbody');
+function drawSeq(){
+  seqtabs.innerHTML=Object.keys(SEQ).map(k=>`<button class="fb" aria-pressed="${k===curSeq}" onclick="pickSeq('${k}')">${k}</button>`).join('');
+  seqbody.innerHTML=SEQ[curSeq].map((r,i)=>`<div class="seqrow" id="sq${i}"><span class="actors">${r[0]}</span><span>${r[1]}</span></div>`).join('');
+}
+window.pickSeq=k=>{curSeq=k;drawSeq();};
+document.getElementById('seqplay').onclick=async()=>{
+  if(seqPlaying)return; seqPlaying=true;
+  const n=SEQ[curSeq].length;
+  document.querySelectorAll('.seqrow').forEach(r=>r.classList.remove('on'));
+  for(let i=0;i<n;i++){ const el=document.getElementById('sq'+i); if(el)el.classList.add('on');
+    await new Promise(r=>setTimeout(r,reduced?120:800)); }
+  seqPlaying=false;
+};
+drawSeq();
+
+/* ---- interactive state machine ---- */
+const SM_STATES = {
+  none:      {x:60,  y:170, nm:"(none)",    ds:"no row yet"},
+  trial:     {x:250, y:60,  nm:"TRIAL",     ds:"+30d · plan=family"},
+  active:    {x:490, y:60,  nm:"ACTIVE",    ds:"paid · period anchored"},
+  grace:     {x:730, y:60,  nm:"GRACE",     ds:"grace_until = +3d"},
+  lapsed:    {x:490, y:290, nm:"LAPSED",    ds:"AI gated"},
+  cancelled: {x:730, y:290, nm:"CANCELLED", ds:"ran out paid period"},
+};
+const SM_EDGES = [
+  ["none","trial","first bind",0,"Parent enters the 6-digit code → row created: trial_ends_at=+30d, plan=family, trial_used=true. Once per MAC, ever."],
+  ["trial","active","purchase",0,"Portal checkout → UPI mandate approved → subscription.activated/charged. Period anchors to the billing date."],
+  ["trial","lapsed","30d expiry",0,"Trial over — hard gate (grace is for paying customers). Verdict computes this lazily; the cron only sends the pushes."],
+  ["active","grace","pending @renewal",0,"Renewal charge failed → subscription.pending (no failure event exists). AI keeps working; parent gets fix-payment push."],
+  ["grace","active","charged",40,"Charge succeeded within grace — back to normal, invisible to the child."],
+  ["grace","lapsed","halted / +3d",0,"Grace expired or subscription.halted → gate closes, plan-gate push fires."],
+  ["active","cancelled","cancel → period end",0,"cancel_at_period_end=true; the paid period runs out, then status flips. No mid-period clawback."],
+  ["lapsed","active","purchase",30,"Re-subscribe any time from the portal — no new trial (trial_used is permanent)."],
+  ["cancelled","active","re-subscribe",-46,"Changed their mind — new checkout, instant reactivation."],
+  ["active","active","UPI plan change",0,"Cancel Razorpay sub + create new (fresh mandate) — same row, new razorpay_subscription_id. Row stays ACTIVE on the old plan until the new sub's activated arrives."],
+];
+const SM_INFO = {
+  none:"No device_subscriptions row exists — a factory-fresh (or never-bound) toy. Only event possible: first bind.",
+  trial:"The free month. Family limits, no card, no Razorpay objects. Exits: purchase (→ACTIVE) or 30-day expiry (→LAPSED, hard gate).",
+  active:"Paid and healthy. Buckets reset each billing anniversary. Exits: failed renewal (→GRACE), cancel (→CANCELLED at period end), or a UPI plan change (self-loop: new Razorpay sub, same row).",
+  grace:"3 merchant-side days after a failed charge (also where customer-paused mandates land). AI still works. Exits: charged (→ACTIVE) or halted/timeout (→LAPSED).",
+  lapsed:"AI voice + imagine gated; RFID/stories/music untouched. Gate clip plays at session attempts. Exit: purchase (→ACTIVE). No re-trial.",
+  cancelled:"Parent cancelled; paid period ran out. Functionally gated like LAPSED but tracked separately for churn metrics. Exit: re-subscribe (→ACTIVE).",
+};
+const NW=150, NH=58;
+const eg=document.getElementById('smedges'), ng=document.getElementById('smnodes'), panel=document.getElementById('smpanel');
+function edgePath(a,b,bend){
+  const A=SM_STATES[a], B=SM_STATES[b];
+  if(a===b){ return `M${A.x+NW/2-20},${A.y} C${A.x+NW/2+70},${A.y-64} ${A.x+NW/2+70},${A.y+64} ${A.x+NW/2-20},${A.y+8}`; }
+  const dx=B.x-A.x, dy=B.y-A.y, mx=(A.x+B.x)/2, my=(A.y+B.y)/2;
+  const nx=-dy, ny=dx, L=Math.hypot(nx,ny)||1;
+  const cx=mx+nx/L*bend, cy=my+ny/L*bend;
+  const sx=A.x+dx*0.18, sy=A.y+dy*0.18, ex=B.x-dx*0.18, ey=B.y-dy*0.18;
+  return `M${sx},${sy} Q${cx},${cy} ${ex},${ey}`;
+}
+SM_EDGES.forEach((e,i)=>{
+  const g=document.createElementNS('http://www.w3.org/2000/svg','g');
+  g.setAttribute('class','sm-edge'); g.id='sme'+i;
+  const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+  p.setAttribute('d',edgePath(e[0],e[1],e[3])); p.setAttribute('marker-end','url(#arrM)');
+  g.appendChild(p);
+  const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+  const A=SM_STATES[e[0]],B=SM_STATES[e[1]];
+  if(e[0]===e[1]){ t.setAttribute('x',A.x+NW/2+58); t.setAttribute('y',A.y+4); }
+  else{ const dx=B.x-A.x,dy=B.y-A.y,L=Math.hypot(-dy,dx)||1;
+    t.setAttribute('x',(A.x+B.x)/2 + (-dy/L)*(e[3]*0.75+14)); t.setAttribute('y',(A.y+B.y)/2 + (dx/L)*(e[3]*0.75+14)-4); }
+  t.setAttribute('text-anchor','middle'); t.textContent=e[2];
+  g.appendChild(t); eg.appendChild(g);
+});
+Object.entries(SM_STATES).forEach(([k,s])=>{
+  const g=document.createElementNS('http://www.w3.org/2000/svg','g');
+  g.setAttribute('class','sm-state'); g.id='smn-'+k; g.setAttribute('tabindex','0'); g.setAttribute('role','button');
+  g.innerHTML=`<rect x="${s.x-NW/2}" y="${s.y-NH/2}" width="${NW}" height="${NH}"/>
+    <text class="nm" x="${s.x}" y="${s.y-2}" text-anchor="middle">${s.nm}</text>
+    <text class="ds" x="${s.x}" y="${s.y+16}" text-anchor="middle">${s.ds}</text>`;
+  const sel=()=>selectState(k);
+  g.addEventListener('click',sel);
+  g.addEventListener('keydown',ev=>{ if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();sel();} });
+  ng.appendChild(g);
+});
+let smSel=null;
+function selectState(k){
+  smSel = (smSel===k)? null : k;
+  document.querySelectorAll('.sm-state').forEach(n=>{ n.classList.remove('sel','dim');
+    if(smSel && n.id!=='smn-'+smSel) n.classList.add('dim'); if(smSel && n.id==='smn-'+smSel) n.classList.add('sel'); });
+  SM_EDGES.forEach((e,i)=>{ const g=document.getElementById('sme'+i); g.classList.remove('hot','dim');
+    if(smSel){ if(e[0]===smSel) g.classList.add('hot'); else g.classList.add('dim'); } });
+  if(smSel){
+    const outs=SM_EDGES.filter(e=>e[0]===smSel).map(e=>`<br>→ <b>${e[1].toUpperCase()}</b> on <b>${e[2]}</b> — ${e[4]}`).join('');
+    panel.innerHTML=`<b>${SM_STATES[smSel].nm}</b> — ${SM_INFO[smSel]}${outs||'<br><i>terminal (until an inbound event)</i>'}`;
+    if(smSel==='trial'){ const inb=SM_EDGES.find(e=>e[1]==='trial'); panel.innerHTML+=`<br><span style="color:var(--mut)">← entered only via <b>${inb[2]}</b> (once per MAC — trial_used never clears)</span>`; }
+  } else panel.innerHTML='Click any state — e.g. <b>GRACE</b> to see how a failed UPI renewal plays out.';
+  // dim un-selected state nodes' targets back on:
+  if(smSel){ SM_EDGES.filter(e=>e[0]===smSel).forEach(e=>{ document.getElementById('smn-'+e[1]).classList.remove('dim'); }); }
+}
+</script>
