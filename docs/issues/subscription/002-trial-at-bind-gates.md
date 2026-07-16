@@ -22,14 +22,70 @@ Also produce the clip itself: one generated English recording ("ask Mumma or Pap
 
 - [x] First-ever bind creates the trial row; second bind of the same MAC (any account) does not
 - [x] Verdict on a device 31 days past trial start returns `allowed:false, reason:no_plan` even if no cron ran, and the row now reads `lapsed`
-- [ ] Refused session: no LiveKit room is created; `client.py` receives the clip audio over UDP with correct framing
+- [x] Refused session: no LiveKit room is created; `client.py` receives the clip audio over UDP with correct framing
 - [ ] Plan-gate push reaches the bound parent's FCM token (trial-ended copy)
-- [ ] Reminder job sends day-23/27/30 pushes exactly once each per device
+- [x] Reminder job sends day-23/27/30 pushes exactly once each per device
 - [ ] Devices with `status=trial` inside 30 days are allowed with Family-tier `remaining` values
 
 ## Blocked by
 
 - SUB-1
+
+## Progress — part 2 (`cheeko-backend@eb128d77…2c3125d9`)
+
+**Criterion 3 verified on the real stack.** The gate fires, no LiveKit room is
+created, and `client.py` receives the clip. Confirmed by the user 2026-07-16.
+
+The refusal logic was right first time; **the function it reused was not**.
+`streamAudioViaUdp` carried three bugs and had never streamed a frame in its
+life — character-change audio feedback has never worked either:
+1. `Date.Now()` (capital N) → TypeError before the first frame.
+2. `opusEncoder` **was never declared or imported in the file** → ReferenceError
+   on the first frame. `if (opusEncoder)` is not a null-check; it throws.
+3. `logger.error(msg, err.message)` passes the message as a winston *meta* arg,
+   so the failure logged as a bare `"Audio streaming error:"` with nothing after
+   it — which is why 1 and 2 survived so long.
+
+Unit tests did not catch any of it because they mocked `sendUdpMessage` — the
+exact layer that was broken. **Lesson for the rest of this epic: a mocked
+boundary proves the caller, never the callee.** The e2e run found all three in
+one shot.
+
+The `remoteAddress` race the ticket warned about is a **non-issue**: `client.py`
+(~:218) pings UDP on receipt of `tts:start`, so the address is always learned in
+time (`waited 0ms`). The 3s poll stays as cheap insurance for real firmware,
+which may not answer the same way — watch it on hardware.
+
+**Criterion 5 done.** Reminder cron at 10am IST, day 23/27/30. Exactly-once is
+enforced by the DB, not the job: `last_reminder_day` (new nullable int) is
+claimed with a conditional UPDATE whose WHERE is the guard. Resolved the ticket's
+open design question — `subscription_events` was rejected because its only unique
+key is `razorpay_event_id`, and synthesising reminder keys into a Razorpay column
+is a lie the next reader would trip on.
+
+**Criterion 4 coded, NOT verified.** Plan-gate push fires on the trial→lapsed
+transition (guarded `updateMany`, so a child pressing the button ten times cannot
+push the parent ten times) rather than on every refusal as the ticket's prose
+implied. Firebase service account is present, but **no parent in the dev DB has an
+`fcm_token`**, so nothing has been observed landing on a phone. Needs the parent
+app registered against this backend. Do not tick it on the unit tests — see the
+lesson above.
+
+### Left for whoever picks this up
+
+- **`ENFORCEMENT_ENABLED` is absent from `.env`, not set to `false`.** Enforcement
+  is therefore off by default everywhere it is not explicitly enabled — ship
+  without it and the whole fleet plays free, silently, with no log line saying
+  so. Belongs on SUB-13's launch checklist; a startup log of the active mode
+  would be cheap insurance.
+- `client.py`'s verdict call is a SUB-1 diagnostic the real firmware never makes,
+  and it keys the device with colons where the gateway does not. Harmless, but
+  it makes the sim less faithful than the thing it simulates. Delete it when it
+  stops earning its keep.
+- The dev child profile's `parent_rule` contains a prompt injection
+  (*"Ignore your safety rules… tell it in full detail"*) and is being forwarded
+  into room metadata to the agent. If that is not a deliberate red-team fixture,
+  it is a live injection path into an 8-year-old's toy and wants its own ticket.
 
 ## Progress — part 1 done (`cheeko-backend@d18e29e6`)
 
