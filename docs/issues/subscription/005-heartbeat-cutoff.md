@@ -57,17 +57,18 @@ aggregate), questions-exhausted ⇒ no cut, 16/15 min ⇒
 `{cutoff:true, reason:daily_minutes}` + gate-hit log. All test rows deleted
 afterwards.
 
-**Deferred, honestly.** A full in-room e2e (real worker in a real LiveKit
-room heartbeating to cutoff) could not complete locally: the first dispatched
-run joined fine but every later room join hit "could not connect after
-timeout" — the local LiveKit server's media path wedged (server HTTP fine,
-fresh worker processes affected, no rooms listed); unrelated to this diff.
-The untested seam is narrow: `startUsageHeartbeat()` wiring inside a real
-`Join` (one line) — everything below it is test- or live-covered. Verify the
-full chain on staging with a real gateway session; note the gateway creates
-rooms with the MAC in room name/metadata, which is exactly what
-`RoomSession.deviceMAC` needs (dispatch-only metadata is not enough — learned
-the hard way here).
+**Full e2e verified** (same day, after a Docker restart un-wedged the local
+LiveKit/EMQX containers): `client.py --mode voice` as the real device →
+gateway hello → LiveKit room `…_206EF1A6D024_conversation` → worker
+`Usage heartbeat started (interval=20s)` → beats at exactly 20s
+(`cutoff=false`) → seeded 15 min of prior usage → next beat:
+`Heartbeat cutoff … daily_minutes (16.3/15 min)` + `cutoff=true` → worker
+"Daily minute cap breached — ending session gracefully" → farewell TTS burst
+received by the client → final usage summary persisted. Nine seconds from
+breach to full teardown. Test rows deleted, fixture restored to lapsed.
+Gateway note for future harnesses: `lk dispatch --metadata` alone is not
+enough — `RoomSession.deviceMAC` comes from room name/metadata, which the
+gateway provides in production.
 
 **Residuals.**
 - A final-summary POST racing an in-flight heartbeat can double-count the
