@@ -33,6 +33,18 @@ Also produce the clip itself: one generated English recording ("ask Mumma or Pap
 
 ## Progress — part 3 (`cheeko-backend@f1fbc65a`, 2026-07-17)
 
+**Dummy-token smoke test passed on the real stack (2026-07-17 PM):** parent
+profile fixture with a fake fcm_token + expired trial for `20:6E:F1:A6:D0:24`,
+verdict fired via `GET /device/:mac/session-verdict` with the service key and
+`ENFORCEMENT_ENABLED=true`. Observed in order: `allowed:false/no_plan`, "Trial
+expired … row repaired to lapsed", "Plan-gate push … **not delivered**"
+(Firebase rejected the fake token — proving lookup → send were reached), and a
+second refusal produced **no second push attempt** (exactly-once guard).
+Everything except FCM delivery to a screen is now verified; only the real
+phone token remains. Gotcha for that run: `device_subscriptions` MACs are
+normalized **uppercase** — a lowercase fixture row reads as "no subscription
+row".
+
 **Criterion 4 unblocked but still unverified — waiting on the user's phone.**
 The real reason no push was ever observed: `parent_profile.fcm_token` **did not
 exist in the dev DB**. The May "app notif" commit (`3649c17d`) declared it in
