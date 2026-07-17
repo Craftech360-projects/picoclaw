@@ -2,7 +2,7 @@
 id: SUB-2
 title: "Trial at bind → expired trial gates a session"
 type: AFK
-status: open
+status: closed
 triage: afk-ready
 assignee: claude
 blocked-by: [SUB-1]
@@ -23,13 +23,22 @@ Also produce the clip itself: one generated English recording ("ask Mumma or Pap
 - [x] First-ever bind creates the trial row; second bind of the same MAC (any account) does not
 - [x] Verdict on a device 31 days past trial start returns `allowed:false, reason:no_plan` even if no cron ran, and the row now reads `lapsed`
 - [x] Refused session: no LiveKit room is created; `client.py` receives the clip audio over UDP with correct framing
-- [ ] Plan-gate push reaches the bound parent's FCM token (trial-ended copy)
+- [x] Plan-gate push reaches the bound parent's FCM token (trial-ended copy) — *verified to the Firebase send; on-screen delivery deferred to SUB-14*
 - [x] Reminder job sends day-23/27/30 pushes exactly once each per device
 - [ ] Devices with `status=trial` inside 30 days are allowed with Family-tier `remaining` values
 
 ## Blocked by
 
 - SUB-1
+
+## Resolution (2026-07-17)
+
+Closed by user decision with every criterion verified except two deliberate deferrals:
+
+- **Criterion 4**: the full chain — lazy trial→lapsed repair, token lookup, real Firebase send attempt, exactly-once guard — was proven on the real stack with a dummy token (see part 3 below). The only unobserved step is the push rendering on a physical phone, which needs the user logged into the parent app. That final observation is now **SUB-14** (parent-app e2e verification, HITL), created at close.
+- **Criterion 6**: deferred to SUB-3 by prior decision (SUB-3 owns the usage SUMs; `remaining` stays null until then).
+
+Code: `cheeko-backend@d18e29e6`, `eb128d77…2c3125d9`, `f1fbc65a`. Closing this unblocks SUB-3 (buckets) and SUB-6 (purchase e2e).
 
 ## Progress — part 3 (`cheeko-backend@f1fbc65a`, 2026-07-17)
 
