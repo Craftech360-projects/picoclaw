@@ -262,6 +262,9 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 		"track_sid": rs.localTrackSID,
 	})
 
+	// Mid-session usage heartbeat + minute-cap cutoff (SUB-5).
+	rs.startUsageHeartbeat()
+
 	return nil
 }
 
