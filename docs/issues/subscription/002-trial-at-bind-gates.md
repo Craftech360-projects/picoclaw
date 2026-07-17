@@ -31,6 +31,32 @@ Also produce the clip itself: one generated English recording ("ask Mumma or Pap
 
 - SUB-1
 
+## Progress — part 3 (`cheeko-backend@f1fbc65a`, 2026-07-17)
+
+**Criterion 4 unblocked but still unverified — waiting on the user's phone.**
+The real reason no push was ever observed: `parent_profile.fcm_token` **did not
+exist in the dev DB**. The May "app notif" commit (`3649c17d`) declared it in
+`schema.prisma` and built the mobile endpoints on it, but never shipped a
+migration — so `findParentFcmToken` (and the reminder/usage-summary jobs) threw
+"column does not exist" at runtime. Fixed with migration
+`20260717000000_add_parent_fcm_token` (additive, nullable), applied via
+`prisma migrate deploy`.
+
+Remaining, needs the user: open the parent app against the backend that shares
+this Supabase DB (Developer Options → Development), log in, accept notification
+permission → token lands in `parent_profile`. Then: bind/expire a trial row,
+fire the verdict with `ENFORCEMENT_ENABLED=true`, watch for the
+"Cheeko's free trial has ended" push. Parent-app FCM registration is fully
+wired (`push_notification_registration_service.dart` — permission → getToken →
+`PUT /parent-profile/fcm-token` with retry), so no app work is needed.
+
+Also noted this run:
+- `device_subscriptions` is now **empty** — the part-1/2 test rows are gone.
+  The FCM run needs a fresh bind or a hand-inserted trial row.
+- Same unmigrated-drift problem exists for `privacy_policy_accepted_at` /
+  `consent_accepted_at` on `parent_profile` (schema-only, no column in DB).
+  Out of SUB-2 scope; left alone.
+
 ## Progress — part 2 (`cheeko-backend@eb128d77…2c3125d9`)
 
 **Criterion 3 verified on the real stack.** The gate fires, no LiveKit room is
