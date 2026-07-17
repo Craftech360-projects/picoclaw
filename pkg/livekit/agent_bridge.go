@@ -104,6 +104,7 @@ type usageState struct {
 	inputTextTokens             int
 	outputTokens                int
 	outputTextTokens            int
+	nilUsageWarned              bool
 }
 
 type qualityState struct {
@@ -1732,6 +1733,10 @@ func (ab *AgentBridge) bridgeSummarizeBatch(ctx context.Context, batch []provide
 	if err != nil {
 		return "", err
 	}
+	// Summarization spends real LLM tokens; meter them (SUB-4) — but not as a
+	// conversational turn: messageCount and response duration feed per-turn
+	// metrics on the manager side.
+	ab.recordSummarizeUsage(resp.Usage)
 	return strings.TrimSpace(resp.Content), nil
 }
 
@@ -1762,7 +1767,30 @@ func (ab *AgentBridge) recordUsage(usage *providers.UsageInfo, elapsed time.Dura
 
 	ab.usage.messageCount++
 	ab.usage.totalResponseDurationSecond += elapsed.Seconds()
+	ab.addUsageTokensLocked(usage)
+}
+
+// recordSummarizeUsage meters an internal LLM call (summarization) without
+// counting a conversational turn.
+func (ab *AgentBridge) recordSummarizeUsage(usage *providers.UsageInfo) {
+	ab.usageMu.Lock()
+	defer ab.usageMu.Unlock()
+	ab.addUsageTokensLocked(usage)
+}
+
+// addUsageTokensLocked adds token counts to the session totals; callers hold usageMu.
+func (ab *AgentBridge) addUsageTokensLocked(usage *providers.UsageInfo) {
 	if usage == nil {
+		// Billing undercounts silently when a provider stops reporting usage
+		// (SUB-4): make it visible instead. Once per session — this fires on
+		// every LLM round when a provider never reports usage.
+		if !ab.usage.nilUsageWarned {
+			ab.usage.nilUsageWarned = true
+			logger.WarnCF("livekit", "LLM response carried no usage; tokens not recorded", map[string]any{
+				"model_id": ab.modelID,
+				"provider": modelProtocol(ab.modelID),
+			})
+		}
 		return
 	}
 

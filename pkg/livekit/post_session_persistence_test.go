@@ -147,16 +147,18 @@ func TestSendSessionSummaryAndEnd(t *testing.T) {
 	}
 }
 
-type fakeSummaryProvider struct{}
+type fakeSummaryProvider struct {
+	usage *providers.UsageInfo
+}
 
-func (fakeSummaryProvider) Chat(
+func (p fakeSummaryProvider) Chat(
 	context.Context,
 	[]providers.Message,
 	[]providers.ToolDefinition,
 	string,
 	map[string]any,
 ) (*providers.LLMResponse, error) {
-	return &providers.LLMResponse{Content: "Session summary from test."}, nil
+	return &providers.LLMResponse{Content: "Session summary from test.", Usage: p.usage}, nil
 }
 
 func (fakeSummaryProvider) GetDefaultModel() string {

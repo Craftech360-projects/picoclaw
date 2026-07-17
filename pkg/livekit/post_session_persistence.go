@@ -36,11 +36,32 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 	quality := bridge.SessionQualitySnapshot()
 	messages := bridge.TranscriptSnapshot()
 	if usage.TotalTokens == 0 && len(messages) == 0 {
-		logger.DebugCF("livekit", "Skipping post-session persistence: no usage and no transcript", map[string]any{
-			"room": rs.roomName(),
-		})
+		// Silent session: nothing to summarize or archive, but the duration is
+		// still billable (SUB-4) — trial days and minute caps must count it.
+		// Skipping the summary/chat/end/trace path also keeps reconnect churn
+		// from burning summarize LLM calls over empty conversations.
+		if managerPersistenceEnabled && usage.SessionDurationSeconds > 0 {
+			usageCtx, usageCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := rs.sendUsageSummary(usageCtx, usage); err != nil {
+				logger.WarnCF("livekit", "Failed to persist silent-session usage summary", map[string]any{
+					"room":     rs.roomName(),
+					"error":    err.Error(),
+					"duration": roundTo3(usage.SessionDurationSeconds),
+				})
+			}
+			usageCancel()
+		}
 		return
 	}
+
+	// Finalize the summary BEFORE snapshotting usage for the POST: the
+	// summarize call spends LLM tokens that belong in this session's bill (SUB-4).
+	// Keep the pre-finalize duration, though — the child shouldn't be billed
+	// session time for our post-session LLM latency.
+	billedDuration := usage.SessionDurationSeconds
+	summary, summaryMessageCount := rs.finalizeAndPersistSessionSummary(bridge)
+	usage = bridge.UsageSnapshot()
+	usage.SessionDurationSeconds = billedDuration
 
 	logger.InfoCF("livekit", "Starting post-session persistence", map[string]any{
 		"room":       rs.roomName(),
@@ -71,8 +92,6 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		}
 		usageCancel()
 	}
-
-	summary, summaryMessageCount := rs.finalizeAndPersistSessionSummary(bridge)
 
 	if summary != "" {
 		if err := rs.persistSummaryToMemoryFile(bridge, summary, summaryMessageCount); err != nil {
@@ -188,11 +207,9 @@ func safeTraceSuffix(in string) string {
 	return replacer.Replace(s)
 }
 
+// sendUsageSummary POSTs whatever it is given; persistPostSessionData owns the
+// decision of which sessions are billable.
 func (rs *RoomSession) sendUsageSummary(ctx context.Context, usage UsageSnapshot) error {
-	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
-		return nil
-	}
-
 	url := strings.TrimRight(rs.managerAPIURL, "/") + "/device/token-usage"
 	payload := map[string]any{
 		"mac":                          rs.deviceMAC,

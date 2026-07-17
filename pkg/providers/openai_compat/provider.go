@@ -253,6 +253,13 @@ func (p *Provider) ChatStream(
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	requestBody["stream"] = true
+	// Without this, only providers that volunteer usage (OpenRouter) report
+	// tokens; OpenAI-direct returns usage == nil and billing undercounts.
+	// Set only when absent so a per-model extra_body override (the config
+	// escape hatch for backends that reject stream_options) still wins.
+	if _, ok := requestBody["stream_options"]; !ok {
+		requestBody["stream_options"] = map[string]any{"include_usage": true}
+	}
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {

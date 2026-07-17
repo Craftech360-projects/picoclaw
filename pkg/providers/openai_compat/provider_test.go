@@ -1210,3 +1210,39 @@ func TestSerializeMessages_StripsSystemParts(t *testing.T) {
 		t.Fatal("system_parts should not appear in serialized output")
 	}
 }
+
+func TestProviderChatStream_RequestsUsage(t *testing.T) {
+	var requestBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.ChatStream(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4.1-mini", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+
+	opts, ok := requestBody["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing from request body: %#v", requestBody["stream_options"])
+	}
+	if opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage = %#v, want true", opts["include_usage"])
+	}
+	if out.Usage == nil || out.Usage.PromptTokens != 7 || out.Usage.CompletionTokens != 3 {
+		t.Fatalf("Usage = %+v, want prompt=7 completion=3", out.Usage)
+	}
+}
