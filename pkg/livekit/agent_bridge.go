@@ -831,8 +831,8 @@ func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text,
 You are speaking to the user through a voice interface (text-to-speech).
 
 CRITICAL RULES FOR VOICE:
-1. Keep ALL responses SHORT and conversational — 1-3 sentences max.
-2. For stories and creative requests, give a SHORT spoken version (2-3 sentences). Do not try to generate or save long story files unless the user explicitly asks to save.
+1. Default to ONE or TWO short sentences per reply. Answer the question directly first. Only add a follow-up question sometimes — not every reply.
+2. Only stories may be longer: keep even stories under six short sentences unless the child asks for more. Do not try to generate or save long story files unless the user explicitly asks to save.
 3. NEVER use markdown formatting (**, *, #, backticks, bullet points). Speak in plain natural language. Write words out in full instead of contractions — say "I am" not "I'm", "do not" not "don't", "it is" not "it's", "let us" not "let's" — so the voice pronounces them correctly.
 4. Do not use write_file for normal conversation output. Use USER.md for user profile facts like name, age, language, timezone, interests, occupation, and friends. Use memory/MEMORY.md for durable conversation memories and session summaries.
 5. Avoid reading file paths character by character. Say "I saved it to your workspace" instead.
