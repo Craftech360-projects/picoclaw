@@ -32,6 +32,14 @@ func TestSanitizeVoiceTextForTTSDropsProviderChannelMarkers(t *testing.T) {
 	}
 }
 
+func TestSanitizeVoiceTextForTTSDropsMidTextExpressionTags(t *testing.T) {
+	got := sanitizeVoiceTextForTTS("[happy] Sure! [laughing] Here is a joke. [curious] Ready?")
+	want := "Sure! Here is a joke. Ready?"
+	if got != want {
+		t.Fatalf("sanitizeVoiceTextForTTS() = %q, want %q", got, want)
+	}
+}
+
 func TestSanitizeVoiceTextForTTSDropsReasoningBlocks(t *testing.T) {
 	got := sanitizeVoiceTextForTTS("<think>I should think first</think>Here is the answer.")
 	want := "Here is the answer."

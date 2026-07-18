@@ -30,7 +30,10 @@ var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought
 // speech chunk (mirrors the firmware parser). Stripped before TTS so it is never
 // spoken; the tagged text still reaches the device via speech_created so the
 // firmware can drive the face.
-var voiceExpressionTagRE = regexp.MustCompile(`^\s*(?:\[[a-z]{2,12}\]\s*)+`)
+// Matches [happy]-style expression tags anywhere in the text: the LLM emits
+// one per sentence, so chunks holding more than one sentence carry mid-text
+// tags too — an anchored strip would speak them aloud.
+var voiceExpressionTagRE = regexp.MustCompile(`\[[a-z]{2,12}\]`)
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
 var dynamicGreetingCooldownUntilUnix atomic.Int64
 
