@@ -1543,6 +1543,13 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				if sttFirstFinalAt.IsZero() {
 					sttFirstFinalAt = time.Now()
 				}
+				// Follow the STT-detected language for TTS output (Sarvam only;
+				// providers without SetLanguage keep their session language).
+				if evt.Language != "" {
+					if lp, ok := ap.tts.(interface{ SetLanguage(string) }); ok {
+						lp.SetLanguage(evt.Language)
+					}
+				}
 				merged := mergeFinalTranscriptChunk(utterance.String(), evt.Text)
 				utterance.Reset()
 				utterance.WriteString(merged)

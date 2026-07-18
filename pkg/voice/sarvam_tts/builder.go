@@ -18,6 +18,7 @@ func NewBuilder() tts.ProviderBuilder {
 			ModelID:      ttsConfig.ModelID,
 			SampleRateHz: ttsConfig.SampleRateHz,
 			LanguageCode: ResolveLanguageCode(ttsConfig.Language),
+			Temperature:  ttsConfig.Temperature,
 		}
 		if strings.TrimSpace(providerCfg.APIKey) == "" {
 			providerCfg.APIKey = os.Getenv("SARVAM_API_KEY")

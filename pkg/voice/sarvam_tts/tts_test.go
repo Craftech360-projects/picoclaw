@@ -9,8 +9,8 @@ import (
 func TestResolveLanguageCode(t *testing.T) {
 	cases := map[string]string{
 		"":      "hi-IN",
-		"en-IN": "hi-IN",
-		"en":    "hi-IN",
+		"en-IN": "en-IN",
+		"en":    "en-IN",
 		"hi-IN": "hi-IN",
 		"ta-IN": "ta-IN",
 		"ta":    "ta-IN",
@@ -38,6 +38,33 @@ func TestBuildWebSocketURL(t *testing.T) {
 	}
 	if !strings.Contains(got, "send_completion_event=true") {
 		t.Errorf("URL missing send_completion_event query: %q", got)
+	}
+}
+
+func TestSetLanguage(t *testing.T) {
+	client := NewSarvamTTS(TTSConfig{})
+
+	client.SetLanguage("ta-IN")
+	if got := client.cfg.LanguageCode; got != "ta-IN" {
+		t.Fatalf("after SetLanguage(ta-IN): %q, want ta-IN", got)
+	}
+
+	// unknown/auto/empty must not reset a detected language.
+	for _, in := range []string{"unknown", "auto", "", "  "} {
+		client.SetLanguage(in)
+		if got := client.cfg.LanguageCode; got != "ta-IN" {
+			t.Fatalf("SetLanguage(%q) changed language to %q, want ta-IN kept", in, got)
+		}
+	}
+
+	// English keeps its own voice; Hindi maps to hi-IN.
+	client.SetLanguage("en-IN")
+	if got := client.cfg.LanguageCode; got != "en-IN" {
+		t.Fatalf("after SetLanguage(en-IN): %q, want en-IN", got)
+	}
+	client.SetLanguage("hi-IN")
+	if got := client.cfg.LanguageCode; got != "hi-IN" {
+		t.Fatalf("after SetLanguage(hi-IN): %q, want hi-IN", got)
 	}
 }
 

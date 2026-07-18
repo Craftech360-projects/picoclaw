@@ -73,7 +73,8 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	}
 
 	sampleRate := normalizeSarvamSampleRate(opts.SampleRate)
-	language := normalizeSarvamLang(opts.Language)
+	// ponytail: always auto-detect; session language hints are ignored for Sarvam STT
+	language := "unknown"
 	mode := normalizeSarvamMode(os.Getenv("SARVAM_STT_MODE"))
 	wsURL := sarvamStreamingURL()
 

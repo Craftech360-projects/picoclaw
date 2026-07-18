@@ -40,7 +40,8 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 				errCh <- fmt.Errorf("query %s = %q, want %q", key, got, want)
 			}
 		}
-		assertQuery("language-code", "en-IN")
+		// Language hints are ignored — Sarvam STT always auto-detects.
+		assertQuery("language-code", "unknown")
 		assertQuery("model", "saaras:v3")
 		assertQuery("mode", "transcribe")
 		assertQuery("sample_rate", "16000")

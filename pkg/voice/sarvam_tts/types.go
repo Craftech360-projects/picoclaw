@@ -11,7 +11,12 @@ type TTSConfig struct {
 	// LanguageCode is the resolved Sarvam language code (e.g. "hi-IN"), derived
 	// from the session language via ResolveLanguageCode.
 	LanguageCode string
-	BaseURL      string
+	// Temperature (0.01–1.0) controls bulbul:v3 expressiveness; 0 -> default.
+	Temperature float64
+	// OutputBitrate (e.g. "128k") applies to compressed codecs only; ignored
+	// for linear16. Empty -> default.
+	OutputBitrate string
+	BaseURL       string
 }
 
 // AudioStream reads synthesized audio chunks.

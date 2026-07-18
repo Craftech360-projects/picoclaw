@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -27,11 +28,18 @@ const (
 	// outputAudioCodec "linear16" makes Sarvam stream raw 16-bit little-endian
 	// PCM, which the voice pipeline consumes directly (no mp3/wav decoding).
 	outputAudioCodec = "linear16"
+	// defaultOutputBitrate only takes effect for compressed codecs (mp3);
+	// ignored for linear16. Sent so a future codec switch keeps working.
+	defaultOutputBitrate = "32k"
 )
 
 // defaultSpeaker is a valid bulbul:v3 speaker. (v2 speakers like "meera" and
-// "anushka" are rejected by v3.)
-const defaultSpeaker = "pooja"
+// "anushka" are rejected by v3.) "sunny" chosen by ear for expressiveness.
+const defaultSpeaker = "sunny"
+
+// defaultTemperature is bulbul:v3's expressiveness knob (API default 0.6 is
+// flat; 1.0 is the allowed max).
+const defaultTemperature = 1.0
 
 // supportedLangs are the ISO-639 language prefixes bulbul supports. English and
 // Hindi both collapse to hi-IN (Hinglish via the Hindi voice) per product rule.
@@ -41,8 +49,8 @@ var supportedLangs = map[string]bool{
 }
 
 // ResolveLanguageCode maps a session language code (e.g. "en-IN", "ta", "") to a
-// Sarvam target_language_code. Empty/English/Hindi -> hi-IN; a supported
-// language -> "<lang>-IN"; anything else -> hi-IN.
+// Sarvam target_language_code. Empty/Hindi -> hi-IN; a supported
+// language (including English -> en-IN) -> "<lang>-IN"; anything else -> hi-IN.
 func ResolveLanguageCode(sessionCode string) string {
 	code := strings.TrimSpace(sessionCode)
 	if code == "" {
@@ -52,7 +60,7 @@ func ResolveLanguageCode(sessionCode string) string {
 	if idx := strings.IndexAny(lang, "-_"); idx >= 0 {
 		lang = lang[:idx]
 	}
-	if lang == "en" || lang == "hi" {
+	if lang == "hi" {
 		return fallbackLanguage
 	}
 	if supportedLangs[lang] {
@@ -65,6 +73,31 @@ func ResolveLanguageCode(sessionCode string) string {
 type SarvamTTS struct {
 	cfg    TTSConfig
 	dialer *websocket.Dialer
+	// mu guards cfg.LanguageCode, which SetLanguage may update from the STT
+	// goroutine while Synthesize reads it from the outbound goroutine.
+	mu sync.RWMutex
+}
+
+// SetLanguage retargets synthesis to the language detected by STT (e.g.
+// "ta-IN"). Empty/unknown/auto are ignored so VAD signal events don't reset a
+// detected language back to the hi-IN fallback.
+func (t *SarvamTTS) SetLanguage(detectedCode string) {
+	code := strings.ToLower(strings.TrimSpace(detectedCode))
+	if code == "" || code == "unknown" || code == "auto" {
+		return
+	}
+	resolved := ResolveLanguageCode(detectedCode)
+	t.mu.Lock()
+	changed := t.cfg.LanguageCode != resolved
+	t.cfg.LanguageCode = resolved
+	t.mu.Unlock()
+	if changed {
+		logger.InfoCF("sarvam_tts", "TTS language switched to STT-detected language", map[string]any{
+			"tts_provider":      "sarvam",
+			"detected_code":     detectedCode,
+			"tts_language_code": resolved,
+		})
+	}
 }
 
 // NewSarvamTTS creates a new Sarvam TTS client.
@@ -84,6 +117,12 @@ func NewSarvamTTS(cfg TTSConfig) *SarvamTTS {
 	if strings.TrimSpace(cfg.LanguageCode) == "" {
 		cfg.LanguageCode = fallbackLanguage
 	}
+	if cfg.Temperature <= 0 {
+		cfg.Temperature = defaultTemperature
+	}
+	if strings.TrimSpace(cfg.OutputBitrate) == "" {
+		cfg.OutputBitrate = defaultOutputBitrate
+	}
 	return &SarvamTTS{cfg: cfg, dialer: websocket.DefaultDialer}
 }
 
@@ -96,21 +135,25 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 		return nil, errors.New("sarvam api key is empty")
 	}
 
-	endpoint, err := buildWebSocketURL(t.cfg)
+	t.mu.RLock()
+	cfg := t.cfg
+	t.mu.RUnlock()
+
+	endpoint, err := buildWebSocketURL(cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	logger.InfoCF("sarvam_tts", "Using Sarvam TTS provider", map[string]any{
 		"tts_provider":       "sarvam",
-		"tts_model_id":       t.cfg.ModelID,
-		"tts_voice_id":       t.cfg.VoiceID,
-		"tts_language_code":  t.cfg.LanguageCode,
-		"tts_sample_rate_hz": t.cfg.SampleRateHz,
+		"tts_model_id":       cfg.ModelID,
+		"tts_voice_id":       cfg.VoiceID,
+		"tts_language_code":  cfg.LanguageCode,
+		"tts_sample_rate_hz": cfg.SampleRateHz,
 	})
 
 	header := http.Header{}
-	header.Set("Api-Subscription-Key", strings.TrimSpace(t.cfg.APIKey))
+	header.Set("Api-Subscription-Key", strings.TrimSpace(cfg.APIKey))
 	conn, resp, err := t.dialer.DialContext(ctx, endpoint, header)
 	if err != nil {
 		status := ""
@@ -125,7 +168,7 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 		}
 		logger.ErrorCF("sarvam_tts", "Sarvam TTS websocket dial failed", map[string]any{
 			"tts_provider": "sarvam",
-			"tts_voice_id": t.cfg.VoiceID,
+			"tts_voice_id": cfg.VoiceID,
 			"status":       status,
 			"body":         body,
 			"error":        err.Error(),
@@ -139,11 +182,13 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 	configMsg := map[string]any{
 		"type": "config",
 		"data": map[string]any{
-			"model":                t.cfg.ModelID,
-			"target_language_code": t.cfg.LanguageCode,
-			"speaker":              t.cfg.VoiceID,
-			"speech_sample_rate":   strconv.Itoa(t.cfg.SampleRateHz),
+			"model":                cfg.ModelID,
+			"target_language_code": cfg.LanguageCode,
+			"speaker":              cfg.VoiceID,
+			"speech_sample_rate":   strconv.Itoa(cfg.SampleRateHz),
 			"output_audio_codec":   outputAudioCodec,
+			"output_audio_bitrate": cfg.OutputBitrate,
+			"temperature":          cfg.Temperature,
 		},
 	}
 	textMsg := map[string]any{"type": "text", "data": map[string]any{"text": text}}
