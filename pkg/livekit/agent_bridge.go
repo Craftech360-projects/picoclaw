@@ -670,13 +670,20 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		Role:    "assistant",
 		Content: resp.Content,
 	}
+	promptTokens, completionTokens := 0, 0
+	if resp.Usage != nil {
+		promptTokens = resp.Usage.PromptTokens
+		completionTokens = resp.Usage.CompletionTokens
+	}
 	logger.InfoCF("livekit", "LLM response received", map[string]any{
-		"session":          sessionKey,
-		"profile":          profile,
-		"content":          ab.logContentPreview(sessionKey, resp.Content, maxLLMLogContentLen),
-		"content_len":      len(resp.Content),
-		"content_redacted": !ab.logContentPolicy.enabledForSession(sessionKey),
-		"tool_call_count":  len(resp.ToolCalls),
+		"session":           sessionKey,
+		"profile":           profile,
+		"content":           ab.logContentPreview(sessionKey, resp.Content, maxLLMLogContentLen),
+		"content_len":       len(resp.Content),
+		"content_redacted":  !ab.logContentPolicy.enabledForSession(sessionKey),
+		"tool_call_count":   len(resp.ToolCalls),
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
 	})
 
 	normalized := normalizeToolCalls(resp.ToolCalls)
