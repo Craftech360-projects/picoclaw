@@ -2,8 +2,15 @@ package sarvam_tts
 
 import (
 	"context"
+	"encoding/base64"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestResolveLanguageCode(t *testing.T) {
@@ -72,5 +79,83 @@ func TestSynthesizeEmptyKey(t *testing.T) {
 	client := NewSarvamTTS(TTSConfig{})
 	if _, err := client.Synthesize(context.Background(), "hi"); err == nil {
 		t.Fatal("expected error for empty api key")
+	}
+}
+
+// TestSynthesizeReusesConnection verifies the persistent-connection behavior:
+// two utterances share one websocket, config is sent once, and each stream
+// ends on its own "final" event.
+func TestSynthesizeReusesConnection(t *testing.T) {
+	var mu sync.Mutex
+	conns, configs, texts := 0, 0, 0
+
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		mu.Lock()
+		conns++
+		mu.Unlock()
+		for {
+			var msg struct {
+				Type string `json:"type"`
+			}
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+			mu.Lock()
+			switch msg.Type {
+			case "config":
+				configs++
+			case "text":
+				texts++
+			case "flush":
+				audio := base64.StdEncoding.EncodeToString([]byte("pcm-data"))
+				_ = conn.WriteJSON(map[string]any{"type": "audio", "data": map[string]any{"audio": audio}})
+				_ = conn.WriteJSON(map[string]any{"type": "event", "data": map[string]any{"event_type": "final"}})
+			}
+			mu.Unlock()
+		}
+	}))
+	defer server.Close()
+
+	client := NewSarvamTTS(TTSConfig{APIKey: "k", BaseURL: server.URL})
+
+	for i := 0; i < 2; i++ {
+		stream, err := client.Synthesize(context.Background(), "hello")
+		if err != nil {
+			t.Fatalf("Synthesize %d: %v", i, err)
+		}
+		got := 0
+		for {
+			b, err := stream.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("Read %d: %v", i, err)
+			}
+			got += len(b)
+		}
+		stream.Close()
+		if got == 0 {
+			t.Fatalf("utterance %d: no audio", i)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if conns != 1 {
+		t.Fatalf("connections = %d, want 1 (no reuse)", conns)
+	}
+	if configs != 1 {
+		t.Fatalf("config messages = %d, want 1", configs)
+	}
+	if texts != 2 {
+		t.Fatalf("text messages = %d, want 2", texts)
 	}
 }

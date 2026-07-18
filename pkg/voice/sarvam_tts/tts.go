@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -70,12 +71,21 @@ func ResolveLanguageCode(sessionCode string) string {
 }
 
 // SarvamTTS streams audio from Sarvam's bulbul websocket text-to-speech API.
+// The websocket is kept open across Synthesize calls (config sent once per
+// connection) so per-sentence synthesis skips the TLS+WS handshake; the
+// "final" completion event delimits utterances on the shared stream.
 type SarvamTTS struct {
 	cfg    TTSConfig
 	dialer *websocket.Dialer
 	// mu guards cfg.LanguageCode, which SetLanguage may update from the STT
 	// goroutine while Synthesize reads it from the outbound goroutine.
 	mu sync.RWMutex
+	// connMu serializes synthesis on the shared connection. It is locked in
+	// Synthesize and released when the returned stream hits EOF or is closed.
+	connMu   sync.Mutex
+	conn     *websocket.Conn
+	connLang string
+	lastUse  time.Time
 }
 
 // SetLanguage retargets synthesis to the language detected by STT (e.g.
@@ -126,7 +136,8 @@ func NewSarvamTTS(cfg TTSConfig) *SarvamTTS {
 	return &SarvamTTS{cfg: cfg, dialer: websocket.DefaultDialer}
 }
 
-// Synthesize opens a websocket, sends the config + text + flush, and streams PCM.
+// Synthesize sends text + flush over the shared websocket (dialing and
+// configuring it if needed) and streams PCM until the "final" event.
 func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, error) {
 	if t == nil {
 		return nil, errors.New("sarvam tts is nil")
@@ -139,6 +150,52 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 	cfg := t.cfg
 	t.mu.RUnlock()
 
+	t.connMu.Lock() // released by the stream on EOF/Close
+	stream, err := t.startUtterance(ctx, cfg, text)
+	if err != nil {
+		// One retry on a fresh connection: the parked socket may have been
+		// closed server-side while idle.
+		t.dropConnLocked()
+		stream, err = t.startUtterance(ctx, cfg, text)
+		if err != nil {
+			t.dropConnLocked()
+			t.connMu.Unlock()
+			return nil, err
+		}
+	}
+	return stream, nil
+}
+
+// startUtterance ensures a configured connection and writes text+flush.
+// Caller holds connMu.
+func (t *SarvamTTS) startUtterance(ctx context.Context, cfg TTSConfig, text string) (*sarvamAudioStream, error) {
+	// ponytail: 30s idle drop instead of ws ping keepalive; add pings if
+	// reconnects show up between close turns.
+	if t.conn != nil && (t.connLang != cfg.LanguageCode || time.Since(t.lastUse) > 30*time.Second) {
+		t.dropConnLocked()
+	}
+	if t.conn == nil {
+		conn, err := t.dialAndConfigure(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		t.conn = conn
+		t.connLang = cfg.LanguageCode
+	}
+
+	textMsg := map[string]any{"type": "text", "data": map[string]any{"text": text}}
+	flushMsg := map[string]any{"type": "flush"}
+	for _, msg := range []map[string]any{textMsg, flushMsg} {
+		if err := t.conn.WriteJSON(msg); err != nil {
+			return nil, fmt.Errorf("sarvam websocket send %v: %w", msg["type"], err)
+		}
+	}
+	t.lastUse = time.Now()
+	return &sarvamAudioStream{t: t, conn: t.conn}, nil
+}
+
+// dialAndConfigure opens the websocket and sends the config message.
+func (t *SarvamTTS) dialAndConfigure(ctx context.Context, cfg TTSConfig) (*websocket.Conn, error) {
 	endpoint, err := buildWebSocketURL(cfg)
 	if err != nil {
 		return nil, err
@@ -191,21 +248,46 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 			"temperature":          cfg.Temperature,
 		},
 	}
-	textMsg := map[string]any{"type": "text", "data": map[string]any{"text": text}}
-	flushMsg := map[string]any{"type": "flush"}
-
-	for _, msg := range []map[string]any{configMsg, textMsg, flushMsg} {
-		if err := conn.WriteJSON(msg); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("sarvam websocket send %v: %w", msg["type"], err)
-		}
+	if err := conn.WriteJSON(configMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("sarvam websocket send config: %w", err)
 	}
+	return conn, nil
+}
 
-	return &sarvamAudioStream{conn: conn}, nil
+// dropConnLocked closes and forgets the shared connection. Caller holds connMu.
+func (t *SarvamTTS) dropConnLocked() {
+	if t.conn != nil {
+		_ = t.conn.Close()
+		t.conn = nil
+		t.connLang = ""
+	}
 }
 
 type sarvamAudioStream struct {
+	t    *SarvamTTS
 	conn *websocket.Conn
+	once sync.Once
+}
+
+// release ends this utterance's claim on the shared connection. keep=false
+// drops the connection (early abort or error mid-stream would otherwise leave
+// stale audio frames queued for the next utterance).
+func (s *sarvamAudioStream) release(keep bool) {
+	s.once.Do(func() {
+		if s.t == nil {
+			if !keep && s.conn != nil {
+				_ = s.conn.Close()
+			}
+			return
+		}
+		if !keep {
+			s.t.dropConnLocked()
+		} else {
+			s.t.lastUse = time.Now()
+		}
+		s.t.connMu.Unlock()
+	})
 }
 
 type sarvamFrame struct {
@@ -224,6 +306,7 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 	for {
 		messageType, data, err := s.conn.ReadMessage()
 		if err != nil {
+			s.release(false)
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				return nil, io.EOF
 			}
@@ -235,6 +318,7 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 
 		var frame sarvamFrame
 		if err := json.Unmarshal(data, &frame); err != nil {
+			s.release(false)
 			return nil, fmt.Errorf("decode sarvam tts message: %w", err)
 		}
 
@@ -245,6 +329,7 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 			}
 			audio, err := base64.StdEncoding.DecodeString(frame.Data.Audio)
 			if err != nil {
+				s.release(false)
 				return nil, fmt.Errorf("decode sarvam tts audio: %w", err)
 			}
 			if len(audio) == 0 {
@@ -253,6 +338,7 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 			return audio, nil
 		case "event":
 			if frame.Data.EventType == "final" {
+				s.release(true) // clean end: keep the connection for the next utterance
 				return nil, io.EOF
 			}
 			continue
@@ -267,6 +353,7 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 				"tts_provider": "sarvam",
 				"error":        msg,
 			})
+			s.release(false)
 			return nil, fmt.Errorf("sarvam tts stream error: %s", msg)
 		default:
 			continue
@@ -275,9 +362,10 @@ func (s *sarvamAudioStream) Read() ([]byte, error) {
 }
 
 func (s *sarvamAudioStream) Close() error {
-	if s.conn != nil {
-		return s.conn.Close()
-	}
+	// Early abort (barge-in) drops the connection: leftover audio frames for
+	// this utterance must not leak into the next one. After a clean EOF this
+	// is a no-op.
+	s.release(false)
 	return nil
 }
 
