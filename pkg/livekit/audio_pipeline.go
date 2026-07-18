@@ -1553,6 +1553,12 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				merged := mergeFinalTranscriptChunk(utterance.String(), evt.Text)
 				utterance.Reset()
 				utterance.WriteString(merged)
+				// STT usage marker: Sarvam bills by audio seconds, not tokens.
+				logger.DebugCF("livekit", "STT final transcript usage", map[string]any{
+					"session":          runSessionKey,
+					"audio_duration_s": evt.Duration,
+					"stt_language":     evt.Language,
+				})
 			}
 
 			if evt.SpeechEnd && hardCapFinalizePending && speechActive && !vadSpeechEnded {

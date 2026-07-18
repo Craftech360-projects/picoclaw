@@ -52,11 +52,13 @@ def main():
     last_session_lang = ""
     # per-turn accumulators, flushed on each "Turn latency summary"
     pend = {"transcript": "", "llm_response": "", "tts_inputs": [],
-            "prompt_tokens": 0, "completion_tokens": 0, "llm_calls": 0}
+            "prompt_tokens": 0, "completion_tokens": 0, "llm_calls": 0,
+            "stt_audio_s": 0.0}
 
     def reset_pend():
         pend.update(transcript="", llm_response="", tts_inputs=[],
-                    prompt_tokens=0, completion_tokens=0, llm_calls=0)
+                    prompt_tokens=0, completion_tokens=0, llm_calls=0,
+                    stt_audio_s=0.0)
 
     with open(args.log, errors="replace") as f:
         for raw in f:
@@ -114,6 +116,11 @@ def main():
                         pend[k] += int(d.get(k, 0))
                     except ValueError:
                         pass
+            elif "STT final transcript usage" in line:
+                try:
+                    pend["stt_audio_s"] += float(kvs(line).get("audio_duration_s", 0))
+                except ValueError:
+                    pass
             elif "Synthesizing audio chunk" in line:
                 t = kvs(line).get("text", "")
                 if t:
@@ -144,6 +151,8 @@ def main():
                 row["prompt_tokens"] = pend["prompt_tokens"]
                 row["completion_tokens"] = pend["completion_tokens"]
                 row["llm_calls"] = pend["llm_calls"]
+                row["stt_audio_s"] = round(pend["stt_audio_s"], 2)
+                row["tts_chars"] = sum(len(t) for t in pend["tts_inputs"])
                 turns.append(row)
                 reset_pend()
 
@@ -156,6 +165,7 @@ def main():
             "llm_final_token_ms", "tts_first_audio_ms", "tts_first_audio_from_stt_ms",
             "tts_final_audio_ms", "tts_final_audio_from_stt_ms", "turn_total_e2e_ms",
             "prompt_tokens", "completion_tokens", "llm_calls",
+            "stt_audio_s", "tts_chars",
             "transcript", "llm_response", "tts_input"]
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -234,16 +244,21 @@ def main():
     tok_turns = [t for t in user if t.get("prompt_tokens", 0) or t.get("completion_tokens", 0)]
     tp = sum(t["prompt_tokens"] for t in tok_turns)
     tc = sum(t["completion_tokens"] for t in tok_turns)
-    lines.append("## LLM token usage")
+    stt_s = sum(t.get("stt_audio_s", 0) for t in user)
+    tts_ch = sum(t.get("tts_chars", 0) for t in user)
+    lines.append("## Usage per stage")
     lines.append("")
+    lines.append("| Stage | Billing unit | Total | Avg / turn |")
+    lines.append("|---|---|---|---|")
+    lines.append("| STT (Sarvam) | audio seconds | %.1f s | %.1f s |" % (
+        stt_s, stt_s / len(user) if user else 0))
     if tok_turns:
-        lines.append("- Turns with usage reported: %d / %d" % (len(tok_turns), len(user)))
-        lines.append("- Prompt tokens: **%d** (avg %.0f/turn)" % (tp, tp / len(tok_turns)))
-        lines.append("- Completion tokens: **%d** (avg %.0f/turn)" % (tc, tc / len(tok_turns)))
-        lines.append("- Total: **%d**" % (tp + tc))
+        lines.append("| LLM prompt | tokens | %d | %.0f |" % (tp, tp / len(tok_turns)))
+        lines.append("| LLM completion | tokens | %d | %.0f |" % (tc, tc / len(tok_turns)))
     else:
-        lines.append("No per-turn token usage found in this window (needs agent build with "
-                     "prompt_tokens/completion_tokens in the 'LLM response received' log).")
+        lines.append("| LLM | tokens | not reported in window | - |")
+    lines.append("| TTS (Sarvam) | input characters | %d | %.0f |" % (
+        tts_ch, tts_ch / len(user) if user else 0))
     lines.append("")
 
     def clip(s, n=160):
@@ -252,13 +267,14 @@ def main():
 
     lines.append("## Conversation log (user turns)")
     lines.append("")
-    lines.append("| # | time | lang | tokens in/out | transcript | LLM response | TTS input |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| # | time | lang | stt_s | llm tok in/out | tts chars | e2e ms | transcript | LLM response | TTS input |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for i, t in enumerate(user, 1):
-        lines.append("| %d | %s | %s | %s/%s | %s | %s | %s |" % (
-            i, (t["time"] or "")[11:19], t["language"],
+        lines.append("| %d | %s | %s | %.1f | %s/%s | %s | %s | %s | %s | %s |" % (
+            i, (t["time"] or "")[11:19], t["language"], t.get("stt_audio_s", 0),
             t.get("prompt_tokens", 0), t.get("completion_tokens", 0),
-            clip(t["transcript"]), clip(t["llm_response"]), clip(t["tts_input"])))
+            t.get("tts_chars", 0), t.get("turn_total_e2e_ms", 0),
+            clip(t["transcript"], 100), clip(t["llm_response"], 100), clip(t["tts_input"], 100)))
     lines.append("")
     lines.append("Full untruncated text per turn: `turns.csv`.")
     lines.append("")
