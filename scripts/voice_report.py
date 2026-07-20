@@ -140,6 +140,7 @@ def main():
                           "llm_first_token_ms", "llm_final_token_ms",
                           "tts_first_audio_ms", "tts_first_audio_from_stt_ms",
                           "tts_final_audio_ms", "tts_final_audio_from_stt_ms",
+                          "tts_first_audio_from_speech_end_ms",
                           "turn_total_e2e_ms"):
                     try:
                         row[k] = int(d.get(k, 0))
@@ -163,7 +164,8 @@ def main():
     cols = ["time", "session", "turn_id", "path", "language", "finalize_reason",
             "stt_first_partial_ms", "stt_first_final_ms", "llm_first_token_ms",
             "llm_final_token_ms", "tts_first_audio_ms", "tts_first_audio_from_stt_ms",
-            "tts_final_audio_ms", "tts_final_audio_from_stt_ms", "turn_total_e2e_ms",
+            "tts_final_audio_ms", "tts_final_audio_from_stt_ms",
+            "tts_first_audio_from_speech_end_ms", "turn_total_e2e_ms",
             "prompt_tokens", "completion_tokens", "llm_calls",
             "stt_audio_s", "tts_chars",
             "transcript", "llm_response", "tts_input"]
@@ -183,7 +185,8 @@ def main():
         ("LLM first token (after transcript)", "llm_first_token_ms"),
         ("LLM full response", "llm_final_token_ms"),
         ("TTS first audio (after LLM first sentence)", "tts_first_audio_ms"),
-        ("Voice-to-voice: user stopped → first reply audio", "tts_first_audio_from_stt_ms"),
+        ("First reply audio from speech START", "tts_first_audio_from_stt_ms"),
+        ("Voice-to-voice: user STOPPED → first reply audio", "tts_first_audio_from_speech_end_ms"),
         ("Turn end-to-end total", "turn_total_e2e_ms"),
     ]
 
@@ -237,7 +240,8 @@ def main():
     lines.append("| Language | turns | avg ms | p95 ms |")
     lines.append("|---|---|---|---|")
     for lang in sorted(set(t["language"] for t in user if t["language"])):
-        vals = col("tts_first_audio_from_stt_ms", [t for t in user if t["language"] == lang])
+        vals = col("tts_first_audio_from_speech_end_ms", [t for t in user if t["language"] == lang]) \
+            or col("tts_first_audio_from_stt_ms", [t for t in user if t["language"] == lang])
         if vals:
             lines.append("| %s | %d | %.0f | %.0f |" % (lang, len(vals), statistics.mean(vals), pct(vals, 95)))
     lines.append("")

@@ -129,11 +129,32 @@ func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
 	return sb.String()
 }
 
+const (
+	// Caps keep accumulated memory from bloating the per-turn prompt (seen
+	// at ~11k tokens/turn on long-lived device workspaces). Newest content
+	// lives at the tail of the files, so we keep the tail.
+	maxLongTermContextChars   = 6000
+	maxDailyNotesContextChars = 3000
+)
+
+// clipTail keeps at most max bytes from the end of s, aligned to a line
+// boundary, with a marker noting the trim.
+func clipTail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := s[len(s)-max:]
+	if idx := strings.IndexByte(cut, '\n'); idx >= 0 && idx+1 < len(cut) {
+		cut = cut[idx+1:]
+	}
+	return "[... older memory trimmed ...]\n" + cut
+}
+
 // GetMemoryContext returns formatted memory context for the agent prompt.
 // Includes long-term memory and recent daily notes.
 func (ms *MemoryStore) GetMemoryContext() string {
-	longTerm := ms.ReadLongTerm()
-	recentNotes := ms.GetRecentDailyNotes(3)
+	longTerm := clipTail(ms.ReadLongTerm(), maxLongTermContextChars)
+	recentNotes := clipTail(ms.GetRecentDailyNotes(3), maxDailyNotesContextChars)
 
 	if longTerm == "" && recentNotes == "" {
 		return ""

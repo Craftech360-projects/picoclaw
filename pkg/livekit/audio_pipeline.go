@@ -271,6 +271,96 @@ type AudioPipeline struct {
 	queueMu              sync.Mutex
 	queuedAnnouncements  []AsyncEvent
 	queueDraining        bool
+
+	// ackMu guards ackPCM, a cached synthesized "Hmm?" played instantly when
+	// the user stops speaking so the reply gap feels short.
+	ackMu       sync.Mutex
+	ackPCM      []byte
+	ackFetching bool
+}
+
+// prefetchAckSound synthesizes and caches the acknowledgment sound once.
+func (ap *AudioPipeline) prefetchAckSound() {
+	if ap == nil || ap.tts == nil {
+		return
+	}
+	ap.ackMu.Lock()
+	if ap.ackPCM != nil || ap.ackFetching {
+		ap.ackMu.Unlock()
+		return
+	}
+	ap.ackFetching = true
+	ap.ackMu.Unlock()
+
+	go func() {
+		defer func() {
+			ap.ackMu.Lock()
+			ap.ackFetching = false
+			ap.ackMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		stream, err := ap.tts.Synthesize(ctx, "Hmm?")
+		if err != nil {
+			return
+		}
+		defer stream.Close()
+		var pcm []byte
+		for {
+			chunk, err := stream.Read()
+			if err != nil {
+				break
+			}
+			pcm = append(pcm, chunk...)
+			if len(pcm) > 48000*2 { // cap at ~2s of 24kHz s16le
+				break
+			}
+		}
+		if len(pcm) == 0 {
+			return
+		}
+		ap.ackMu.Lock()
+		ap.ackPCM = pcm
+		ap.ackMu.Unlock()
+		logger.DebugCF("livekit", "Ack sound cached", map[string]any{
+			"session": ap.sessionKey(),
+			"bytes":   len(pcm),
+		})
+	}()
+}
+
+// playAckSound writes the cached ack PCM to the track, paced to real time,
+// while the LLM+TTS pipeline works on the actual reply. No-op until the
+// cache is warm (first turn of a session triggers the prefetch).
+func (ap *AudioPipeline) playAckSound(turn voiceTurn) {
+	if ap == nil || ap.session == nil || ap.session.localTrack == nil {
+		return
+	}
+	ap.ackMu.Lock()
+	pcm := ap.ackPCM
+	ap.ackMu.Unlock()
+	if pcm == nil {
+		ap.prefetchAckSound()
+		return
+	}
+	const frameBytes = 1920 // 20ms at 24kHz s16le mono
+	for off := 0; off < len(pcm); off += frameBytes {
+		if turn.ctx != nil && turn.ctx.Err() != nil {
+			return
+		}
+		end := off + frameBytes
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		samples := bytesToPCM16(pcm[off:end])
+		if len(samples) == 0 {
+			return
+		}
+		if err := ap.session.localTrack.WriteSample(samples); err != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 type voiceTurnController struct {
@@ -296,6 +386,7 @@ type turnLatencyMeta struct {
 	Path      string
 	Trigger   string
 	STTStart  time.Time
+	SpeechEnd time.Time
 	LLMStart  time.Time
 	LLMFirst  time.Time
 	LLMFinal  time.Time
@@ -311,6 +402,9 @@ type turnLatencyMeta struct {
 	TTSFinalAudioMS        int64
 	TTSFirstAudioFromSTTMS int64
 	TTSFinalAudioFromSTTMS int64
+	// TTSFirstAudioFromSpeechEndMS is the true voice-to-voice gap: user
+	// stopped speaking (VAD end) -> first reply audio on the track.
+	TTSFirstAudioFromSpeechEndMS int64
 	TurnTotalE2EMS         int64
 }
 
@@ -427,6 +521,10 @@ func (ap *AudioPipeline) logTurnLatency(meta *turnLatencyMeta, marker string, du
 		if meta.TTSFirstAudioFromSTTMS == 0 {
 			meta.TTSFirstAudioFromSTTMS = duration.Milliseconds()
 		}
+	case "tts_first_audio_from_speech_end":
+		if meta.TTSFirstAudioFromSpeechEndMS == 0 {
+			meta.TTSFirstAudioFromSpeechEndMS = duration.Milliseconds()
+		}
 	case "tts_final_audio_from_stt_start":
 		meta.TTSFinalAudioFromSTTMS = duration.Milliseconds()
 	case "turn_total_e2e":
@@ -486,6 +584,7 @@ func (ap *AudioPipeline) finalizeTurnLatency(meta *turnLatencyMeta, reason strin
 		"tts_final_audio_ms":             meta.TTSFinalAudioMS,
 		"tts_first_audio_from_stt_ms":    meta.TTSFirstAudioFromSTTMS,
 		"tts_final_audio_from_stt_ms":    meta.TTSFinalAudioFromSTTMS,
+		"tts_first_audio_from_speech_end_ms": meta.TTSFirstAudioFromSpeechEndMS,
 		"turn_total_e2e_ms":              meta.TurnTotalE2EMS,
 		"missing_stt_final_marker":       meta.STTFirstFinalMS == 0,
 		"missing_llm_first_token_marker": meta.LLMFirstTokenMS == 0,
@@ -620,6 +719,7 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 			ap.failureCooldown = time.Duration(sec) * time.Second
 		}
 	}
+	ap.prefetchAckSound()
 	ap.publishSpeechCreated = func(text string) {
 		if ap.session != nil {
 			_ = ap.session.PublishSpeechCreated(text)
@@ -1182,6 +1282,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	runSessionKey := ap.sessionKey()
 	var utterance strings.Builder
 	var vadSpeechEnded bool
+	var sttSpeechEndAt time.Time
 	var speechActive bool
 	var latestTranscript string
 	var finalizeTimer *time.Timer
@@ -1341,13 +1442,18 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		}
 
 		turn := ap.startTurn(ctx, "new_user_utterance")
+		speechEndSnapshot := sttSpeechEndAt
+		if !speechEndSnapshot.IsZero() && !speechStartSnapshot.IsZero() && speechEndSnapshot.Before(speechStartSnapshot) {
+			speechEndSnapshot = time.Time{} // stale value from a previous utterance
+		}
 		latencyMeta := &turnLatencyMeta{
-			TurnID:   turn.id,
-			Session:  sessionKey,
-			Path:     "user_turn",
-			Trigger:  trigger,
-			STTStart: speechStartSnapshot,
-			LLMStart: time.Now(),
+			TurnID:    turn.id,
+			Session:   sessionKey,
+			Path:      "user_turn",
+			Trigger:   trigger,
+			STTStart:  speechStartSnapshot,
+			SpeechEnd: speechEndSnapshot,
+			LLMStart:  time.Now(),
 		}
 		turn = ap.attachTurnLatencyMeta(turn, latencyMeta)
 		if !speechStartSnapshot.IsZero() && !firstPartialSnapshot.IsZero() {
@@ -1357,6 +1463,9 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			ap.logTurnLatency(latencyMeta, "stt_first_final", firstFinalSnapshot.Sub(speechStartSnapshot), nil)
 		}
 		ap.setTTSCancel(turn.cancel)
+
+		// Instant "Hmm?" acknowledgment masks the LLM+TTS gap.
+		go ap.playAckSound(turn)
 
 		go func() {
 			_, _ = ap.HandleUtteranceForTurn(turn, sessionKey, text)
@@ -1479,6 +1588,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 
 				if evt.SpeechEnd {
 					vadSpeechEnded = true
+					sttSpeechEndAt = time.Now()
 					speechActive = false
 					hardCapFinalizePending = false
 					stopSegmentTimer()
@@ -2036,6 +2146,9 @@ func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 					}
 					if !sttBase.IsZero() {
 						ap.logTurnLatency(latencyMeta, "tts_first_audio_from_stt_start", time.Since(sttBase), nil)
+					}
+					if seBase := latencyMeta.SpeechEnd; !seBase.IsZero() {
+						ap.logTurnLatency(latencyMeta, "tts_first_audio_from_speech_end", time.Since(seBase), nil)
 					}
 				} else {
 					latencyMeta.mu.Unlock()
