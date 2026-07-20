@@ -803,7 +803,20 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	return true, nil
 }
 
+// maxHistoryMessages caps restored conversation history per LLM call:
+// long-lived device sessions restore dozens of turns and were pushing
+// ~12k prompt tokens per call. Older context survives via the summary.
+const maxHistoryMessages = 10
+
 func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text, sessionKey string) []providers.Message {
+	if len(history) > maxHistoryMessages {
+		history = history[len(history)-maxHistoryMessages:]
+	}
+	// Do not start the window on an orphaned tool result.
+	for len(history) > 0 && history[0].Role == "tool" {
+		history = history[1:]
+	}
+
 	var messages []providers.Message
 	activeSkills := ab.activeSkillNames()
 	if ab.contextBuilder != nil {
