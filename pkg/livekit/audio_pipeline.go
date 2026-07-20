@@ -271,96 +271,6 @@ type AudioPipeline struct {
 	queueMu              sync.Mutex
 	queuedAnnouncements  []AsyncEvent
 	queueDraining        bool
-
-	// ackMu guards ackPCM, a cached synthesized "Hmm?" played instantly when
-	// the user stops speaking so the reply gap feels short.
-	ackMu       sync.Mutex
-	ackPCM      []byte
-	ackFetching bool
-}
-
-// prefetchAckSound synthesizes and caches the acknowledgment sound once.
-func (ap *AudioPipeline) prefetchAckSound() {
-	if ap == nil || ap.tts == nil {
-		return
-	}
-	ap.ackMu.Lock()
-	if ap.ackPCM != nil || ap.ackFetching {
-		ap.ackMu.Unlock()
-		return
-	}
-	ap.ackFetching = true
-	ap.ackMu.Unlock()
-
-	go func() {
-		defer func() {
-			ap.ackMu.Lock()
-			ap.ackFetching = false
-			ap.ackMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		stream, err := ap.tts.Synthesize(ctx, "Hmm?")
-		if err != nil {
-			return
-		}
-		defer stream.Close()
-		var pcm []byte
-		for {
-			chunk, err := stream.Read()
-			if err != nil {
-				break
-			}
-			pcm = append(pcm, chunk...)
-			if len(pcm) > 48000*2 { // cap at ~2s of 24kHz s16le
-				break
-			}
-		}
-		if len(pcm) == 0 {
-			return
-		}
-		ap.ackMu.Lock()
-		ap.ackPCM = pcm
-		ap.ackMu.Unlock()
-		logger.DebugCF("livekit", "Ack sound cached", map[string]any{
-			"session": ap.sessionKey(),
-			"bytes":   len(pcm),
-		})
-	}()
-}
-
-// playAckSound writes the cached ack PCM to the track, paced to real time,
-// while the LLM+TTS pipeline works on the actual reply. No-op until the
-// cache is warm (first turn of a session triggers the prefetch).
-func (ap *AudioPipeline) playAckSound(turn voiceTurn) {
-	if ap == nil || ap.session == nil || ap.session.localTrack == nil {
-		return
-	}
-	ap.ackMu.Lock()
-	pcm := ap.ackPCM
-	ap.ackMu.Unlock()
-	if pcm == nil {
-		ap.prefetchAckSound()
-		return
-	}
-	const frameBytes = 1920 // 20ms at 24kHz s16le mono
-	for off := 0; off < len(pcm); off += frameBytes {
-		if turn.ctx != nil && turn.ctx.Err() != nil {
-			return
-		}
-		end := off + frameBytes
-		if end > len(pcm) {
-			end = len(pcm)
-		}
-		samples := bytesToPCM16(pcm[off:end])
-		if len(samples) == 0 {
-			return
-		}
-		if err := ap.session.localTrack.WriteSample(samples); err != nil {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }
 
 type voiceTurnController struct {
@@ -719,7 +629,6 @@ func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provide
 			ap.failureCooldown = time.Duration(sec) * time.Second
 		}
 	}
-	ap.prefetchAckSound()
 	ap.publishSpeechCreated = func(text string) {
 		if ap.session != nil {
 			_ = ap.session.PublishSpeechCreated(text)
@@ -1463,9 +1372,6 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 			ap.logTurnLatency(latencyMeta, "stt_first_final", firstFinalSnapshot.Sub(speechStartSnapshot), nil)
 		}
 		ap.setTTSCancel(turn.cancel)
-
-		// Instant "Hmm?" acknowledgment masks the LLM+TTS gap.
-		go ap.playAckSound(turn)
 
 		go func() {
 			_, _ = ap.HandleUtteranceForTurn(turn, sessionKey, text)
