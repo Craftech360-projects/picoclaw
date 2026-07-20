@@ -4,6 +4,7 @@ title: "Purchase end-to-end (Razorpay test mode)"
 type: AFK
 status: open
 triage: afk-ready
+assignee: claude
 blocked-by: [SUB-2]
 ---
 
