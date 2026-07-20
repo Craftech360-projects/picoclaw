@@ -663,8 +663,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		sttEndpointMS = envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
 	}
 
-	// Open transcription stream with provider-specific options
-	stream, err := rs.stt.OpenStream(rs.ctx, stt.StreamOptions{
+	// Open transcription stream with provider-specific options. The
+	// auto-reconnect wrapper redials if the provider drops the stream
+	// mid-session (e.g. transient ASR failures) so the session never goes deaf.
+	stream, err := stt.NewAutoReconnectStream(rs.ctx, rs.stt, stt.StreamOptions{
 		SampleRate:     16000,
 		Channels:       1,
 		Language:       language,
