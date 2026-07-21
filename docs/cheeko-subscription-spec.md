@@ -1,5 +1,12 @@
 # Cheeko Subscription System — Implementation Spec
 
+> ⚠️ **2026-07-21 amendment — purchase rails changed.** Purchases are now **in-app on both
+> platforms via Apple IAP + Google Play Billing (RevenueCat)**; the web portal
+> (`pay.cheekoai.in`, §6) and Razorpay rails are retired. §0 rows "Payment rails"/"Purchase
+> channel", §3 checkout/webhook endpoints, §6, and the §8 phase table are superseded by
+> `docs/superpowers/specs/2026-07-21-iap-subscription-rails-design.md`. Trial, unit (per-MAC),
+> packaging, lapse, enforcement, and migration all stand.
+
 > Assembled 2026-07-14 from the wayfinder map `docs/wayfinder/subscription-system/` (17 tickets, all decisions
 > linked below). Pricing basis: `docs/cheeko-pricing-strategy.md`. Metering basis: `docs/plan-usage-tracking-and-limits.md`.
 > Architecture context: `docs/cheeko-system-overview.md`.

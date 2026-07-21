@@ -4,28 +4,40 @@ title: "Renewal failure → grace → lapse (+ reconciliation)"
 type: AFK
 status: open
 triage: afk-ready
-blocked-by: [SUB-6]
+blocked-by: [SUB-15]
 ---
+
+> **2026-07-21 — re-scoped to IAP rails** (RevenueCat events instead of Razorpay):
+> `docs/superpowers/specs/2026-07-21-iap-subscription-rails-design.md`. Original Razorpay
+> scope preserved in git history.
 
 ## Parent
 
-Spec state machine + §4; wayfinder tickets 004 (grace) + 013; edge-case catalog in `docs/cheeko-subscription-backend.html`.
+Spec state machine + §4; wayfinder tickets 004 (grace) + 013; IAP pivot design doc.
 
 ## What to build
 
-The unhappy paths, merchant-side (Razorpay has no configurable dunning and no payment-failure event — failures surface as `pending` → `halted`). On `subscription.pending` at renewal: `status=grace`, `grace_until=+3d`, fix-payment FCM push. `charged` within grace ⇒ back to active; `halted` or grace expiry ⇒ lapsed + plan-gate push. Map `paused` (customer paused the mandate in their UPI app — only they can resume) to the grace flow with resume-instructions copy; `resumed` ⇒ active. `refund.processed` for the full current period ⇒ lapsed immediately. Cancel flow: `POST .../subscription/cancel` sets `cancel_at_period_end`; at period end ⇒ cancelled.
+The unhappy paths on RevenueCat events. `BILLING_ISSUE` ⇒ `status=grace`,
+`grace_until=+3d` (or the store's `grace_period_expiration_at` if later), fix-payment FCM
+push. `RENEWAL` within grace ⇒ active, clear `grace_until`. `EXPIRATION` (store retries
+exhausted or grace over) ⇒ lapsed + plan-gate push. `CANCELLATION` ⇒ `cancel_at_period_end`;
+`EXPIRATION` at period end ⇒ cancelled. Full-period refund (`CANCELLATION` with
+`cancel_reason=CUSTOMER_SUPPORT` / refund event) ⇒ lapsed immediately.
 
-Two safety nets: a **nightly reconciliation job** polls every `active|grace` subscription against the Razorpay API and repairs drift (webhooks auto-disable after 24h of failed retries) with an alert on any repair; account deletion (`DELETE /api/mobile/account`) cancels all the parent's Razorpay subscriptions before removing the account.
+Two safety nets: a **nightly reconciliation job** polls every `active|grace` row against the
+RevenueCat REST API (`GET /subscribers/:mac`) and repairs drift with an alert on any repair;
+account deletion (`DELETE /api/mobile/account`) can NOT cancel store subscriptions server-side
+— instead mark rows `cancel_at_period_end` and surface "cancel in your store settings" copy in
+the deletion flow.
 
 ## Acceptance criteria
 
-- [ ] Forced test-mode charge failure walks pending→grace (AI still allowed)→halted→lapsed with both pushes
-- [ ] `charged` during grace restores active and clears `grace_until`
-- [ ] `paused`/`resumed` and `refund.processed` transitions covered by tests
-- [ ] Cancel runs out the paid period, then gates; re-subscribe reactivates
+- [ ] Sandbox billing failure walks active→grace (AI still allowed)→lapsed with both pushes
+- [ ] `RENEWAL` during grace restores active and clears `grace_until`
+- [ ] Refund ⇒ immediate lapse; cancel runs out the paid period, then gates; re-subscribe reactivates
 - [ ] Reconciliation detects and repairs a manually-desynced row and fires the drift alert
-- [ ] Account deletion with a live subscription cancels the Razorpay sub first
+- [ ] Account deletion with a live sub sets period-end cancel and shows store-cancel instructions
 
 ## Blocked by
 
-- SUB-6
+- SUB-15

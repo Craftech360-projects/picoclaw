@@ -2,10 +2,15 @@
 id: SUB-8
 title: "Purchase portal MVP (pay.cheekoai.in)"
 type: AFK
-status: open
+status: closed
 triage: afk-ready
 blocked-by: [SUB-6]
 ---
+
+> **2026-07-21 — superseded, never started.** Purchases moved in-app (Apple IAP + Google Play
+> Billing via RevenueCat): `docs/superpowers/specs/2026-07-21-iap-subscription-rails-design.md`.
+> The Sunshine UX direction and prototype carry over to the in-app paywall (SUB-16). GST
+> invoicing concern dissolves — stores are merchant of record. No portal is built.
 
 ## Parent
 

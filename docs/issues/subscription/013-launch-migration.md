@@ -4,8 +4,11 @@ title: "Launch: fleet migration, comms & kill-switch drill"
 type: HITL
 status: open
 triage: needs-human
-blocked-by: [SUB-3, SUB-6, SUB-8, SUB-10]
+blocked-by: [SUB-3, SUB-10, SUB-15, SUB-16]
 ---
+
+> **2026-07-21 — deps updated for the IAP pivot** (SUB-6/8 → SUB-15/16):
+> `docs/superpowers/specs/2026-07-21-iap-subscription-rails-design.md`.
 
 ## Parent
 
@@ -27,4 +30,4 @@ Migration-window edge owned here: between schema deploy and seeding, bound devic
 
 ## Blocked by
 
-- SUB-3, SUB-6, SUB-8, SUB-10
+- SUB-3, SUB-10, SUB-15, SUB-16

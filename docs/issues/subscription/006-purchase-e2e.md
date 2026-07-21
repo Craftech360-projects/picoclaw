@@ -2,11 +2,15 @@
 id: SUB-6
 title: "Purchase end-to-end (Razorpay test mode)"
 type: AFK
-status: open
+status: closed
 triage: afk-ready
 assignee: claude
 blocked-by: [SUB-2]
 ---
+
+> **2026-07-21 — shelved by rails pivot.** Purchases moved in-app via Apple IAP + Google Play
+> Billing (RevenueCat): `docs/superpowers/specs/2026-07-21-iap-subscription-rails-design.md`.
+> Replacement path: SUB-15 (backend) + SUB-16 (app) + SUB-17 (store setup).
 
 ## Parent
 
@@ -31,3 +35,17 @@ Edge cases owned here: webhook may arrive **before** the checkout response retur
 ## Blocked by
 
 - SUB-2
+
+## Resolution (2026-07-21)
+
+Built and closed as **shelved, not shipped**. The full Razorpay purchase path exists on
+`manager-api-node` branch `Subscription_implemetation`, commit `234bca15` ("in half ways",
+user-authored): checkout endpoint, plans catalog, webhook handler with ledger dedupe +
+`authenticated/activated/charged` transitions, out-of-order re-fetch, webhook-before-checkout
+race handling, HMAC verify, seed script, `.env.example`. 24/24 new tests passed locally
+(2026-07-21); full-suite run and review loop skipped once the pivot landed. Nothing is wired
+into the live app; code stays dormant as the fallback rails if IAP economics hurt.
+
+Criteria status: replay dedupe / invalid-signature 401 / race / anchors / plans catalog —
+covered by tests. Live test-mode lifecycle — never run (no Razorpay credentials; moot after
+pivot). `GET /api/mobile/subscription/plans` remains live and is reused by SUB-15/16.

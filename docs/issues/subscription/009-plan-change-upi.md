@@ -1,28 +1,35 @@
 ---
 id: SUB-9
-title: "Plan change (UPI cancel + re-create)"
+title: "Plan change (store-native upgrade/downgrade)"
 type: AFK
 status: open
 triage: afk-ready
-blocked-by: [SUB-8]
+blocked-by: [SUB-16]
 ---
+
+> **2026-07-21 — re-scoped to IAP rails.** UPI cancel+recreate orchestration is gone; stores
+> handle proration natively. `docs/superpowers/specs/2026-07-21-iap-subscription-rails-design.md`.
+> Original Razorpay scope preserved in git history.
 
 ## Parent
 
-Spec §3 change-plan; Razorpay research finding: UPI subscriptions cannot be PATCHed — plan change = cancel + create new with fresh mandate.
+IAP pivot design doc; Apple subscription-group upgrade/downgrade; Google replacement modes.
 
 ## What to build
 
-`POST /api/mobile/devices/:mac/subscription/change-plan` orchestrates: create the new Razorpay subscription (new mandate approval by the parent in the portal), and only when the new sub's `activated` webhook lands, cancel the old sub and swap `plan_id`/`razorpay_subscription_id` on the row. The limbo edge is owned here: between initiating and new-mandate approval, the row stays on the old plan — a parent who abandons approval has changed nothing. Portal Manage screen grows the change-plan flow with the "you'll approve a new UPI mandate" explainer.
+App side: change-plan UI on Manage — `purchaseStoreProduct` on the new tier's package
+(same Apple subscription group / Google `CHARGE_PRORATED_PRICE` replacement). Backend side:
+already-mapped `PRODUCT_CHANGE` (SUB-15) swaps `plan_id`; verify limits/buckets apply from
+the store-decided effective moment (Apple: upgrade immediate, downgrade at period end — the
+webhook timing encodes this, no extra logic).
 
 ## Acceptance criteria
 
-- [ ] Upgrade mid-period: old plan active until new sub activates; then new limits apply from the new billing anchor
-- [ ] Abandoned mandate approval ⇒ no state change, no orphaned Razorpay sub left active
-- [ ] Downgrade works identically
-- [ ] Old subscription is cancelled at Razorpay after the swap (verified via test-mode API)
-- [ ] Ledger records both subs' events without idempotency collisions
+- [ ] Sandbox upgrade applies new limits on next verdict after the `PRODUCT_CHANGE` lands
+- [ ] Sandbox downgrade keeps old limits until period end, then switches
+- [ ] Abandoned store sheet ⇒ no state change anywhere
+- [ ] Ledger records the change without idempotency collisions
 
 ## Blocked by
 
-- SUB-8
+- SUB-16
