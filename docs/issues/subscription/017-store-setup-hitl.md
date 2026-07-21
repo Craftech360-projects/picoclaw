@@ -23,3 +23,14 @@ that gates SUB-16 (and sandbox e2e for SUB-15).
 - [ ] RevenueCat webhook pointed at manager-api `/webhooks/revenuecat` with the Authorization secret; secret handed to backend env (`REVENUECAT_WEBHOOK_AUTH`)
 - [ ] Sandbox testers: one Apple sandbox account + one Play license tester registered
 - [ ] Product ids written into `subscription_plans.store_product_id` (SUB-15 seed)
+
+## Progress (2026-07-21)
+
+Both store accounts applied for; **pending verification** (days). To unblock SUB-16 and
+webhook e2e meanwhile, the RevenueCat **Test Store** is in use:
+
+- Test Store public SDK key: `test_JmxvpBvcCpfBKGfGVJvfFtZFkMY` (dev only — must never
+  ship in a release build; real per-platform keys replace it at launch)
+- Still to confirm on the Test Store: 3 products with the exact ids above, entitlements
+  `starter|family|premium` attached, offering `default`, webhook →
+  `/webhooks/revenuecat` + `REVENUECAT_WEBHOOK_AUTH` in backend env
