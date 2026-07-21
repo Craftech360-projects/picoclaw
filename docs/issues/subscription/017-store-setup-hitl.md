@@ -34,3 +34,15 @@ webhook e2e meanwhile, the RevenueCat **Test Store** is in use:
 - Still to confirm on the Test Store: 3 products with the exact ids above, entitlements
   `starter|family|premium` attached, offering `default`, webhook →
   `/webhooks/revenuecat` + `REVENUECAT_WEBHOOK_AUTH` in backend env
+
+**Dev backend deployed (2026-07-21):** branch `deploy/otadev-subscription` (= server's
+`feat/tts-providers-sarvam-edge-azure` + `Subscription_implemetation`, merge `24c275ee`)
+live on the DO dev box (otadev.cheekoai.in, manager-api pm2). All pending migrations
+applied (incl. both SUB-15 ones; server has `SKIP_DB_SYNC=1`, so migrations are manual:
+`set -a; . ./.env; set +a; npx prisma migrate deploy` — needs the new
+`prisma.config.js`). Seed verified: all 3 `store_product_id`s present. Webhook verified
+end-to-end from outside: 401 bad auth / 400 no id / processed / duplicate-dedupe; smoke
+rows cleaned. RC dashboard webhook values: URL
+`https://otadev.cheekoai.in/webhooks/revenuecat`, Authorization = `REVENUECAT_WEBHOOK_AUTH`
+in the server's `.env`. Still missing: `REVENUECAT_API_KEY` (RC secret key) in server env
+for the nightly reconciliation.
