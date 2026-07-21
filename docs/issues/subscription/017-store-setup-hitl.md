@@ -44,5 +44,11 @@ applied (incl. both SUB-15 ones; server has `SKIP_DB_SYNC=1`, so migrations are 
 end-to-end from outside: 401 bad auth / 400 no id / processed / duplicate-dedupe; smoke
 rows cleaned. RC dashboard webhook values: URL
 `https://otadev.cheekoai.in/webhooks/revenuecat`, Authorization = `REVENUECAT_WEBHOOK_AUTH`
-in the server's `.env`. Still missing: `REVENUECAT_API_KEY` (RC secret key) in server env
-for the nightly reconciliation.
+in the server's `.env`.
+
+**RC console wiring confirmed (2026-07-21, later):** Test Store products/entitlements/
+offering `default` created; `REVENUECAT_API_KEY` (v1 secret key) installed on the dev box
+and verified against the RC API (201); RC dashboard webhook configured and its test event
+delivered 200 `{"code":0,"msg":"ledgered"}` — the full RC→backend rail is proven.
+Remaining SUB-17 items are real-store only (account verification, Small Business Program,
+store products, sandbox testers).
