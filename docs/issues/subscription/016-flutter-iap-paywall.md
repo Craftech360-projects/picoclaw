@@ -2,11 +2,28 @@
 id: SUB-16
 title: "Parent app: purchases_flutter paywall & purchase flow"
 type: AFK
-status: open
+status: in-review
 triage: afk-ready
-assignee:
+assignee: claude
 blocked-by: [SUB-15, SUB-17]
 ---
+
+> **2026-07-21 — implementation complete, pending live e2e.** Branch
+> `feat/iap-subscription` (app repo), commits `d4936a4..b32f8a5` (7 task commits + 3
+> review-fix commits), pushed. Plan:
+> `docs/superpowers/plans/2026-07-21-sub16-flutter-iap-paywall.md` (subagent-driven, per-task
+> reviews + final whole-branch review READY-TO-MERGE; final review caught and fixed a
+> critical identity bug — purchases now pin RC appUserID to the screen's device MAC via
+> `ensureIdentity(mac)` before every store sheet, plus a `kReleaseMode` guard refusing
+> `test_` keys). Backend contract additions (plans `store_product_id`, summary
+> `cancel_at_period_end`) shipped + deployed to otadev (`7cf2e4c7`).
+> App tests: 16/16 subscription-related green; analyze baseline unchanged.
+>
+> **Remaining before close (needs a human + device/emulator):** run the app against
+> otadev, Profile → Subscription: 3 tiers with Test Store prices (Family "Most popular"),
+> buy → store sheet → "Confirming with the store…" → celebration within ~one poll;
+> backend log shows the INITIAL_PURCHASE applied; re-enter → manage view; Restore works.
+> Store-sandbox iOS/Android + store-review criteria stay deferred to SUB-17 verification.
 
 ## Parent
 
