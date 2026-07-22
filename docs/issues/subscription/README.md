@@ -10,13 +10,11 @@ end-to-end path, demoable on its own. `triage: afk-ready` = agent-runnable; `nee
 ```
 closed:     SUB-1 (skeleton)  SUB-2 (trial gates)  SUB-3 (buckets)  SUB-4 (metering)
             SUB-5 (cutoff)    SUB-6 (Razorpay, shelved)  SUB-8 (portal, superseded)
+            SUB-15 (RC backend)  SUB-16 (paywall)  SUB-9 (plan change)  SUB-7 (grace)
+            SUB-10 (parent app surfaces)  SUB-11 (admin)  SUB-12 (Bulbul)
 
-unblocked:  SUB-15 (RC backend)   SUB-17 (store setup, HITL)   SUB-11 (admin)
-            SUB-10 (parent app surfaces)   SUB-12 (Bulbul, HITL)   SUB-14 (push verify, HITL)
-
-            SUB-15 + SUB-17 → SUB-16 (paywall) → SUB-9 (plan change)
-            SUB-15 → SUB-7 (grace)
-            SUB-3 + SUB-10 + SUB-15 + SUB-16 → SUB-13 (launch, HITL)
+open:       SUB-17 (store setup, HITL)   SUB-14 (push verify, HITL)
+            SUB-3 + SUB-10 + SUB-15 + SUB-16 → SUB-13 (launch, HITL — unblocked)
 ```
 
 Claim an issue by setting `assignee:` in its frontmatter; close by setting `status: closed`
