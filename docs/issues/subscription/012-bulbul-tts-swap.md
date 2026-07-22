@@ -2,7 +2,7 @@
 id: SUB-12
 title: "Bulbul v3 TTS swap + Hinglish listening A/B"
 type: HITL
-status: open
+status: closed
 triage: needs-human
 blocked-by: []
 ---
@@ -26,3 +26,8 @@ Add a Sarvam Bulbul v3 TTS builder to the picoclaw worker's provider set (the re
 ## Blocked by
 
 None — can start immediately (human needed for the listening verdict).
+
+## Resolution
+
+Closed 2026-07-22 per Rahul — work completed outside the ticket flow. Listening
+verdict / cost re-measure details not recorded here; add notes if needed.
