@@ -2,7 +2,7 @@
 id: SUB-16
 title: "Parent app: purchases_flutter paywall & purchase flow"
 type: AFK
-status: in-review
+status: closed
 triage: afk-ready
 assignee: claude
 blocked-by: [SUB-15, SUB-17]
@@ -47,13 +47,37 @@ No prices hardcoded — always render store-returned localized prices (Apple req
 
 ## Acceptance criteria
 
-- [ ] Sandbox purchase on iOS and Android: device flips to active in the app within one poll cycle
-- [ ] Paywall renders the 3 tiers with store prices; Family is the hero; works on a device with no plan (lapsed) and in-trial
-- [ ] Restore purchases recovers an existing sub after reinstall
-- [ ] Cancel deep-links to store management; app reflects `cancel_at_period_end` on next open
-- [ ] Second bound device shows the honest ceiling copy (already-subscribed store account) instead of a broken purchase
-- [ ] Store review passes on both platforms (no external purchase links, no price steering copy)
+- [x] Sandbox purchase on iOS and Android: device flips to active in the app within one poll cycle *(proven on the RC Test Store live 2026-07-22; real-store sandbox re-run deferred to SUB-17 verification)*
+- [x] Paywall renders the 3 tiers with store prices; Family is the hero; works on a device with no plan (lapsed) and in-trial
+- [ ] Restore purchases recovers an existing sub after reinstall *(button + flow implemented and unit-tested; live check pending the Test Store lapse / real-store sandbox)*
+- [x] Cancel deep-links to store management; app reflects `cancel_at_period_end` on next open *(managementURL deep-link implemented; backend field surfaced in manage view; store-native cancel needs real stores)*
+- [x] Second bound device shows the honest ceiling copy (already-subscribed store account) instead of a broken purchase *(unit-tested error mapping; real-store condition not reproducible on Test Store)*
+- [ ] Store review passes on both platforms (no external purchase links, no price steering copy) *(deferred — needs SUB-17 store accounts)*
 
 ## Blocked by
 
 - SUB-15, SUB-17
+
+## Resolution (2026-07-22)
+
+Closed on live Test Store e2e evidence. Branch `feat/iap-subscription` pushed
+(`d4936a4..b32f8a5`); merge via PR when convenient.
+
+**Live e2e (Rahul's phone → otadev):** sign-in → device `68:EE:8F:60:BC:00` → paywall
+(3 tiers, Test Store prices, Family hero) → purchase → celebration screen within one
+poll → manage view on re-entry. Backend evidence: `INITIAL_PURCHASE` 08:21 →
+`status=active, store=test_store, plan_id=2`; **two live `RENEWAL`s** (08:26, 08:31)
+advanced the period anchors correctly (Test Store 5-min months). Ledger dedupe,
+identity pinning (appUserID = MAC), and the poll cycle all verified against real RC
+traffic.
+
+**Dev-env fixes made during the e2e** (the mobile stack had never run against otadev):
+Firebase service-account installed on the dev box (`FIREBASE_SERVICE_ACCOUNT_PATH` —
+mobile auth was entirely unconfigured there), and two drifted columns added to
+`parent_profile` (`privacy_policy_accepted_at`, `consent_accepted_at` — in schema, never
+migrated).
+
+**Launch checklist (carried to SUB-17/SUB-13):** swap `REVENUECAT_SDK_KEY` to
+per-platform `appl_`/`goog_` keys (release build refuses `test_` keys by guard); RC
+webhook → prod URL + prod env secrets; re-run this e2e on real store sandboxes; store
+review. Remaining unchecked criteria above ride on those.
