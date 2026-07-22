@@ -23,10 +23,16 @@ Migration-window edge owned here: between schema deploy and seeding, bound devic
 ## Acceptance criteria
 
 - [ ] Seed script idempotent (re-run creates no duplicates) and covers 100% of bound MACs *(script built + unit-tested 2026-07-22: `scripts/seed-launch-trials.js`, backend `56162382` — dry-run default, `--apply` to write, exits non-zero if any bound MAC is uncovered so the flip has a hard gate; reuses `ensureTrialForMac`'s create-if-absent upsert. Tick after the live dry-run + apply on the dev/prod box — DB unreachable from the dev laptop)*
-- [ ] Comms delivered to all active parents before flip day
+- [ ] Comms delivered to all active parents before flip day *(broadcast script built + unit-tested 2026-07-22: `scripts/send-launch-announcement.js`, dry-run default, token-deduped; copy drafted. Tick after the live `--apply` on comms day)*
 - [ ] Kill-switch revert drill executed: enforcement off ⇒ gated device allowed immediately
 - [ ] Launch-day watch: funnel dashboard live, zero fail-open alerts in the first 24h (or each one explained)
 - [ ] Post-launch validations scheduled: trial→paid conversion & bucket-consumption distribution review at day 30 (the skipped survey's replacement)
+
+## Runbook
+
+`sub13-launch-runbook.md` (2026-07-22): preconditions, kill-switch drill steps, comms
+procedure + copy, flip-day order (seed → coverage gate → flag), 24h watch list, day-30
+validations. Remaining criteria are execution-only — run the runbook.
 
 ## Blocked by
 
