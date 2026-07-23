@@ -36,13 +36,18 @@ in production run in minutes on DEV.
 4. ✅ *2026-07-23* **Questions meter** — talk to the toy; watch `device_token_usage_session.message_count`
    rise. App usage panel (This month ring / Today meters) matches within one refresh.
    *(8 questions counted, app panel matched)*
-5. ✅ *2026-07-23* **Daily bucket cutoff** — set the test row's plan to one with a tiny
+5. ⚠️ *2026-07-23 — NOT cleanly tested* **Daily bucket cutoff** — set the test row's plan to one with a tiny
    `daily_question_limit` (or temporarily lower the plan's limit), exceed it. Expect: verdict
-   blocks with the bucket reason; resets at IST midnight. *(minutes bucket exhausted ⇒ gate
-   clip on next session attempt; IST-midnight reset not separately observed)*
-6. **Monthly bucket** — same via `monthly_question_limit`; anchor = `trial_started_at`
+   blocks with the bucket reason; resets at IST midnight. *(the gate that fired was
+   `daily_minutes`, not `daily_questions` — buckets check minutes-tightest-first, so the
+   question gate was never isolated. `daily_questions` reason + IST-midnight reset still
+   untested.)*
+6. ❌ *2026-07-23 — NOT tested* **Monthly bucket** — same via `monthly_question_limit`; anchor = `trial_started_at`
    (trial) / `current_period_start` (paid). Confirm the 80% push fires once (see G).
-   *(anchor math exercised via tiny test plan; 80% push not yet confirmed on the phone)*
+   *(only the verdict's remaining-monthly COUNT was exercised; the `monthly_bucket_empty`
+   refusal never fired (minutes gated first) and the 80% push was never observed. To isolate:
+   set `monthly_question_limit` ≤ current monthly usage with daily/minute limits high, then a
+   session start must refuse with `monthly_bucket_empty`.)*
 7. ✅ *2026-07-23* **Mid-session minute cutoff (SUB-5)** — long session crossing the limit: heartbeat ends
    it mid-conversation, log shows the cutoff, next session gated. *(log: `Heartbeat cutoff …
    daily_minutes (8.4/8 min)` → `Interrupting active agent audio reason=end_prompt_farewell`
