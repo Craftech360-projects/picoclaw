@@ -24,7 +24,7 @@ Migration-window edge owned here: between schema deploy and seeding, bound devic
 
 - [ ] Seed script idempotent (re-run creates no duplicates) and covers 100% of bound MACs *(script built + unit-tested 2026-07-22: `scripts/seed-launch-trials.js`, backend `56162382` — dry-run default, `--apply` to write, exits non-zero if any bound MAC is uncovered so the flip has a hard gate; reuses `ensureTrialForMac`'s create-if-absent upsert. Tick after the live dry-run + apply on the dev/prod box — DB unreachable from the dev laptop)*
 - [ ] Comms delivered to all active parents before flip day *(broadcast script built + unit-tested 2026-07-22: `scripts/send-launch-announcement.js`, dry-run default, token-deduped; copy drafted. Tick after the live `--apply` on comms day)*
-- [ ] Kill-switch revert drill executed: enforcement off ⇒ gated device allowed immediately
+- [x] Kill-switch revert drill executed: enforcement off ⇒ gated device allowed immediately *(passed live on dev 2026-07-23, device `00:16:3E:AC:B5:38`: lapsed row + flag on ⇒ gate clip; flag off + manager-api restart ⇒ normal session on first attempt. Found+fixed: mqtt-gateway must restart after gateway deploys — running process had 7d-old pre-verdict code; runbook updated. Row restored to healthy trial after)*
 - [ ] Launch-day watch: funnel dashboard live, zero fail-open alerts in the first 24h (or each one explained)
 - [ ] Post-launch validations scheduled: trial→paid conversion & bucket-consumption distribution review at day 30 (the skipped survey's replacement)
 
