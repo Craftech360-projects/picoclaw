@@ -46,8 +46,7 @@ in production run in minutes on DEV.
    (trial) / `current_period_start` (paid). Confirm the 80% push fires once (see G).
    *(isolated with daily/minute limits high: verdict refused with `reason=monthly_bucket_empty`;
    at 78.6% of the monthly limit it correctly still allowed. Gate proven at the verdict layer.
-   Still open: the 80% bucket-alert PUSH (`maybeSendBucketAlert`) — needs an FCM token + crossing
-   the threshold, folds into SUB-14 / section G.)*
+   80% bucket-alert PUSH now also verified — see G30 (2026-07-23, delivered to the phone).)*
 7. ✅ *2026-07-23* **Mid-session minute cutoff (SUB-5)** — long session crossing the limit: heartbeat ends
    it mid-conversation, log shows the cutoff, next session gated. *(log: `Heartbeat cutoff …
    daily_minutes (8.4/8 min)` → `Interrupting active agent audio reason=end_prompt_farewell`
@@ -130,13 +129,19 @@ in production run in minutes on DEV.
 > `manager-api-node/cheekoai-firebase-adminsdk.json`. Verified: `sendPushNotification` → `true`
 > (test push accepted by FCM). **Launch note:** confirm the PROD box isn't on the same revoked
 > key — if it is, prod pushes are silently dead. Add an FCM live-send check to SUB-17.
-29. **Trial reminders** — set `trial_ends_at` to +7d/+3d/today (per reminder schedule), run
+29. ✅ *2026-07-23* **Trial reminders** — set `trial_ends_at` to +7d/+3d/today (per reminder schedule), run
     the cron: exactly one push per day-mark (`last_reminder_day` claims), deep-link opens
-    the right screen.
-30. **80% bucket alert** — push usage past 80% of monthly bucket: one push per period
-    (`bucket_alert_sent_at` re-arms next period).
-31. **Lifecycle pushes** — fix-payment (23) and plan-gate (24/26) arrive on the phone with
-    correct deep-links. *(This plus 29–30 observed live on a phone = SUB-14 done.)*
+    the right screen. *(day-23 → sent + claim=23; re-run → sent=0 (exactly-once); day-27 → sent +
+    claim advances to 27. Two reminder pushes delivered to the phone.)*
+30. ✅ *2026-07-23* **80% bucket alert** — push usage past 80% of monthly bucket: one push per period
+    (`bucket_alert_sent_at` re-arms next period). *(usage 106/108 = 98% → `80% bucket alert: sent`;
+    re-run same period → no 2nd push. Closes B6's push half. Re-arm-on-new-period is the anchor
+    guard, unit-tested.)*
+31. ✅ *2026-07-23* **Lifecycle pushes** — fix-payment (23) and plan-gate (24/26) arrive on the phone with
+    correct deep-links. *(BILLING_ISSUE→grace fired fix-payment; EXPIRATION→lapsed fired plan-gate;
+    both delivered via the new FCM key. Deep-link target correctness = app-side, eyeball on the phone.)*
+    *(29–31 all delivered live on the phone ⇒ **SUB-14 core done**; only deep-link landing-screen
+    eyeballing remains.)*
 
 ## H. Admin & alerts (SUB-11) — DEV
 32. **Dashboard truth** — counts by status match SQL; funnel tiles move when you gate/buy.
