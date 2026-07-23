@@ -164,8 +164,9 @@ in production run in minutes on DEV.
 37. ✅ *2026-07-23* **Seed apply (dev)** — `--apply`: 19 Family trials granted, **"Coverage OK: safe to
     flip enforcement"**; re-run → 0 to seed, still Coverage OK (idempotent); pre-existing rows
     untouched. Seeded rows then cleaned back out (dev restored to 2 rows).
-38. ✅ *2026-07-23 (dry-run)* **Comms dry-run** — 1 notifiable parent. ✔ Apply on dev would send the
-    announcement push to that phone (yours) — FCM now works, ready to fire on request.
+38. ✅ *2026-07-23 (apply done)* **Comms** — dry-run: notifiable parents counted. `--apply` fired live:
+    2 tokens, **1 delivered** (your phone: "Cheeko plans are coming 🎉"), **1 `NotRegistered`** (stale
+    token) logged + skipped, not retried — the graceful fleet-broadcast behavior exercised live.
 39. ✅ **Kill-switch drill** — item 9; runbook §1. *(passed live 2026-07-23)*
 
 ## J. Real-store gate (SUB-17) — ⏳ the launch blocker list
