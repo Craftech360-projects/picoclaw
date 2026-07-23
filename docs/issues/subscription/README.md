@@ -15,7 +15,14 @@ closed:     SUB-1 (skeleton)  SUB-2 (trial gates)  SUB-3 (buckets)  SUB-4 (meter
 
 open:       SUB-17 (store setup, HITL)   SUB-14 (push verify, HITL)
             SUB-3 + SUB-10 + SUB-15 + SUB-16 → SUB-13 (launch, HITL — unblocked)
+
+admin dashboard upgrade (plan: subscription-admin-dashboard-plan.md):
+            SUB-18 (detail drawer + quick wins + refund lookup) → SUB-19 (write actions)
+                                                                → SUB-20 (metrics/trends)
+            SUB-21 (audit polish — standalone)
 ```
+
+Full A→Z test evidence for SUB-1..17 (DEV, 2026-07-23): `subscription-test-plan.md`.
 
 Claim an issue by setting `assignee:` in its frontmatter; close by setting `status: closed`
 and appending a resolution note.
