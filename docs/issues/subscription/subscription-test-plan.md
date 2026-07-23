@@ -45,8 +45,11 @@ in production run in minutes on DEV.
    *(anchor math exercised via tiny test plan; 80% push not yet confirmed on the phone)*
 7. ✅ *2026-07-23* **Mid-session minute cutoff (SUB-5)** — long session crossing the limit: heartbeat ends
    it mid-conversation, log shows the cutoff, next session gated. *(log: `Heartbeat cutoff …
-   daily_minutes (7.5/7 min)`, farewell played, next session gated. Gotcha found: dev agent
-   had `USAGE_HEARTBEAT_INTERVAL=24h` in pm2 env — restored to 5m)*
+   daily_minutes (8.4/8 min)` → `Interrupting active agent audio reason=end_prompt_farewell`
+   → clean goodbye → session removed 5s later; next session gated. Two gotchas fixed: (a) dev
+   agent had `USAGE_HEARTBEAT_INTERVAL=24h` in pm2 env → 5m; (b) farewell was streamed INSIDE
+   the still-running response — fixed by interrupting the pipeline before the goodbye,
+   commit `637ae989`, unit-tested)*
 
 ## C. Verdict & kill switch (SUB-1, spec §5) — DEV
 
