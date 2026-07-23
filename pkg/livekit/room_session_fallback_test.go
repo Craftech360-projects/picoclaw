@@ -38,6 +38,34 @@ func TestRoomSessionSpeaksSTTUnavailableFallback(t *testing.T) {
 	}
 }
 
+func TestHandleEndPromptInterruptsActivePipeline(t *testing.T) {
+	cancelCalls := 0
+	participant := &ParticipantState{
+		identity:   "device-a",
+		sessionKey: "livekit:device:a",
+		ttsCancel:  func() { cancelCalls++ },
+	}
+	rs := &RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-a"},
+		participant: participant,
+	}
+	pipeline := NewAudioPipeline(rs, nil, nil, nil)
+	rs.activePipeline = pipeline
+	pipeline.publishAgentState = func(oldState, newState string) {}
+	turn := pipeline.startTurn(context.Background(), "test_turn")
+
+	// bridge == nil: the farewell itself is skipped, but the in-flight
+	// response must still be interrupted before the session ends.
+	rs.handleEndPrompt("bye now")
+
+	if cancelCalls != 1 {
+		t.Fatalf("tts cancel calls = %d, want 1", cancelCalls)
+	}
+	if err := turn.ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("turn context error = %v, want context.Canceled", err)
+	}
+}
+
 func TestHandleDataMessageAbortInterruptsActivePipeline(t *testing.T) {
 	cancelCalls := 0
 	participant := &ParticipantState{

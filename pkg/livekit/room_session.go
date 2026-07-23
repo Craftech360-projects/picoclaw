@@ -531,6 +531,11 @@ func (rs *RoomSession) publishSessionLanguageUpdateAck(update sessionLanguageUpd
 // handleEndPrompt asks the LLM to generate and speak a farewell message,
 // then disconnects. A 10-second deadline prevents hanging on a slow model.
 func (rs *RoomSession) handleEndPrompt(prompt string) {
+	// An end prompt (gateway end or minute-cap cutoff) can land mid-response;
+	// stop the in-flight speech/generation first so the farewell is not
+	// sandwiched inside it (live 2026-07-23: story audio streamed over the
+	// goodbye and the session died mid-story).
+	rs.interruptActivePipeline("end_prompt_farewell")
 	if rs.bridge == nil {
 		return
 	}
