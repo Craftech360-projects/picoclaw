@@ -123,12 +123,13 @@ in production run in minutes on DEV.
     (hand-edit one) gets corrected from RC. *(job `src/jobs/rcReconciliation.js` exists; not yet run)*
 
 ## G. Pushes (SUB-10/14) — DEV, needs a real phone
-> ⚠️ **BLOCKED 2026-07-23:** every push send on the dev box fails with FCM
-> `invalid_grant: Invalid JWT Signature`. The Firebase service-account credential on otadev
-> is bad (revoked key or server clock skew — the two documented causes). All of G (and the
-> fix-payment / plan-gate pushes in F23/24/26) can be exercised at the state-machine level but
-> **no push actually delivers until the dev Firebase key is re-synced/regenerated.** Prereq for
-> SUB-14.
+> ✅ **UNBLOCKED 2026-07-23:** the dev Firebase service-account key (`46c4e29a80`) had been
+> revoked in Google Cloud → every push failed with `invalid_grant: Invalid JWT Signature`
+> (clock was synced; the app-repo copy was the same dead key). Fixed by generating a fresh
+> key (`0b6574b743`, same `firebase-adminsdk-fbsvc@cheekoai…` SA) and installing it at
+> `manager-api-node/cheekoai-firebase-adminsdk.json`. Verified: `sendPushNotification` → `true`
+> (test push accepted by FCM). **Launch note:** confirm the PROD box isn't on the same revoked
+> key — if it is, prod pushes are silently dead. Add an FCM live-send check to SUB-17.
 29. **Trial reminders** — set `trial_ends_at` to +7d/+3d/today (per reminder schedule), run
     the cron: exactly one push per day-mark (`last_reminder_day` claims), deep-link opens
     the right screen.
