@@ -62,8 +62,9 @@ in production run in minutes on DEV.
 9. ✅ *2026-07-23* **Kill-switch drill** — runbook §1: gate test device → flag on → gate clip → flag off →
    normal session on first attempt. Record both timestamps. *(passed; also surfaced the
    stale-pm2-process trap — gateway must restart after deploys, now a runbook step)*
-10. **Missing row = lapsed (enforcement on)** — device with no row is refused; admin
+10. ✅ *2026-07-23* **Missing row = lapsed (enforcement on)** — device with no row is refused; admin
     re-grant (SUB-11) repairs it. This is the seed-script hazard the coverage gate exists for.
+    *(no-row MAC → `allowed=false reason=no_plan`; admin re-grant then flips it to allowed — see H33)*
 
 ## D. Purchase flow (SUB-15/16) — DEV (re-proven; re-run ⏳ on sandbox)
 
@@ -118,8 +119,10 @@ in production run in minutes on DEV.
     lapse + plan-gate push. *(→ `lapsed` immediately)*
 27. ✅ *2026-07-23* **Stale/out-of-order events** — replay an old-period event after a newer purchase:
     ledgered, state untouched (anchor guard). *(old EXPIRATION → `ledgered`, row stayed active)*
-28. **Nightly reconciliation** — run the SUB-7 reconciliation job manually; drifted row
-    (hand-edit one) gets corrected from RC. *(job `src/jobs/rcReconciliation.js` exists; not yet run)*
+28. ✅ *2026-07-23 (job runs clean)* **Nightly reconciliation** — run the SUB-7 reconciliation job manually; drifted row
+    (hand-edit one) gets corrected from RC. *(`runRcReconciliation({dryRun})` ran: 0 checked/0
+    repaired/0 failed — nothing RC-backed on dev to reconcile yet. Drift-repair path re-verify once
+    real RC subs exist post-SUB-17.)*
 
 ## G. Pushes (SUB-10/14) — DEV, needs a real phone
 > ✅ **UNBLOCKED 2026-07-23:** the dev Firebase service-account key (`46c4e29a80`) had been
@@ -144,12 +147,16 @@ in production run in minutes on DEV.
     eyeballing remains.)*
 
 ## H. Admin & alerts (SUB-11) — DEV
-32. **Dashboard truth** — counts by status match SQL; funnel tiles move when you gate/buy.
-33. **Comp / re-grant** — admin grants a comp plan to a MAC → device allowed immediately.
-34. **Fail-open alert** — force a verdict error (e.g. break DB creds briefly on dev):
-    fail-open alert fires once, device still allowed (never bricked).
-35. **Billing-issue spike** — POST ≥5 distinct-device `BILLING_ISSUE`s in one UTC day →
-    one ops alert (once-per-day dedupe).
+32. ✅ *2026-07-23 (metrics layer)* **Dashboard truth** — counts by status match SQL; funnel tiles move when you gate/buy.
+    *(`getMetrics()` returns funnel/churn_30d/mrr_inr/gate_hits_30d; status counts match SQL.
+    UI-tile-movement is an eyeball on the admin dashboard, not covered here.)*
+33. ✅ *2026-07-23* **Comp / re-grant** — admin grants a comp plan to a MAC → device allowed immediately.
+    *(lapsed device → `regrantTrial` → verdict flips false→true; log `[SUB-ADMIN] re-granted 30d`)*
+34. ⏭ *not run (too destructive on dev)* **Fail-open alert** — force a verdict error (e.g. break DB creds briefly on dev):
+    fail-open alert fires once, device still allowed (never bricked). *(the `sendOpsAlert('fail_open')`
+    path is wired in `getSessionVerdict`'s no-plan-row branch and unit-covered; not force-triggered live.)*
+35. ✅ *2026-07-23* **Billing-issue spike** — POST ≥5 distinct-device `BILLING_ISSUE`s in one UTC day →
+    one ops alert (once-per-day dedupe). *(5 events → `[CHEEKO ALERT] [billing_spike] 5 … threshold 5`)*
 
 ## I. Launch tooling (SUB-13) — DEV now, prod on launch day
 36. **Seed dry-run** — done 2026-07-23 on dev: 21 bound / 1 existing / 20 to seed. ✔
