@@ -36,18 +36,18 @@ in production run in minutes on DEV.
 4. ✅ *2026-07-23* **Questions meter** — talk to the toy; watch `device_token_usage_session.message_count`
    rise. App usage panel (This month ring / Today meters) matches within one refresh.
    *(8 questions counted, app panel matched)*
-5. ⚠️ *2026-07-23 — NOT cleanly tested* **Daily bucket cutoff** — set the test row's plan to one with a tiny
+5. ✅ *2026-07-23 (verdict layer)* **Daily bucket cutoff** — set the test row's plan to one with a tiny
    `daily_question_limit` (or temporarily lower the plan's limit), exceed it. Expect: verdict
-   blocks with the bucket reason; resets at IST midnight. *(the gate that fired was
-   `daily_minutes`, not `daily_questions` — buckets check minutes-tightest-first, so the
-   question gate was never isolated. `daily_questions` reason + IST-midnight reset still
-   untested.)*
-6. ❌ *2026-07-23 — NOT tested* **Monthly bucket** — same via `monthly_question_limit`; anchor = `trial_started_at`
+   blocks with the bucket reason; resets at IST midnight. *(isolated with minute/monthly limits
+   set high: verdict refused with `reason=daily_questions`. Full toy-clip e2e for this reason
+   not re-run — the verdict→gateway→clip chain was already proven end-to-end via `daily_minutes`
+   today; the gateway streams the clip on any `allowed=false`. IST-midnight reset still untested.)*
+6. ✅ *2026-07-23 (verdict layer)* **Monthly bucket** — same via `monthly_question_limit`; anchor = `trial_started_at`
    (trial) / `current_period_start` (paid). Confirm the 80% push fires once (see G).
-   *(only the verdict's remaining-monthly COUNT was exercised; the `monthly_bucket_empty`
-   refusal never fired (minutes gated first) and the 80% push was never observed. To isolate:
-   set `monthly_question_limit` ≤ current monthly usage with daily/minute limits high, then a
-   session start must refuse with `monthly_bucket_empty`.)*
+   *(isolated with daily/minute limits high: verdict refused with `reason=monthly_bucket_empty`;
+   at 78.6% of the monthly limit it correctly still allowed. Gate proven at the verdict layer.
+   Still open: the 80% bucket-alert PUSH (`maybeSendBucketAlert`) — needs an FCM token + crossing
+   the threshold, folds into SUB-14 / section G.)*
 7. ✅ *2026-07-23* **Mid-session minute cutoff (SUB-5)** — long session crossing the limit: heartbeat ends
    it mid-conversation, log shows the cutoff, next session gated. *(log: `Heartbeat cutoff …
    daily_minutes (8.4/8 min)` → `Interrupting active agent audio reason=end_prompt_farewell`
