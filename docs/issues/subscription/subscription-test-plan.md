@@ -159,12 +159,14 @@ in production run in minutes on DEV.
     one ops alert (once-per-day dedupe). *(5 events → `[CHEEKO ALERT] [billing_spike] 5 … threshold 5`)*
 
 ## I. Launch tooling (SUB-13) — DEV now, prod on launch day
-36. **Seed dry-run** — done 2026-07-23 on dev: 21 bound / 1 existing / 20 to seed. ✔
-37. **Seed apply (dev)** — `--apply` on dev: 20 rows created, "Coverage OK", re-run
-    creates nothing new, the pre-existing row untouched.
-38. **Comms dry-run** — done 2026-07-23: 1 notifiable parent. ✔ Apply on dev sends the
-    announcement to that phone (that's yours — expect one push).
-39. **Kill-switch drill** — item 9; runbook §1.
+36. ✅ *2026-07-23* **Seed dry-run** — dev: 21 bound / 2 existing / 19 to seed (2 = the test device +
+    the SUB-16 e2e device). ✔
+37. ✅ *2026-07-23* **Seed apply (dev)** — `--apply`: 19 Family trials granted, **"Coverage OK: safe to
+    flip enforcement"**; re-run → 0 to seed, still Coverage OK (idempotent); pre-existing rows
+    untouched. Seeded rows then cleaned back out (dev restored to 2 rows).
+38. ✅ *2026-07-23 (dry-run)* **Comms dry-run** — 1 notifiable parent. ✔ Apply on dev would send the
+    announcement push to that phone (yours) — FCM now works, ready to fire on request.
+39. ✅ **Kill-switch drill** — item 9; runbook §1. *(passed live 2026-07-23)*
 
 ## J. Real-store gate (SUB-17) — ⏳ the launch blocker list
 40. Products in both consoles (3 tiers, one Apple subscription group), RC entitlements
