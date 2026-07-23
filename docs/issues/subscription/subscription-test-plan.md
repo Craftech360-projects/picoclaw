@@ -21,9 +21,10 @@ in production run in minutes on DEV.
 
 ## A. Trial lifecycle (SUB-1/2) — DEV
 
-1. **Fresh bind grants one trial** — unbind a team toy, delete its `device_subscriptions`
+1. ✅ *2026-07-23, `00:16:3E:AC:B5:38`* **Fresh bind grants one trial** — unbind a team toy, delete its `device_subscriptions`
    row (test device only!), re-bind from the app. Expect: row `status=trial`,
-   `trial_used=true`, `trial_ends_at = +30d`; log `Trial granted`.
+   `trial_used=true`, `trial_ends_at = +30d`; log `Trial granted`. *(row created same
+   instant as bind; Family plan; 30d to the ms)*
 2. **Re-bind never re-grants** — unbind/re-bind the same MAC (same or another account).
    Expect: row unchanged, `trial_started_at` original.
 3. **Trial expiry gates** — `UPDATE ... SET trial_ends_at = now() - interval '1 day'` on the
@@ -32,22 +33,28 @@ in production run in minutes on DEV.
 
 ## B. Metering & buckets (SUB-3/4/5) — DEV
 
-4. **Questions meter** — talk to the toy; watch `device_token_usage_session.message_count`
+4. ✅ *2026-07-23* **Questions meter** — talk to the toy; watch `device_token_usage_session.message_count`
    rise. App usage panel (This month ring / Today meters) matches within one refresh.
-5. **Daily bucket cutoff** — set the test row's plan to one with a tiny
+   *(8 questions counted, app panel matched)*
+5. ✅ *2026-07-23* **Daily bucket cutoff** — set the test row's plan to one with a tiny
    `daily_question_limit` (or temporarily lower the plan's limit), exceed it. Expect: verdict
-   blocks with the bucket reason; resets at IST midnight.
+   blocks with the bucket reason; resets at IST midnight. *(minutes bucket exhausted ⇒ gate
+   clip on next session attempt; IST-midnight reset not separately observed)*
 6. **Monthly bucket** — same via `monthly_question_limit`; anchor = `trial_started_at`
    (trial) / `current_period_start` (paid). Confirm the 80% push fires once (see G).
-7. **Mid-session minute cutoff (SUB-5)** — long session crossing the limit: heartbeat ends
-   it mid-conversation, log shows the cutoff, next session gated.
+   *(anchor math exercised via tiny test plan; 80% push not yet confirmed on the phone)*
+7. ✅ *2026-07-23* **Mid-session minute cutoff (SUB-5)** — long session crossing the limit: heartbeat ends
+   it mid-conversation, log shows the cutoff, next session gated. *(log: `Heartbeat cutoff …
+   daily_minutes (7.5/7 min)`, farewell played, next session gated. Gotcha found: dev agent
+   had `USAGE_HEARTBEAT_INTERVAL=24h` in pm2 env — restored to 5m)*
 
 ## C. Verdict & kill switch (SUB-1, spec §5) — DEV
 
-8. **Fail-open default** — unset `ENFORCEMENT_ENABLED` → every device allowed; verdicts
-   still logged.
-9. **Kill-switch drill** — runbook §1: gate test device → flag on → gate clip → flag off →
-   normal session on first attempt. Record both timestamps.
+8. ✅ *2026-07-23* **Fail-open default** — unset `ENFORCEMENT_ENABLED` → every device allowed; verdicts
+   still logged. *(lapsed row + flag off ⇒ allowed; verdicts logged throughout)*
+9. ✅ *2026-07-23* **Kill-switch drill** — runbook §1: gate test device → flag on → gate clip → flag off →
+   normal session on first attempt. Record both timestamps. *(passed; also surfaced the
+   stale-pm2-process trap — gateway must restart after deploys, now a runbook step)*
 10. **Missing row = lapsed (enforcement on)** — device with no row is refused; admin
     re-grant (SUB-11) repairs it. This is the seed-script hazard the coverage gate exists for.
 
