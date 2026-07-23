@@ -2,8 +2,9 @@
 id: SUB-18
 title: "Admin dashboard: device detail drawer + quick wins + refund lookup"
 type: AFK
-status: open
+status: closed
 triage: afk-ready
+assignee: claude
 blocked-by: []
 ---
 
@@ -39,13 +40,45 @@ static Refunds blurb with a real lookup path.
 
 ## Acceptance criteria
 
-- [ ] Results table shows grace countdown, cancel-at-period-end tag, plan tier+price, phone
-- [ ] Clicking a row opens a drawer with status+reason, plan+limits, period/trial/grace,
+- [x] Results table shows grace countdown, cancel-at-period-end tag, plan tier+price, phone
+- [x] Clicking a row opens a drawer with status+reason, plan+limits, period/trial/grace,
       store+RC txn id, usage-vs-limits bars, event timeline, audit history
-- [ ] Usage-vs-limits numbers match the verdict's (shared helper, no drift)
-- [ ] Searching an `rc_original_transaction_id` finds the device
-- [ ] `/detail` is superadmin-gated; unknown MAC → clean 404, no-plan MAC → sensible empty state
+- [x] Usage-vs-limits numbers match the verdict's (shared helper, no drift)
+- [x] Searching an `rc_original_transaction_id` finds the device
+- [x] `/detail` is superadmin-gated; unknown MAC → clean 404, no-plan MAC → sensible empty state
 
 ## Blocked by
 
 - (none)
+
+## Resolution
+
+Shipped in `cheeko-backend@84a2984b` (branch `deploy/otadev-subscription`). Converts the
+read-only monitor into a support console.
+
+**Backend** (`manager-api-node`):
+- `GET /admin/subscriptions/:mac/detail` (requireAuth + requireSuperAdmin) — assembles
+  status + why-gated, plan+limits, period/trial/grace, `store`+`rc_original_transaction_id`,
+  usage-vs-limits, the `subscription_events` timeline (newest first, `id` tiebreaker), and
+  this MAC's audit history. Reuses `getSubscriptionSummary` + a **dry-run** `getSessionVerdict`
+  so the drawer's numbers can't drift from enforcement (no re-implemented bucket math).
+- `getSessionVerdict` gained a `dryRun` flag: computes the true verdict even with the
+  kill-switch off and skips the gate-hit ledger — for admin reads only.
+- `searchSubscriptions` now also matches `rc_original_transaction_id` (refund lookup),
+  folding in MACs found only by their RC txn id.
+
+**Frontend** (`manager-web/SubscriptionAdmin.vue`): quick-win columns (grace/cancelling
+tags, plan name+tier+price, parent phone), row-click `el-drawer` with all sections + usage
+`el-progress` bars, refund-lookup note replacing the static blurb.
+
+**Verification:** backend unit + integration tests green (90 subscription tests, incl. new
+dry-run, `getDetail` compose/404/empty-shell, and RC-txn search cases); Vue template compiles
+clean. Note: the frontend was verified by template compilation + code review, not a live
+browser session (no live dashboard/DB in this environment).
+
+**Review:** `/code-review` (high) surfaced 5 findings — 4 accepted as the ticket's mandated
+reuse tradeoff (read-path lazy-expiry side effect, duplicate row reads, 2×limit search rows
+that deliberately preserve the exact RC match, static countdown snapshot); 1 fixed (added an
+`id` tiebreaker to the event ordering).
+
+**Deferred (Phase 2+):** write actions from the drawer (SUB-19), metrics/trends (SUB-20).
