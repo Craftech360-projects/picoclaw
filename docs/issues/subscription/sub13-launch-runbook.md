@@ -20,8 +20,13 @@ Uses a team test device (e.g. `68:EE:8F:60:BC:00`), not a customer's.
 1. Note the device's current row:
    `SELECT status, trial_ends_at FROM device_subscriptions WHERE mac_address='68:EE:8F:60:BC:00';`
 2. Gate it: `UPDATE device_subscriptions SET status='lapsed' WHERE mac_address='68:EE:8F:60:BC:00';`
-3. Enforcement ON: set `ENFORCEMENT_ENABLED=true` in `.env` → `pm2 restart manager-api --update-env`
-4. Talk to the toy → expect the **gate clip**, not a conversation.
+3. Enforcement ON: set `ENFORCEMENT_ENABLED=true` in `.env` → `pm2 restart manager-api --update-env`,
+   **and `pm2 restart mqtt-gateway`** if it hasn't restarted since the last gateway deploy — a
+   git pull changes nothing in a running Node process (2026-07-23 drill: gateway had 7d uptime
+   and silently ran pre-verdict code; every session passed unGated).
+4. Talk to the toy → expect the **gate clip**, not a conversation. Confirm the gateway log
+   shows `🎟️ [VERDICT] <mac>: allowed=false` — sessions with **no** verdict lines mean the
+   gateway is running stale code.
 5. Kill switch: set `ENFORCEMENT_ENABLED=false` → `pm2 restart manager-api --update-env`
 6. Talk to the toy again → expect a **normal session on the first attempt**. That's the drill pass.
 7. Restore the row from step 1 and leave enforcement OFF.
@@ -54,9 +59,10 @@ enforcement is on).
 3. `node scripts/seed-launch-trials.js --apply` — **must print "Coverage OK"**. Non-zero
    exit = STOP, do not flip; fix the listed MACs (admin re-grant, SUB-11) and re-run
    (idempotent).
-4. Flip: `ENFORCEMENT_ENABLED=true` in `.env` → `pm2 restart manager-api --update-env`
+4. Flip: `ENFORCEMENT_ENABLED=true` in `.env` → `pm2 restart manager-api --update-env`;
+   restart `mqtt-gateway` too if the gateway code changed since its last restart.
 5. Smoke: one team device with a trial row talks normally; the drill device (if left
-   lapsed) gets the gate clip.
+   lapsed) gets the gate clip; gateway log shows `🎟️ [VERDICT]` lines per session.
 
 ## 4 — Launch-day watch (first 24 h)
 
