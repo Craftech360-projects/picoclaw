@@ -75,9 +75,10 @@ in production run in minutes on DEV.
     ledger.
 13. **Renewal anchors advance** — wait 2 Test Store months (~10 min): two `RENEWAL` events,
     `current_period_start/end` only ever move forward.
-14. **Webhook idempotency** — re-POST a captured webhook body (same event id) with the auth
-    header: 200, `duplicate`, no state change.
-15. **Bad auth rejected** — same POST with wrong Authorization → 401, nothing ledgered.
+14. ✅ *2026-07-23 (service layer)* **Webhook idempotency** — re-POST a captured webhook body (same event id) with the auth
+    header: 200, `duplicate`, no state change. *(replayed same event id → `duplicate`, no write)*
+15. ✅ *2026-07-23 (service layer)* **Bad auth rejected** — same POST with wrong Authorization → 401, nothing ledgered.
+    *(`verifyWebhookAuth('wrong')===false`, correct secret===true; HTTP-401 path not re-run)*
 16. **Restore purchases** — ⏳ sandbox: reinstall app, Restore recovers the sub. (Test Store
     approximation already unit-covered.)
 17. **Second-device ceiling** — ⏳ sandbox: second MAC on the same store account shows the
@@ -85,12 +86,14 @@ in production run in minutes on DEV.
 
 ## E. Plan change (SUB-9) — DEV webhook-level now, ⏳ sandbox for store semantics
 
-18. **Upgrade (webhook level)** — simulate: POST `PRODUCT_CHANGE` (ledgered only, state
+18. ✅ *2026-07-23 (webhook level)* **Upgrade (webhook level)** — simulate: POST `PRODUCT_CHANGE` (ledgered only, state
     untouched) then `INITIAL_PURCHASE`/`RENEWAL` with the new `product_id` and fresh anchors
-    → `plan_id` swaps, new limits on next verdict. (This is the unit-tested contract —
-    re-verify once live against RC traffic.)
-19. **Downgrade defers** — after a change commit, DB stays on the old plan until the
+    → `plan_id` swaps, new limits on next verdict. *(PRODUCT_CHANGE left plan=family; RENEWAL
+    with `cheeko_premium_monthly` swapped plan→premium and advanced anchors forward)*
+19. ✅ *2026-07-23 (webhook part)* **Downgrade defers** — after a change commit, DB stays on the old plan until the
     period-end event; app shows the period-end notice, old limits hold (verdict check).
+    *(webhook contract = same as 18: PRODUCT_CHANGE is ledger-only, no swap until the
+    effective event — proven. App-side period-end notice already unit-tested in SUB-9.)*
 20. **Abandoned sheet** — start a change in the app, cancel the sheet: flow returns to
     idle, no notice/error, no API refetch, no webhook, DB untouched.
 21. ⏳ **Real upgrade** — sandbox: Apple immediate upgrade / Google `CHARGE_PRORATED_PRICE`;
@@ -102,20 +105,30 @@ in production run in minutes on DEV.
 
 ## F. Unhappy paths (SUB-7) — DEV (simulated webhooks), ⏳ sandbox billing-retry
 
-23. **Billing issue → grace** — POST `BILLING_ISSUE`: status `grace`, `grace_until` = +3d or
+23. ✅ *2026-07-23* **Billing issue → grace** — POST `BILLING_ISSUE`: status `grace`, `grace_until` = +3d or
     store window (later of the two); fix-payment push sent; device still allowed during grace.
-24. **Expiration → lapsed** — POST `EXPIRATION` past period end: `lapsed`, plan-gate push;
-    if `cancel_at_period_end` was set → relabelled `cancelled`, **no** push.
-25. **Cancel / uncancel** — `CANCELLATION` sets the flag (manage view shows "will not
-    renew"); `UNCANCELLATION` clears it.
-26. **Refund via support** — `CANCELLATION` with `cancel_reason=CUSTOMER_SUPPORT`: immediate
-    lapse + plan-gate push.
-27. **Stale/out-of-order events** — replay an old-period event after a newer purchase:
-    ledgered, state untouched (anchor guard).
+    *(with realistic renewal-due timing: `grace`, `grace_until`=+3d. NB the guard only graces
+    when the period is at/near its end — a mid-period billing issue is correctly ignored. Push
+    send attempted but failed — see Firebase note under G.)*
+24. ✅ *2026-07-23* **Expiration → lapsed** — POST `EXPIRATION` past period end: `lapsed`, plan-gate push;
+    if `cancel_at_period_end` was set → relabelled `cancelled`, **no** push. *(both branches:
+    plain → `lapsed`; with cancel flag → `cancelled`)*
+25. ✅ *2026-07-23* **Cancel / uncancel** — `CANCELLATION` sets the flag (manage view shows "will not
+    renew"); `UNCANCELLATION` clears it. *(flag set then cleared; status held active)*
+26. ✅ *2026-07-23* **Refund via support** — `CANCELLATION` with `cancel_reason=CUSTOMER_SUPPORT`: immediate
+    lapse + plan-gate push. *(→ `lapsed` immediately)*
+27. ✅ *2026-07-23* **Stale/out-of-order events** — replay an old-period event after a newer purchase:
+    ledgered, state untouched (anchor guard). *(old EXPIRATION → `ledgered`, row stayed active)*
 28. **Nightly reconciliation** — run the SUB-7 reconciliation job manually; drifted row
-    (hand-edit one) gets corrected from RC.
+    (hand-edit one) gets corrected from RC. *(job `src/jobs/rcReconciliation.js` exists; not yet run)*
 
 ## G. Pushes (SUB-10/14) — DEV, needs a real phone
+> ⚠️ **BLOCKED 2026-07-23:** every push send on the dev box fails with FCM
+> `invalid_grant: Invalid JWT Signature`. The Firebase service-account credential on otadev
+> is bad (revoked key or server clock skew — the two documented causes). All of G (and the
+> fix-payment / plan-gate pushes in F23/24/26) can be exercised at the state-machine level but
+> **no push actually delivers until the dev Firebase key is re-synced/regenerated.** Prereq for
+> SUB-14.
 29. **Trial reminders** — set `trial_ends_at` to +7d/+3d/today (per reminder schedule), run
     the cron: exactly one push per day-mark (`last_reminder_day` claims), deep-link opens
     the right screen.
