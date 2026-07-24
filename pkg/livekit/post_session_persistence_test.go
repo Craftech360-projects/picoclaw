@@ -228,3 +228,62 @@ func TestPersistPostSessionDataSavesSummaryAndChatHistoryBeforeSessionEnd(t *tes
 		t.Fatalf("persistence order = %v, want chat-history before end", order)
 	}
 }
+
+func TestPersistPostSessionDataSkipsSummaryOnPreemptedTeardown(t *testing.T) {
+	var order []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/device/token-usage":
+			order = append(order, "usage")
+		case "/agent/device/aa:bb:cc:dd:ee:ff/sessions/session-1/summary":
+			order = append(order, "summary")
+		case "/agent/device/aa:bb:cc:dd:ee:ff/sessions/session-1/end":
+			order = append(order, "end")
+		case "/agent/chat-history/session":
+			order = append(order, "chat-history")
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	sessionKey := "livekit:device:aabbccddeeff"
+	sessions := session.NewSessionManager("")
+	sessions.AddMessage(sessionKey, "user", "hello")
+	sessions.AddMessage(sessionKey, "assistant", "hi")
+
+	bridge := &AgentBridge{
+		provider: fakeSummaryProvider{},
+		sessions: sessions,
+		historyLog: []PersistedChatMessage{
+			{ChatType: chatTypeUser, Content: "hello", Timestamp: 1},
+			{ChatType: chatTypeAssistant, Content: "hi", Timestamp: 2},
+		},
+	}
+	bridge.MarkTeardownPreempted()
+
+	rs := &RoomSession{
+		managerAPIURL:    server.URL,
+		managerAPISecret: "secret",
+		deviceMAC:        "aa:bb:cc:dd:ee:ff",
+		roomInfo:         &protocol.Room{Name: "session-1"},
+	}
+
+	rs.persistPostSessionData(bridge)
+
+	chatHistoryIndex, endIndex := -1, -1
+	for i, item := range order {
+		switch item {
+		case "summary":
+			t.Fatalf("persistence order = %v, want no summary call on preempted teardown", order)
+		case "chat-history":
+			chatHistoryIndex = i
+		case "end":
+			endIndex = i
+		}
+	}
+	if chatHistoryIndex == -1 || endIndex == -1 || chatHistoryIndex > endIndex {
+		t.Fatalf("persistence order = %v, want chat-history before end", order)
+	}
+}

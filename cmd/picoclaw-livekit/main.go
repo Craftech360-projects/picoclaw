@@ -848,6 +848,7 @@ func main() {
 			Config:            sessionCfg,
 			Provider:          sessionProvider,
 			ModelID:           sessionModelID,
+			CharacterName:     characterName,
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
 			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
@@ -918,7 +919,10 @@ func main() {
 		// then runs OnClose (skips upload because WasPreempted) and OnAfterClose
 		// (skips distributed-lock release because WasPreempted).
 		if managerLockLease != nil {
-			managerLockLease.SetOnPreempted(bridge.RequestTeardown)
+			managerLockLease.SetOnPreempted(func() {
+				bridge.MarkTeardownPreempted()
+				bridge.RequestTeardown()
+			})
 		}
 		startLiveKitAsyncMCPInitialization(sessionCfg, agentInstance, bridge, roomName, workspaceIdentity)
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {

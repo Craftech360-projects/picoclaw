@@ -72,7 +72,19 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		usageCancel()
 	}
 
-	summary, summaryMessageCount := rs.finalizeAndPersistSessionSummary(bridge)
+	// On a last-tap-wins preemption the new session is already waiting on the
+	// per-device workspace lock; the ~seconds LLM summary would only delay the
+	// handoff and its MEMORY.md write gets clobbered by the new session's
+	// restore. Chat history and usage below are still persisted.
+	summary := ""
+	summaryMessageCount := 0
+	if bridge.TeardownPreempted() {
+		logger.InfoCF("livekit", "Skipping session summary on preempted handoff", map[string]any{
+			"room": rs.roomName(),
+		})
+	} else {
+		summary, summaryMessageCount = rs.finalizeAndPersistSessionSummary(bridge)
+	}
 
 	if summary != "" {
 		if err := rs.persistSummaryToMemoryFile(bridge, summary, summaryMessageCount); err != nil {

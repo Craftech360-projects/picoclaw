@@ -163,6 +163,8 @@ type AgentBridge struct {
 	sessionLanguageCode string
 	languageLockEnabled bool
 
+	characterName string
+
 	closeMu sync.Mutex
 	closed  bool
 
@@ -173,6 +175,10 @@ type AgentBridge struct {
 	teardownMu   sync.Mutex
 	teardownHook func()
 	teardownOnce sync.Once
+	// teardownPreempted is set when a newer session preempted this device's
+	// workspace lock (last-tap-wins). Post-session persistence checks it to
+	// skip the slow LLM session summary so the lock hands off fast.
+	teardownPreempted bool
 
 	sessionLLMLocks sync.Map // map[string]*sync.Mutex
 }
@@ -206,6 +212,9 @@ type AgentBridgeConfig struct {
 	SessionLanguageCode string
 	LanguageLockEnabled bool
 	AllowedToolNames    []string
+	// CharacterName is the persona this session runs (e.g. "Cheeko", "Tenali").
+	// Stamped on per-turn LLM logs so transcripts show which character spoke.
+	CharacterName string
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -257,6 +266,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		contextWindow:             ctxWindow,
 		languageLockEnabled:       cfg.LanguageLockEnabled,
 		allowedToolNames:          normalizeAllowedToolNames(cfg.AllowedToolNames),
+		characterName:             cfg.CharacterName,
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
 	ab.sessionLanguageName = policy.DisplayName
@@ -323,6 +333,29 @@ func (ab *AgentBridge) Close() {
 			}
 		}
 	}
+}
+
+// MarkTeardownPreempted flags this teardown as a last-tap-wins preemption so
+// post-session persistence can skip the LLM session summary (its output would
+// be clobbered by the new session's workspace restore; chat history and usage
+// are still persisted).
+func (ab *AgentBridge) MarkTeardownPreempted() {
+	if ab == nil {
+		return
+	}
+	ab.teardownMu.Lock()
+	ab.teardownPreempted = true
+	ab.teardownMu.Unlock()
+}
+
+// TeardownPreempted reports whether this teardown was preemption-triggered.
+func (ab *AgentBridge) TeardownPreempted() bool {
+	if ab == nil {
+		return false
+	}
+	ab.teardownMu.Lock()
+	defer ab.teardownMu.Unlock()
+	return ab.teardownPreempted
 }
 
 // SetTeardownHook registers the canonical full-teardown entry point for the
@@ -640,6 +673,7 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	ensureToolCallTokenBudget(ab.modelID, llmOpts, len(toolDefs))
 	logger.InfoCF("livekit", "LLM request config", map[string]any{
 		"session":        sessionKey,
+		"character":      ab.characterName,
 		"profile":        profile,
 		"model_id":       ab.modelID,
 		"provider":       modelProtocol(ab.modelID),
@@ -671,6 +705,7 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	}
 	logger.InfoCF("livekit", "LLM response received", map[string]any{
 		"session":          sessionKey,
+		"character":        ab.characterName,
 		"profile":          profile,
 		"content":          ab.logContentPreview(sessionKey, resp.Content, maxLLMLogContentLen),
 		"content_len":      len(resp.Content),
@@ -1541,9 +1576,16 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 		return errors.New("agent bridge or provider is nil")
 	}
 
+	// Restored chat history may belong to a different character (card switch);
+	// naming the current persona keeps the greeting from introducing itself as
+	// the previous one.
+	greetingContent := "[System Event] The user has successfully connected to the room and is now listening. Please proactively introduce yourself and greet them using your persona guidelines."
+	if name := strings.TrimSpace(ab.characterName); name != "" {
+		greetingContent = fmt.Sprintf("[System Event] The user has successfully connected to the room and is now listening. You are %s. Introduce yourself as %s and greet them using your persona guidelines. Earlier conversation may have been with a different character; you are %s now.", name, name, name)
+	}
 	greetingPrompt := providers.Message{
 		Role:    "user",
-		Content: "[System Event] The user has successfully connected to the room and is now listening. Please proactively introduce yourself and greet them using your persona guidelines.",
+		Content: greetingContent,
 	}
 
 	if ab.sessions != nil {
