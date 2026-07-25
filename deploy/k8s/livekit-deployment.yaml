@@ -51,14 +51,14 @@ spec:
               app: picoclaw-livekit
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:2fb9b1b622638897ac393ad91abb8df7232af69a22ff6bef1e51576a5afcfcda
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:fc985c026c62bbaf9db76d0dbeae7808d1bcd94eaf6737ac026de57168154260
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
-          args: ["--agent-name", "cheeko-agent", "--config", "/etc/picoclaw/config.json"]
+          args: ["--agent-name", "cheeko-agent", "--config", "/etc/picoclaw/config.json", "--log-level", "debug"]
           ports:
             - name: health
               containerPort: 8192
@@ -83,7 +83,7 @@ spec:
             - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD
               value: "0.72"
             - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS
-              value: "800"
+              value: "700"
             - name: PICOCLAW_AGENTS_DEFAULTS_WORKSPACE
               value: /opt/picoclaw/workspace-template
             - name: MANAGER_API_URL
