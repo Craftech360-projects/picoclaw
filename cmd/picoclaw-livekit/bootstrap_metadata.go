@@ -33,6 +33,9 @@ type roomMetadata struct {
 	CharacterID   string `json:"character_id"`
 	CharacterName string `json:"character"`
 	Language      string `json:"language"`
+	// Per-character Sarvam speaker (ai_agent_template.sarvam_voice_id) — overrides the
+	// global TTS voice for this session when the provider is sarvam.
+	SarvamVoiceID string `json:"sarvam_voice_id"`
 }
 
 type roomMetadataChildProfile struct {
@@ -145,6 +148,7 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	metadata.CharacterID = normalizeString(mustGetMapValue(payload, "character_id", "characterId"))
 	metadata.CharacterName = normalizeString(mustGetMapValue(payload, "character", "character_name", "characterName"))
 	metadata.Language = normalizeString(mustGetMapValue(payload, "language"))
+	metadata.SarvamVoiceID = normalizeString(mustGetMapValue(payload, "sarvam_voice_id", "sarvamVoiceId"))
 	metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "primary_language", "primaryLanguage"))
 	if metadata.PrimaryLanguage == "" {
 		metadata.PrimaryLanguage = metadata.SessionLanguageName

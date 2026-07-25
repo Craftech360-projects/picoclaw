@@ -47,3 +47,18 @@ func TestSynthesizeEmptyKey(t *testing.T) {
 		t.Fatal("expected error for empty api key")
 	}
 }
+
+func TestEmotionProsodyBuckets(t *testing.T) {
+	if p, temp, ok := emotionProsody("excited"); !ok || p != 1.15 || temp != 0.8 {
+		t.Fatalf("excited = (%v,%v,%v)", p, temp, ok)
+	}
+	if p, temp, ok := emotionProsody("sleepy"); !ok || p != 0.85 || temp != 0.4 {
+		t.Fatalf("sleepy = (%v,%v,%v)", p, temp, ok)
+	}
+	if _, _, ok := emotionProsody("neutral"); ok {
+		t.Fatal("neutral should keep defaults")
+	}
+	if _, _, ok := emotionProsody(""); ok {
+		t.Fatal("empty should keep defaults")
+	}
+}

@@ -383,6 +383,11 @@ func main() {
 		if _, rawMeta, _ := resolveLiveKitJobBootstrapContext(job); strings.TrimSpace(rawMeta) != "" {
 			if bs, bsErr := parseRoomMetadataBootstrap(rawMeta); bsErr == nil {
 				sessionCfg.LiveKitService.TTS.Language = strings.TrimSpace(bs.Metadata.SessionLanguageCode)
+				// Per-character Sarvam speaker from dispatch metadata beats the global voice.
+				if voice := strings.TrimSpace(bs.Metadata.SarvamVoiceID); voice != "" &&
+					strings.EqualFold(strings.TrimSpace(sessionCfg.LiveKitService.TTS.Provider), "sarvam") {
+					sessionCfg.LiveKitService.TTS.VoiceID = voice
+				}
 			}
 		}
 		sessionTTSProvider, sessionTTSSampleRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)

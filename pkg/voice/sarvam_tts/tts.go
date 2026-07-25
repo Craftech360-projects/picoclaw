@@ -14,7 +14,21 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
+
+// emotionProsody maps a Cheeko Face emotion tag to Sarvam prosody. Two buckets:
+// lively (faster, more variation) and soft (slower, steadier); everything else
+// keeps provider defaults. ponytail: coarse buckets; per-emotion tuning if kids notice.
+func emotionProsody(emotion string) (pace float64, temperature float64, ok bool) {
+	switch emotion {
+	case "happy", "excited", "laughing", "surprised", "silly":
+		return 1.15, 0.8, true
+	case "sad", "sleepy", "crying", "scared", "shy":
+		return 0.85, 0.4, true
+	}
+	return 0, 0, false
+}
 
 const (
 	defaultBaseURL = "wss://api.sarvam.ai"
@@ -136,15 +150,24 @@ func (t *SarvamTTS) Synthesize(ctx context.Context, text string) (AudioStream, e
 		return nil, fmt.Errorf("sarvam websocket dial: %w", err)
 	}
 
+	configData := map[string]any{
+		"model":                t.cfg.ModelID,
+		"target_language_code": t.cfg.LanguageCode,
+		"speaker":              t.cfg.VoiceID,
+		"speech_sample_rate":   strconv.Itoa(t.cfg.SampleRateHz),
+		"output_audio_codec":   outputAudioCodec,
+	}
+	// Shade prosody from the per-sentence emotion tag. bulbul:v3 has no emotion
+	// param — pace (0.5-2.0) and temperature (0.01-1.0, v3-only) are all we get.
+	if pace, temp, ok := emotionProsody(tts.EmotionFromContext(ctx)); ok {
+		configData["pace"] = pace
+		if strings.Contains(t.cfg.ModelID, "v3") {
+			configData["temperature"] = temp
+		}
+	}
 	configMsg := map[string]any{
 		"type": "config",
-		"data": map[string]any{
-			"model":                t.cfg.ModelID,
-			"target_language_code": t.cfg.LanguageCode,
-			"speaker":              t.cfg.VoiceID,
-			"speech_sample_rate":   strconv.Itoa(t.cfg.SampleRateHz),
-			"output_audio_codec":   outputAudioCodec,
-		},
+		"data": configData,
 	}
 	textMsg := map[string]any{"type": "text", "data": map[string]any{"text": text}}
 	flushMsg := map[string]any{"type": "flush"}

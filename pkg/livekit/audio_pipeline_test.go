@@ -1014,6 +1014,21 @@ func TestSanitizeVoiceTextStripsExpressionTags(t *testing.T) {
 	}
 }
 
+func TestSanitizeVoiceTextLowercasesShoutyCaps(t *testing.T) {
+	cases := map[string]string{
+		"BLAST OFF!":                   "blast off!", // Sarvam spells all-caps as letters
+		"That is AMAZING, really HUGE": "That is amazing, really huge",
+		"I watch TV in the USA":        "I watch TV in the USA", // allowlisted acronyms survive
+		"plain text stays":             "plain text stays",
+		"A":                            "A", // single letters untouched
+	}
+	for in, want := range cases {
+		if got := sanitizeVoiceTextForTTS(in); got != want {
+			t.Errorf("sanitizeVoiceTextForTTS(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSynthesizeDedupedAnnouncesFirstChunkWithTag(t *testing.T) {
 	pipeline := NewAudioPipeline(&RoomSession{
 		roomInfo:    &livekitproto.Room{Name: "room-a"},
@@ -1030,5 +1045,20 @@ func TestSynthesizeDedupedAnnouncesFirstChunkWithTag(t *testing.T) {
 		announced[0] != "[happy] Hello there, friend!" ||
 		announced[1] != "[sad] Second sentence goes here." {
 		t.Fatalf("expected each tagged chunk announced in order, got %v", announced)
+	}
+}
+
+func TestLeadingExpressionTag(t *testing.T) {
+	cases := map[string]string{
+		"[happy] Yay!":        "happy",
+		"  [sleepy] night":    "sleepy",
+		"[sleepy][silly] hi":  "sleepy",
+		"no tag":              "",
+		"[OK!] not lowercase": "",
+	}
+	for in, want := range cases {
+		if got := leadingExpressionTag(in); got != want {
+			t.Errorf("leadingExpressionTag(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

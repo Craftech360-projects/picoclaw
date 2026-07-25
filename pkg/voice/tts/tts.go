@@ -16,6 +16,27 @@ type Provider interface {
 	Synthesize(ctx context.Context, text string) (AudioStream, error)
 }
 
+// emotionKey carries the per-sentence emotion tag (e.g. "happy", "sleepy") from
+// the pipeline to providers that can shade prosody. Context-based so the
+// Provider interface stays unchanged; providers without emotion support ignore it.
+type emotionKey struct{}
+
+// WithEmotion returns a context carrying the emotion tag for one synthesis call.
+func WithEmotion(ctx context.Context, emotion string) context.Context {
+	if emotion == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, emotionKey{}, emotion)
+}
+
+// EmotionFromContext returns the emotion tag set by WithEmotion, or "".
+func EmotionFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(emotionKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // BufferStream adapts a fully-buffered PCM blob (from a non-streaming/batch TTS
 // backend) to the streaming AudioStream interface: it yields the buffer once,
 // then io.EOF.

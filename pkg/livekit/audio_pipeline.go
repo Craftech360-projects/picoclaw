@@ -31,7 +31,26 @@ var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought
 // spoken; the tagged text still reaches the device via speech_created so the
 // firmware can drive the face.
 var voiceExpressionTagRE = regexp.MustCompile(`^\s*(?:\[[a-z]{2,12}\]\s*)+`)
+var voiceLeadingTagCaptureRE = regexp.MustCompile(`^\s*\[([a-z]{2,12})\]`)
+
+// leadingExpressionTag returns the first leading [tag] name, or "".
+func leadingExpressionTag(text string) string {
+	if m := voiceLeadingTagCaptureRE.FindStringSubmatch(text); m != nil {
+		return m[1]
+	}
+	return ""
+}
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
+
+// Persona prompts use ALL-CAPS for shouting ("BLAST OFF!", "AMAZING"), but TTS
+// providers (Sarvam especially) read all-caps words as acronyms and spell them
+// out letter by letter ("OFF" -> "O F F"). Lowercase them before synthesis,
+// keeping real initialisms spelled out.
+// ponytail: static allowlist; extend if a persona ever needs a new acronym.
+var voiceAllCapsWordRE = regexp.MustCompile(`\b[A-Z]{2,}\b`)
+var voiceAcronymAllowlist = map[string]struct{}{
+	"TV": {}, "OK": {}, "AI": {}, "USA": {}, "ABC": {}, "DIY": {}, "ID": {},
+}
 var dynamicGreetingCooldownUntilUnix atomic.Int64
 
 const (
@@ -93,6 +112,12 @@ func sanitizeVoiceTextForTTS(text string) string {
 		"<analysis>", "",
 		"</analysis>", "",
 	).Replace(text)
+	text = voiceAllCapsWordRE.ReplaceAllStringFunc(text, func(w string) string {
+		if _, ok := voiceAcronymAllowlist[w]; ok {
+			return w
+		}
+		return strings.ToLower(w)
+	})
 	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
 }
 
@@ -1861,6 +1886,11 @@ func (ap *AudioPipeline) handleAsyncEvent(evt AsyncEvent, userSpeaking bool) {
 func (ap *AudioPipeline) synthesizeAndPlay(ctx context.Context, text string) {
 	if ap.tts == nil || ap.session == nil || ap.session.localTrack == nil {
 		return
+	}
+	// Capture the per-sentence emotion tag before sanitize strips it; emotion-aware
+	// providers (Sarvam pace/temperature) read it from the context.
+	if emotion := leadingExpressionTag(text); emotion != "" {
+		ctx = tts.WithEmotion(ctx, emotion)
 	}
 	text = sanitizeVoiceTextForTTS(text)
 	if text == "" {
