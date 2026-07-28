@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
 func TestSynthesizeUsesWebSocketStreamInput(t *testing.T) {
@@ -168,5 +169,58 @@ func TestBuildWebSocketURLEscapesVoiceID(t *testing.T) {
 	const want = "wss://api.example.test/v1/text-to-speech/voice%2Fid%20with%20space/stream-input?model_id=eleven_flash_v2_5&output_format=pcm_24000"
 	if url != want {
 		t.Fatalf("url = %q, want %q", url, want)
+	}
+}
+
+func TestEnvFloat(t *testing.T) {
+	if got := envFloat("PICOCLAW_UNSET_KEY", 0.35); got != 0.35 {
+		t.Fatalf("unset = %v, want 0.35", got)
+	}
+	for _, bad := range []string{"", "abc", "-0.1", "1.5"} {
+		t.Setenv("PICOCLAW_TEST_STABILITY", bad)
+		if got := envFloat("PICOCLAW_TEST_STABILITY", 0.35); got != 0.35 {
+			t.Fatalf("envFloat(%q) = %v, want fallback 0.35", bad, got)
+		}
+	}
+	t.Setenv("PICOCLAW_TEST_STABILITY", "0.2")
+	if got := envFloat("PICOCLAW_TEST_STABILITY", 0.35); got != 0.2 {
+		t.Fatalf("valid override = %v, want 0.2", got)
+	}
+}
+
+func TestVoiceSettingsEmotion(t *testing.T) {
+	get := func(emotion string) (float64, float64) {
+		vs := voiceSettings(tts.WithEmotion(context.Background(), emotion))
+		return vs["stability"].(float64), vs["style"].(float64)
+	}
+
+	neutralStab, neutralStyle := get("")
+	if neutralStab != 0.35 || neutralStyle != 0.45 {
+		t.Fatalf("neutral = (%v, %v), want (0.35, 0.45)", neutralStab, neutralStyle)
+	}
+
+	excitedStab, excitedStyle := get("excited")
+	if excitedStab >= neutralStab || excitedStyle <= neutralStyle {
+		t.Fatalf("excited = (%v, %v), want lower stability + higher style than neutral", excitedStab, excitedStyle)
+	}
+
+	sleepyStab, sleepyStyle := get("sleepy")
+	if sleepyStab <= neutralStab || sleepyStyle >= neutralStyle {
+		t.Fatalf("sleepy = (%v, %v), want higher stability + lower style than neutral", sleepyStab, sleepyStyle)
+	}
+
+	// Unknown tags must not shift anything.
+	if s, y := get("bewildered"); s != neutralStab || y != neutralStyle {
+		t.Fatalf("unknown tag = (%v, %v), want neutral", s, y)
+	}
+
+	// Env base must still shift, and clamping must hold at the edges.
+	t.Setenv("ELEVENLABS_STABILITY", "0.05")
+	if s, _ := get("excited"); s != 0 {
+		t.Fatalf("clamped stability = %v, want 0", s)
+	}
+	t.Setenv("ELEVENLABS_STYLE", "0.95")
+	if _, y := get("happy"); y != 1 {
+		t.Fatalf("clamped style = %v, want 1", y)
 	}
 }

@@ -7,13 +7,67 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
 const defaultBaseURL = "https://api.elevenlabs.io"
+
+// Voice settings tuned for expressive kids' character speech. Lower stability
+// widens emotional range; below ~0.25 delivery starts to wobble and hallucinate.
+// ponytail: env-tunable so voice can be calibrated without a redeploy.
+const (
+	defaultStability       = 0.35
+	defaultSimilarityBoost = 0.75
+	defaultStyle           = 0.45
+)
+
+// envFloat reads a [0,1] float from env, falling back to def when unset or invalid.
+func envFloat(key string, def float64) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(key)), 64)
+	if err != nil || v < 0 || v > 1 {
+		return def
+	}
+	return v
+}
+
+// emotionShift maps a Cheeko Face emotion tag to stability/style deltas applied
+// on top of the configured base, plus an absolute speed. Stability and style
+// alone barely separate lively from soft; speed is what makes the two buckets
+// audibly distinct, same as pace does in sarvam_tts emotionProsody.
+// ponytail: coarse buckets; per-emotion tuning if kids notice.
+func emotionShift(emotion string) (dStability, dStyle, speed float64) {
+	switch emotion {
+	case "happy", "excited", "laughing", "surprised", "silly":
+		return -0.20, +0.30, 1.12
+	case "sad", "sleepy", "crying", "scared", "shy":
+		return +0.35, -0.30, 0.85
+	}
+	return 0, 0, 1.0
+}
+
+func clamp01(v float64) float64 {
+	return math.Min(1, math.Max(0, v))
+}
+
+// voiceSettings builds the ElevenLabs voice_settings payload, shaded by the
+// per-sentence emotion tag the pipeline stashed in ctx.
+func voiceSettings(ctx context.Context) map[string]any {
+	dStability, dStyle, speed := emotionShift(tts.EmotionFromContext(ctx))
+	return map[string]any{
+		"stability":         clamp01(envFloat("ELEVENLABS_STABILITY", defaultStability) + dStability),
+		"similarity_boost":  envFloat("ELEVENLABS_SIMILARITY_BOOST", defaultSimilarityBoost),
+		"style":             clamp01(envFloat("ELEVENLABS_STYLE", defaultStyle) + dStyle),
+		"speed":             speed,
+		"use_speaker_boost": true,
+	}
+}
 
 // ElevenLabsTTS streams audio from ElevenLabs text-to-speech.
 type ElevenLabsTTS struct {
@@ -60,8 +114,9 @@ func (t *ElevenLabsTTS) Synthesize(ctx context.Context, text string) (AudioStrea
 	}
 
 	if err := conn.WriteJSON(map[string]any{
-		"text":       " ",
-		"xi_api_key": t.cfg.APIKey,
+		"text":           " ",
+		"xi_api_key":     t.cfg.APIKey,
+		"voice_settings": voiceSettings(ctx),
 	}); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("elevenlabs websocket initialize: %w", err)
