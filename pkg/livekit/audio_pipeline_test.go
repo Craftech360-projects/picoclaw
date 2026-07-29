@@ -1039,6 +1039,24 @@ func TestSanitizeVoiceTextStripsMidSentenceExpressionTags(t *testing.T) {
 	}
 }
 
+// Regression: the persona prompt ends a session with a "MEMO: ..." line and claims
+// the gateway strips it. There is no gateway here, so the child heard it read aloud.
+func TestSanitizeVoiceTextStripsMemoLine(t *testing.T) {
+	cases := map[string]string{
+		"MEMO: Aarav, six, beat his quiz streak.":        "",
+		"  Memo: lowercase and indented count too.":      "",
+		"[happy] MEMO: tagged memo still gets stripped.": "",
+		"Bye for now!\nMEMO: Aarav loves dinosaurs.":     "Bye for now!",
+		"That is a great memo: idea you had.":            "That is a great memo: idea you had.", // mid-line, not a memo line
+		"I will remember that.":                          "I will remember that.",
+	}
+	for in, want := range cases {
+		if got := sanitizeVoiceTextForTTS(in); got != want {
+			t.Errorf("sanitizeVoiceTextForTTS(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSanitizeVoiceTextLowercasesShoutyCaps(t *testing.T) {
 	cases := map[string]string{
 		"BLAST OFF!":                   "blast off!", // Sarvam spells all-caps as letters

@@ -34,6 +34,17 @@ var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought
 var voiceExpressionTagRE = regexp.MustCompile(`\s*(?:\[[a-z]{2,12}\]\s*)+`)
 var voiceLeadingTagCaptureRE = regexp.MustCompile(`^\s*\[([a-z]{2,12})\]`)
 
+// The persona prompt ends a session with a "MEMO: ..." line summarising it and
+// claims the gateway strips it; there is no gateway on the LiveKit path, so the
+// line was read aloud to the child. The durable summary is unaffected: teardown
+// generates its own via FinalizeSessionSummary (post_session_persistence.go).
+// ponytail: matched per TTS chunk, and the sentence splitter has already turned
+// newlines into spaces and cut on sentence punctuation, so only the fragment that
+// still starts with "MEMO:" is dropped — a multi-sentence memo body can leak from
+// the second sentence on. Upgrade path if that shows up in practice: strip in the
+// streaming buffer (sentenceSplitter.Feed) before sentence splitting.
+var voiceMemoLineRE = regexp.MustCompile(`(?im)^\s*memo\s*:.*$`)
+
 // leadingExpressionTag returns the first leading [tag] name, or "".
 func leadingExpressionTag(text string) string {
 	if m := voiceLeadingTagCaptureRE.FindStringSubmatch(text); m != nil {
@@ -97,6 +108,8 @@ func sanitizeVoiceTextForTTS(text string) string {
 	// so dropping a mid-sentence tag would otherwise glue words ("hello...the moon").
 	// The Fields/Join at the end collapses the extra space and trims the edges.
 	text = voiceExpressionTagRE.ReplaceAllString(text, " ")
+	// After the tag strip so "[neutral] MEMO: ..." still anchors at line start.
+	text = voiceMemoLineRE.ReplaceAllString(text, "")
 	text = voiceReasoningBlockRE.ReplaceAllString(text, "")
 	text = voiceReasoningLineRE.ReplaceAllString(text, "")
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")
