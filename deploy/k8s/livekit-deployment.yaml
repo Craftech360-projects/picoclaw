@@ -51,7 +51,7 @@ spec:
               app: picoclaw-livekit
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:fc985c026c62bbaf9db76d0dbeae7808d1bcd94eaf6737ac026de57168154260
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:c126dd2a561217976b05eb58d0f49ea55fafbe7db4a2a0030df05deaaf976cc2
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
