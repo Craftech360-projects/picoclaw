@@ -231,6 +231,7 @@ type managerCharacterSession struct {
 	RuntimeAgentName string `json:"runtimeAgentName"`
 	Language         string `json:"language"`
 	SystemPrompt     string `json:"systemPrompt"`
+	GreetingPrompt   string `json:"greetingPrompt"`
 	Soul             string `json:"soul"`
 }
 

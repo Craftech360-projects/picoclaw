@@ -35,7 +35,7 @@ func TestFetchManagerCharacterSessionDecodesContract(t *testing.T) {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"data":{"characterId":"char-uuid","characterName":"Cheeko","runtimeAgentName":"cheeko-agent1","language":"English","systemPrompt":"You are Cheeko.","soul":"I am warm."}}`))
+		_, _ = w.Write([]byte(`{"code":0,"data":{"characterId":"char-uuid","characterName":"Cheeko","runtimeAgentName":"cheeko-agent1","language":"English","systemPrompt":"You are Cheeko.","greetingPrompt":"Greet with a silly animal sound.","soul":"I am warm."}}`))
 	}))
 	defer server.Close()
 
@@ -53,6 +53,9 @@ func TestFetchManagerCharacterSessionDecodesContract(t *testing.T) {
 	}
 	if out.RuntimeAgentName != "cheeko-agent1" || out.Language != "English" {
 		t.Fatalf("unexpected routing fields: %+v", out)
+	}
+	if out.GreetingPrompt != "Greet with a silly animal sound." {
+		t.Fatalf("GreetingPrompt = %q, want the template greeting", out.GreetingPrompt)
 	}
 }
 

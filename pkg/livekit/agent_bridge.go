@@ -164,6 +164,9 @@ type AgentBridge struct {
 	languageLockEnabled bool
 
 	characterName string
+	// greetingPrompt is the per-character opening instruction pulled from
+	// ai_agent_template.greeting_prompt; empty falls back to the generic one.
+	greetingPrompt string
 
 	closeMu sync.Mutex
 	closed  bool
@@ -215,6 +218,9 @@ type AgentBridgeConfig struct {
 	// CharacterName is the persona this session runs (e.g. "Cheeko", "Tenali").
 	// Stamped on per-turn LLM logs so transcripts show which character spoke.
 	CharacterName string
+	// GreetingPrompt is the character's own opening instruction from
+	// ai_agent_template.greeting_prompt. Empty -> generic greeting instruction.
+	GreetingPrompt string
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -267,6 +273,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		languageLockEnabled:       cfg.LanguageLockEnabled,
 		allowedToolNames:          normalizeAllowedToolNames(cfg.AllowedToolNames),
 		characterName:             cfg.CharacterName,
+		greetingPrompt:            strings.TrimSpace(cfg.GreetingPrompt),
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
 	ab.sessionLanguageName = policy.DisplayName
@@ -653,6 +660,14 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	}
 
 	toolDefs := ab.toolDefs()
+	// The greeting is a fixed opening line, so tools are dead weight there. Worse,
+	// sending them contradicts the persona prompt ("you do NOT have access to any
+	// tools in this session"), and tool-tuned models resolve that by emitting a
+	// JSON reasoning scaffold — seconds of latency before the first audible token,
+	// and a thought block the sanitizer sometimes misses and speaks to the child.
+	if strings.EqualFold(profile, "greeting") {
+		toolDefs = nil
+	}
 	releaseLLMSlot, err := ab.acquireSessionLLMSlot(ctx, sessionKey)
 	if err != nil {
 		ab.EmitRuntimeEvent(RuntimeEvent{
@@ -1160,7 +1175,9 @@ func (ab *AgentBridge) acquireSessionLLMSlot(ctx context.Context, sessionKey str
 }
 
 func (ab *AgentBridge) optionsForProfile(profile string) map[string]any {
-	if strings.EqualFold(profile, "proactive") {
+	// "greeting" is a proactive turn that additionally drops tools; it shares the
+	// proactive token/temperature budget.
+	if strings.EqualFold(profile, "proactive") || strings.EqualFold(profile, "greeting") {
 		return ab.proactiveLLMOptions
 	}
 	return ab.llmOptions
@@ -1566,6 +1583,27 @@ func (ab *AgentBridge) GenerateSpontaneousResponse(ctx context.Context, sessionK
 	return err
 }
 
+// buildGreetingInstruction renders the "[System Event]" turn that makes the LLM open the
+// session. A non-empty greetingPrompt (ai_agent_template.greeting_prompt) replaces the
+// generic instruction so each character can open differently without a rebuild; the
+// character-switch note is kept either way because restored history may belong to the
+// previous persona.
+func buildGreetingInstruction(characterName, greetingPrompt string) string {
+	const connected = "[System Event] The user has successfully connected to the room and is now listening."
+	name := strings.TrimSpace(characterName)
+	if custom := strings.TrimSpace(greetingPrompt); custom != "" {
+		out := connected + " " + custom
+		if name != "" {
+			out += fmt.Sprintf(" Earlier conversation may have been with a different character; you are %s now.", name)
+		}
+		return out
+	}
+	if name != "" {
+		return fmt.Sprintf("%s You are %s. Introduce yourself as %s and greet them using your persona guidelines. Earlier conversation may have been with a different character; you are %s now.", connected, name, name, name)
+	}
+	return connected + " Please proactively introduce yourself and greet them using your persona guidelines."
+}
+
 // GenerateGreeting triggers the LLM to dynamically generate an introductory greeting
 // when the user connects to the room. It leverages the agent's system prompt to decide the persona.
 func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, cb func(chunk string), onDone func()) error {
@@ -1579,13 +1617,9 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 	// Restored chat history may belong to a different character (card switch);
 	// naming the current persona keeps the greeting from introducing itself as
 	// the previous one.
-	greetingContent := "[System Event] The user has successfully connected to the room and is now listening. Please proactively introduce yourself and greet them using your persona guidelines."
-	if name := strings.TrimSpace(ab.characterName); name != "" {
-		greetingContent = fmt.Sprintf("[System Event] The user has successfully connected to the room and is now listening. You are %s. Introduce yourself as %s and greet them using your persona guidelines. Earlier conversation may have been with a different character; you are %s now.", name, name, name)
-	}
 	greetingPrompt := providers.Message{
 		Role:    "user",
-		Content: greetingContent,
+		Content: buildGreetingInstruction(ab.characterName, ab.greetingPrompt),
 	}
 
 	if ab.sessions != nil {
@@ -1600,7 +1634,7 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 	}
 	messages := ab.buildMessages(history, summary, "", sessionKey)
 
-	_, err := ab.runIterationWithProfile(ctx, sessionKey, messages, cb, onDone, "proactive")
+	_, err := ab.runIterationWithProfile(ctx, sessionKey, messages, cb, onDone, "greeting")
 	return err
 }
 

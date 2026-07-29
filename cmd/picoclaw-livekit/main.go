@@ -606,6 +606,7 @@ func main() {
 		// each session. If the pull fails, keep the last-rendered files as a degraded fallback.
 		personaSystemPrompt := ""
 		personaSoul := ""
+		personaGreeting := ""
 		personaResolved := false
 		characterName := strings.TrimSpace(bootstrap.Metadata.CharacterName)
 		characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID)
@@ -641,15 +642,17 @@ func main() {
 			} else {
 				personaSystemPrompt = strings.TrimSpace(session.SystemPrompt)
 				personaSoul = strings.TrimSpace(session.Soul)
+				personaGreeting = strings.TrimSpace(session.GreetingPrompt)
 				personaResolved = true
 				logger.InfoCF("livekit", "Persona pulled from manager DB", map[string]any{
-					"character":      session.CharacterName,
-					"runtime_agent":  session.RuntimeAgentName,
-					"language":       session.Language,
-					"agent_md_bytes": len(personaSystemPrompt),
-					"soul_md_bytes":  len(personaSoul),
-					"agent_md_ok":    personaSystemPrompt != "",
-					"soul_md_ok":     personaSoul != "",
+					"character":             session.CharacterName,
+					"runtime_agent":         session.RuntimeAgentName,
+					"language":              session.Language,
+					"agent_md_bytes":        len(personaSystemPrompt),
+					"soul_md_bytes":         len(personaSoul),
+					"greeting_prompt_bytes": len(personaGreeting),
+					"agent_md_ok":           personaSystemPrompt != "",
+					"soul_md_ok":            personaSoul != "",
 				})
 				workspaceBootstrapSource = bootstrapSourceManagerDBPrompt
 				if lang := strings.TrimSpace(session.Language); lang != "" {
@@ -854,6 +857,7 @@ func main() {
 			Provider:          sessionProvider,
 			ModelID:           sessionModelID,
 			CharacterName:     characterName,
+			GreetingPrompt:    personaGreeting,
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
 			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
