@@ -26,6 +26,16 @@ import (
 var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
 var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
 
+// Third reasoning shape, alongside the XML blocks above and the "Thinking:" lines
+// below: a leading JSON object. Gemma emits `{"thought": "..."} [excited] Ooh!` —
+// tool-schema bleed, since tool definitions sit in context every turn. It matched
+// neither of the other two filters, so the whole blob was spoken to the child.
+// ponytail: non-greedy to the first "}", so a thought body containing a literal
+// brace leaves a tail. Anchored at start-of-text, which for a streamed chunk means
+// the chunk start. Upgrade path is the same one the MEMO strip names: handle it in
+// sentenceSplitter.Feed before sentence splitting, which fixes all three at once.
+var voiceReasoningJSONRE = regexp.MustCompile(`(?is)^\s*\{\s*"(?:thought|thinking|reasoning|analysis)"\s*:.*?\}\s*`)
+
 // Cheeko Face expression tag: "[" + 2-12 lowercase letters + "]". Only a LEADING
 // tag drives the face (mirrors the firmware parser), but tags are stripped
 // ANYWHERE before TTS: the model re-tags mid-utterance ("...hello [sleepy] the
@@ -110,6 +120,9 @@ func sanitizeVoiceTextForTTS(text string) string {
 	text = voiceExpressionTagRE.ReplaceAllString(text, " ")
 	// After the tag strip so "[neutral] MEMO: ..." still anchors at line start.
 	text = voiceMemoLineRE.ReplaceAllString(text, "")
+	// Also after the tag strip: the model sometimes emits a tag ahead of the JSON,
+	// and the pattern anchors at start-of-text.
+	text = voiceReasoningJSONRE.ReplaceAllString(text, "")
 	text = voiceReasoningBlockRE.ReplaceAllString(text, "")
 	text = voiceReasoningLineRE.ReplaceAllString(text, "")
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")

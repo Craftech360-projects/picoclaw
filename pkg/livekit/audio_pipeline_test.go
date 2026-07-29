@@ -1057,6 +1057,24 @@ func TestSanitizeVoiceTextStripsMemoLine(t *testing.T) {
 	}
 }
 
+func TestSanitizeVoiceTextStripsReasoningJSON(t *testing.T) {
+	cases := map[string]string{
+		// Verbatim from a live session: gemma prefixed the reply with its thought.
+		`{"thought": "The child said \"Tomorrow is my friend Ravi\". This is a fragmented sentence."} [excited] Ooh! [curious] Is it his birthday?`: "Ooh! Is it his birthday?",
+		`{"reasoning":"picking a story"} Once upon a time.`:                                                                                       "Once upon a time.",
+		`  {"analysis": "x"}   Hello there.`:                                                                                                      "Hello there.",
+		`[neutral] {"thinking": "y"} Hello there.`:                                                                                                "Hello there.",
+		// Not a leading reasoning object: must survive untouched.
+		`I had a thought: dinosaurs are big.`: "I had a thought: dinosaurs are big.",
+		`We can play a game.`:                 "We can play a game.",
+	}
+	for in, want := range cases {
+		if got := sanitizeVoiceTextForTTS(in); got != want {
+			t.Errorf("sanitizeVoiceTextForTTS(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSanitizeVoiceTextLowercasesShoutyCaps(t *testing.T) {
 	cases := map[string]string{
 		"BLAST OFF!":                   "blast off!", // Sarvam spells all-caps as letters

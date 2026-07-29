@@ -21,11 +21,12 @@ const defaultBaseURL = "https://api.elevenlabs.io"
 
 // Voice settings tuned for expressive kids' character speech. Lower stability
 // widens emotional range; below ~0.25 delivery starts to wobble and hallucinate.
+// Base sits high enough that even the lively shift below stays clear of that floor.
 // ponytail: env-tunable so voice can be calibrated without a redeploy.
 const (
-	defaultStability       = 0.35
+	defaultStability       = 0.55
 	defaultSimilarityBoost = 0.75
-	defaultStyle           = 0.45
+	defaultStyle           = 0.25
 )
 
 // envFloat reads a [0,1] float from env, falling back to def when unset or invalid.
@@ -41,13 +42,17 @@ func envFloat(key string, def float64) float64 {
 // on top of the configured base, plus an absolute speed. Stability and style
 // alone barely separate lively from soft; speed is what makes the two buckets
 // audibly distinct, same as pace does in sarvam_tts emotionProsody.
+//
+// The stability/style deltas are deliberately small: those two knobs are what
+// destabilise delivery, so the buckets lean on speed (which does not) to stay
+// distinct. Stability spans 0.45-0.70 and style 0.10-0.40 across all buckets.
 // ponytail: coarse buckets; per-emotion tuning if kids notice.
 func emotionShift(emotion string) (dStability, dStyle, speed float64) {
 	switch emotion {
 	case "happy", "excited", "laughing", "surprised", "silly":
-		return -0.20, +0.30, 1.12
+		return -0.10, +0.15, 1.12
 	case "sad", "sleepy", "crying", "scared", "shy":
-		return +0.35, -0.30, 0.85
+		return +0.15, -0.15, 0.85
 	}
 	return 0, 0, 1.0
 }

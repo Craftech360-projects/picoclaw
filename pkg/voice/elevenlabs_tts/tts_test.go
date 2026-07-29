@@ -195,8 +195,17 @@ func TestVoiceSettingsEmotion(t *testing.T) {
 	}
 
 	neutralStab, neutralStyle := get("")
-	if neutralStab != 0.35 || neutralStyle != 0.45 {
-		t.Fatalf("neutral = (%v, %v), want (0.35, 0.45)", neutralStab, neutralStyle)
+	if neutralStab != 0.55 || neutralStyle != 0.25 {
+		t.Fatalf("neutral = (%v, %v), want (0.55, 0.25)", neutralStab, neutralStyle)
+	}
+
+	// No bucket may fall under the ~0.25 stability floor documented above the
+	// defaults: below it ElevenLabs delivery wobbles. The lively bucket used to
+	// land at 0.15 and breach this.
+	for _, emotion := range []string{"", "excited", "happy", "laughing", "surprised", "silly", "sad", "sleepy", "crying", "scared", "shy"} {
+		if stab, _ := get(emotion); stab < 0.25 {
+			t.Fatalf("emotion %q stability = %v, want >= 0.25", emotion, stab)
+		}
 	}
 
 	excitedStab, excitedStyle := get("excited")
