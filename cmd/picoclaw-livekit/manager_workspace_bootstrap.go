@@ -233,6 +233,10 @@ type managerCharacterSession struct {
 	SystemPrompt     string `json:"systemPrompt"`
 	GreetingPrompt   string `json:"greetingPrompt"`
 	Soul             string `json:"soul"`
+	// ElevenLabsVoiceID is ai_agent_template.elevenlabs_voice_id. The resolver has
+	// always returned it (character-resolver.js); without this field encoding/json
+	// silently dropped it and every character spoke in the global voice.
+	ElevenLabsVoiceID string `json:"elevenlabsVoiceId"`
 }
 
 // fetchManagerCharacterSession PULLs a character's persona by id (ADR-0003).

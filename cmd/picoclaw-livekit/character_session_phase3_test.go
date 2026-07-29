@@ -35,7 +35,7 @@ func TestFetchManagerCharacterSessionDecodesContract(t *testing.T) {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"data":{"characterId":"char-uuid","characterName":"Cheeko","runtimeAgentName":"cheeko-agent1","language":"English","systemPrompt":"You are Cheeko.","greetingPrompt":"Greet with a silly animal sound.","soul":"I am warm."}}`))
+		_, _ = w.Write([]byte(`{"code":0,"data":{"characterId":"char-uuid","characterName":"Cheeko","runtimeAgentName":"cheeko-agent1","language":"English","systemPrompt":"You are Cheeko.","greetingPrompt":"Greet with a silly animal sound.","soul":"I am warm.","elevenlabsVoiceId":"ZthnDvLLxYzM9qeFVSJe"}}`))
 	}))
 	defer server.Close()
 
@@ -56,6 +56,11 @@ func TestFetchManagerCharacterSessionDecodesContract(t *testing.T) {
 	}
 	if out.GreetingPrompt != "Greet with a silly animal sound." {
 		t.Fatalf("GreetingPrompt = %q, want the template greeting", out.GreetingPrompt)
+	}
+	// Regression: the field was missing from the struct, so encoding/json dropped
+	// the resolver's value and every character spoke in the global voice.
+	if out.ElevenLabsVoiceID != "ZthnDvLLxYzM9qeFVSJe" {
+		t.Fatalf("ElevenLabsVoiceID = %q, want the per-character voice", out.ElevenLabsVoiceID)
 	}
 }
 

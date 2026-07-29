@@ -607,6 +607,7 @@ func main() {
 		personaSystemPrompt := ""
 		personaSoul := ""
 		personaGreeting := ""
+		personaElevenLabsVoice := ""
 		personaResolved := false
 		characterName := strings.TrimSpace(bootstrap.Metadata.CharacterName)
 		characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID)
@@ -643,6 +644,7 @@ func main() {
 				personaSystemPrompt = strings.TrimSpace(session.SystemPrompt)
 				personaSoul = strings.TrimSpace(session.Soul)
 				personaGreeting = strings.TrimSpace(session.GreetingPrompt)
+				personaElevenLabsVoice = strings.TrimSpace(session.ElevenLabsVoiceID)
 				personaResolved = true
 				logger.InfoCF("livekit", "Persona pulled from manager DB", map[string]any{
 					"character":             session.CharacterName,
@@ -651,6 +653,7 @@ func main() {
 					"agent_md_bytes":        len(personaSystemPrompt),
 					"soul_md_bytes":         len(personaSoul),
 					"greeting_prompt_bytes": len(personaGreeting),
+					"elevenlabs_voice_id":   personaElevenLabsVoice,
 					"agent_md_ok":           personaSystemPrompt != "",
 					"soul_md_ok":            personaSoul != "",
 				})
@@ -658,6 +661,47 @@ func main() {
 				if lang := strings.TrimSpace(session.Language); lang != "" {
 					bootstrap.Metadata.Language = lang
 				}
+			}
+		}
+
+		// Per-character ElevenLabs voice (ai_agent_template.elevenlabs_voice_id).
+		// Sarvam gets its per-character speaker from room metadata before the TTS
+		// client is built, but the ElevenLabs id only arrives with the persona pull
+		// above — which runs after. The voice is baked into the client at
+		// construction (it is part of the websocket URL), so the client has to be
+		// rebuilt rather than mutated. Still inside bridgeFactory, so the stored
+		// runtime is replaced before the room session reads it.
+		if voice := personaElevenLabsVoice; voice != "" &&
+			strings.EqualFold(strings.TrimSpace(sessionCfg.LiveKitService.TTS.Provider), "elevenlabs") &&
+			voice != strings.TrimSpace(sessionCfg.LiveKitService.TTS.VoiceID) {
+
+			globalVoice := strings.TrimSpace(sessionCfg.LiveKitService.TTS.VoiceID)
+			sessionCfg.LiveKitService.TTS.VoiceID = voice
+			rebuiltTTS, rebuiltRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)
+			if rebuiltTTS == nil {
+				// Keep the already-built client on the global voice: a wrong-voice
+				// greeting beats a silent one.
+				sessionCfg.LiveKitService.TTS.VoiceID = globalVoice
+				logger.WarnCF("livekit", "Per-character ElevenLabs voice build failed; keeping global voice", map[string]any{
+					"character":           characterName,
+					"character_voice_id":  voice,
+					"global_tts_voice_id": globalVoice,
+				})
+			} else {
+				sessionTTSProvider = rebuiltTTS
+				sessionTTSSampleRate = rebuiltRate
+				if job != nil && strings.TrimSpace(job.Id) != "" {
+					roomRuntimeByJobID.Store(job.Id, roomRuntimeSelection{
+						ttsProvider:   sessionTTSProvider,
+						ttsSampleRate: sessionTTSSampleRate,
+					})
+				}
+				logger.InfoCF("livekit", "Applied per-character ElevenLabs voice", map[string]any{
+					"character":           characterName,
+					"tts_voice_id":        voice,
+					"global_tts_voice_id": globalVoice,
+					"tts_sample_rate_hz":  sessionTTSSampleRate,
+				})
 			}
 		}
 
