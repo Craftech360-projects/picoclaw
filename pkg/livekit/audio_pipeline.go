@@ -26,11 +26,12 @@ import (
 var voiceProviderChannelMarkerRE = regexp.MustCompile(`<\|channel\>[^<]*<channel\|>`)
 var voiceReasoningBlockRE = regexp.MustCompile(`(?is)<think>.*?</think>|<thought>.*?</thought>|<reasoning>.*?</reasoning>|<analysis>.*?</analysis>`)
 
-// Cheeko Face expression tag: "[" + 2-12 lowercase letters + "]" at the start of a
-// speech chunk (mirrors the firmware parser). Stripped before TTS so it is never
-// spoken; the tagged text still reaches the device via speech_created so the
-// firmware can drive the face.
-var voiceExpressionTagRE = regexp.MustCompile(`^\s*(?:\[[a-z]{2,12}\]\s*)+`)
+// Cheeko Face expression tag: "[" + 2-12 lowercase letters + "]". Only a LEADING
+// tag drives the face (mirrors the firmware parser), but tags are stripped
+// ANYWHERE before TTS: the model re-tags mid-utterance ("...hello [sleepy] the
+// moon...") and an unanchored tag used to be read aloud as the word "sleepy".
+// The tagged text still reaches the device via speech_created for the face.
+var voiceExpressionTagRE = regexp.MustCompile(`\s*(?:\[[a-z]{2,12}\]\s*)+`)
 var voiceLeadingTagCaptureRE = regexp.MustCompile(`^\s*\[([a-z]{2,12})\]`)
 
 // leadingExpressionTag returns the first leading [tag] name, or "".
@@ -92,7 +93,10 @@ func isRateLimitError(err error) bool {
 }
 
 func sanitizeVoiceTextForTTS(text string) string {
-	text = voiceExpressionTagRE.ReplaceAllString(text, "")
+	// Replaced with a space, not "": the pattern eats the whitespace on both sides,
+	// so dropping a mid-sentence tag would otherwise glue words ("hello...the moon").
+	// The Fields/Join at the end collapses the extra space and trims the edges.
+	text = voiceExpressionTagRE.ReplaceAllString(text, " ")
 	text = voiceReasoningBlockRE.ReplaceAllString(text, "")
 	text = voiceReasoningLineRE.ReplaceAllString(text, "")
 	text = voiceProviderChannelMarkerRE.ReplaceAllString(text, "")

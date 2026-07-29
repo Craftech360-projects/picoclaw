@@ -1014,6 +1014,31 @@ func TestSanitizeVoiceTextStripsExpressionTags(t *testing.T) {
 	}
 }
 
+// Regression: the model re-tags mid-utterance, and an anchored strip left those
+// tags in the TTS text, so the voice read "sleepy" aloud to the child.
+func TestSanitizeVoiceTextStripsMidSentenceExpressionTags(t *testing.T) {
+	cases := map[string]string{
+		"[sleepy] aaah-hmmm... hello Rahul... [sleepy] the moon was asking about you... [sleepy] how was your day...": "aaah-hmmm... hello Rahul... the moon was asking about you... how was your day...",
+		// Words either side of a dropped tag must not get glued together.
+		"hello [silly] world":  "hello world",
+		"one [happy][sad] two": "one two",
+		// A tag at the very end leaves no trailing space.
+		"goodnight [sleepy]": "goodnight",
+		// Non-tags stay put wherever they appear.
+		"pick [3] or [OK!] now": "pick [3] or [OK!] now",
+	}
+	for in, want := range cases {
+		if got := sanitizeVoiceTextForTTS(in); got != want {
+			t.Errorf("sanitizeVoiceTextForTTS(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// The face still keys off the leading tag only.
+	if got := leadingExpressionTag("[sleepy] hi [happy] there"); got != "sleepy" {
+		t.Errorf("leadingExpressionTag = %q, want sleepy", got)
+	}
+}
+
 func TestSanitizeVoiceTextLowercasesShoutyCaps(t *testing.T) {
 	cases := map[string]string{
 		"BLAST OFF!":                   "blast off!", // Sarvam spells all-caps as letters
