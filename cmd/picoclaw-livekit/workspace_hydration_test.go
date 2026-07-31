@@ -650,34 +650,236 @@ func TestShouldRefreshUserFromMetadata(t *testing.T) {
 	}
 }
 
-func TestUpsertUserTimezoneInUserMarkdown(t *testing.T) {
+func TestUpsertUserMarkdownField(t *testing.T) {
 	content := "# User\n\n- Name: Rahul\n- Primary language: en\n\n## Additional Notes\n\nhello\n"
-	updated, changed, reason := upsertUserTimezoneInUserMarkdown(content, "Asia/Kolkata")
-	if !changed || reason != "timezone_missing" {
-		t.Fatalf("missing timezone => changed=%v reason=%q", changed, reason)
+	updated, changed := upsertUserMarkdownField(content, "Timezone", "Asia/Kolkata")
+	if !changed {
+		t.Fatalf("missing field => changed=false")
 	}
-	if !strings.Contains(updated, "- Timezone: Asia/Kolkata") {
-		t.Fatalf("expected timezone line, got %q", updated)
-	}
-	if !strings.Contains(updated, "## Additional Notes") {
-		t.Fatalf("expected additional notes retained, got %q", updated)
+	if !strings.Contains(updated, "- Primary language: en\n- Timezone: Asia/Kolkata\n\n## Additional Notes") {
+		t.Fatalf("expected field appended to the list above the notes, got %q", updated)
 	}
 
-	changedInput := "# User\n\n- Name: Rahul\n- Timezone: America/New_York\n"
-	updated, changed, reason = upsertUserTimezoneInUserMarkdown(changedInput, "Asia/Kolkata")
-	if !changed || reason != "timezone_changed" {
-		t.Fatalf("changed timezone => changed=%v reason=%q", changed, reason)
+	updated, changed = upsertUserMarkdownField("# User\n\n- Name: Rahul\n- Timezone: America/New_York\n", "Timezone", "Asia/Kolkata")
+	if !changed || !strings.Contains(updated, "- Timezone: Asia/Kolkata") {
+		t.Fatalf("changed field => changed=%v content=%q", changed, updated)
 	}
-	if !strings.Contains(updated, "- Timezone: Asia/Kolkata") {
-		t.Fatalf("expected timezone updated, got %q", updated)
+	if strings.Contains(updated, "America/New_York") {
+		t.Fatalf("expected old value replaced, got %q", updated)
 	}
 
-	unchangedInput := "# User\n\n- Name: Rahul\n- Timezone: Asia/Kolkata\n"
-	updated, changed, reason = upsertUserTimezoneInUserMarkdown(unchangedInput, "Asia/Kolkata")
-	if changed || reason != "timezone_unchanged" {
-		t.Fatalf("unchanged timezone => changed=%v reason=%q", changed, reason)
+	unchanged := "# User\n\n- Name: Rahul\n- Timezone: Asia/Kolkata\n"
+	if updated, changed = upsertUserMarkdownField(unchanged, "Timezone", "Asia/Kolkata"); changed || updated != unchanged {
+		t.Fatalf("unchanged field => changed=%v content=%q", changed, updated)
 	}
-	if updated != unchangedInput {
-		t.Fatalf("expected unchanged content, got %q", updated)
+	if updated, changed = upsertUserMarkdownField(unchanged, "Gender", "   "); changed || updated != unchanged {
+		t.Fatalf("empty value must not touch the file => changed=%v content=%q", changed, updated)
+	}
+}
+
+func TestSyncUserProfileFromMetadata(t *testing.T) {
+	userPath := filepath.Join(t.TempDir(), "USER.md")
+	// USER.md as restored from the Manager DB: stale age, plus a fact the agent wrote itself.
+	existing := "# User\n\n## User Information\n\n- Name: Rahul\n- Age: 6 years old\n- Timezone: Asia/Kolkata\n\n## Additional Notes\n\nAfraid of the dark.\n"
+	if err := os.WriteFile(userPath, []byte(existing), 0o644); err != nil {
+		t.Fatalf("WriteFile USER.md error = %v", err)
+	}
+
+	md := roomMetadata{}
+	md.ChildProfile.Name = "Rahul"
+	md.ChildProfile.Age = 7
+	md.ChildProfile.Interests = "dinosaurs, space"
+	md.ChildProfile.Timezone = "Asia/Kolkata"
+
+	changed, err := syncUserProfileFromMetadata(userPath, md)
+	if err != nil {
+		t.Fatalf("syncUserProfileFromMetadata error = %v", err)
+	}
+	if len(changed) != 2 {
+		t.Fatalf("changed = %v, want Interests and Age only", changed)
+	}
+
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		t.Fatalf("ReadFile USER.md error = %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"- Age: 7 years old",
+		"- Interests: dinosaurs, space",
+		"Afraid of the dark.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("USER.md missing %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "6 years old") {
+		t.Fatalf("stale age survived, got %q", got)
+	}
+
+	// Second run is a no-op once the file already matches the metadata.
+	changed, err = syncUserProfileFromMetadata(userPath, md)
+	if err != nil {
+		t.Fatalf("second syncUserProfileFromMetadata error = %v", err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("second run changed = %v, want none", changed)
+	}
+}
+
+func TestSyncUserProfileFromMetadataCases(t *testing.T) {
+	profile := func(name string, age int, gender, interests, timezone string) roomMetadata {
+		md := roomMetadata{}
+		md.ChildProfile.Name = name
+		md.ChildProfile.Age = age
+		md.ChildProfile.Gender = gender
+		md.ChildProfile.Interests = interests
+		md.ChildProfile.Timezone = timezone
+		return md
+	}
+
+	cases := []struct {
+		name        string
+		existing    string
+		metadata    roomMetadata
+		wantChanged []string
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			name:        "rename and dob change rewrite name and age",
+			existing:    "# User\n\n- Name: Rahul\n- Age: 6 years old\n- Timezone: Asia/Kolkata\n",
+			metadata:    profile("Rahul Krishna", 7, "", "", "Asia/Kolkata"),
+			wantChanged: []string{"Name", "Age"},
+			wantContain: []string{"- Name: Rahul Krishna", "- Age: 7 years old"},
+			wantAbsent:  []string{"- Name: Rahul\n", "6 years old"},
+		},
+		{
+			name:        "field absent on disk is inserted once",
+			existing:    "# User\n\n- Name: Rahul\n- Timezone: Asia/Kolkata\n",
+			metadata:    profile("Rahul", 0, "", "dinosaurs", "Asia/Kolkata"),
+			wantChanged: []string{"Interests"},
+			wantContain: []string{"- Interests: dinosaurs"},
+		},
+		{
+			name:        "cleared portal field does not erase the disk line",
+			existing:    "# User\n\n- Name: Rahul\n- Gender: male\n- Timezone: Asia/Kolkata\n",
+			metadata:    profile("Rahul", 0, "", "", "Asia/Kolkata"),
+			wantChanged: nil,
+			wantContain: []string{"- Gender: male"},
+		},
+		{
+			name:        "blank metadata timezone falls back to the default",
+			existing:    "# User\n\n- Name: Rahul\n",
+			metadata:    profile("Rahul", 0, "", "", ""),
+			wantChanged: []string{"Timezone"},
+			wantContain: []string{"- Name: Rahul\n- Timezone: Asia/Kolkata"},
+		},
+		{
+			name:        "capitalization fix is a real edit",
+			existing:    "# User\n\n- Name: rahul\n- Timezone: Asia/Kolkata\n",
+			metadata:    profile("Rahul", 0, "", "", "Asia/Kolkata"),
+			wantChanged: []string{"Name"},
+			wantContain: []string{"- Name: Rahul"},
+			wantAbsent:  []string{"- Name: rahul"},
+		},
+		{
+			name:        "lowercase label on disk is updated in place not duplicated",
+			existing:    "# User\n\n- name: Rahul\n- Timezone: Asia/Kolkata\n",
+			metadata:    profile("Rahul Krishna", 0, "", "", "Asia/Kolkata"),
+			wantChanged: []string{"Name"},
+			wantContain: []string{"- Name: Rahul Krishna"},
+			wantAbsent:  []string{"- name: Rahul"},
+		},
+		{
+			name:        "agent written sections survive the merge",
+			existing:    "# User\n\n## User Information\n\n- Name: Rahul\n- Age: 6 years old\n- Timezone: Asia/Kolkata\n\n## Additional Notes\n\nAfraid of the dark.\nLoves the red truck.\n",
+			metadata:    profile("Rahul", 7, "", "space", "Asia/Kolkata"),
+			wantChanged: []string{"Interests", "Age"},
+			wantContain: []string{
+				"## Additional Notes",
+				"Afraid of the dark.",
+				"Loves the red truck.",
+				"- Age: 7 years old\n- Timezone: Asia/Kolkata\n- Interests: space\n\n## Additional Notes",
+			},
+		},
+		{
+			name:        "crlf file stays parseable",
+			existing:    "# User\r\n\r\n- Name: Rahul\r\n- Age: 6 years old\r\n- Timezone: Asia/Kolkata\r\n",
+			metadata:    profile("Rahul", 7, "", "", "Asia/Kolkata"),
+			wantChanged: []string{"Age"},
+			wantContain: []string{"- Age: 7 years old"},
+			wantAbsent:  []string{"6 years old"},
+		},
+		{
+			name:        "placeholder user md gets the profile appended",
+			existing:    "# User\n\nNo user profile override has been hydrated for this session.\n",
+			metadata:    profile("Rahul", 7, "male", "", "Asia/Kolkata"),
+			wantChanged: []string{"Name", "Gender", "Age", "Timezone"},
+			wantContain: []string{"- Name: Rahul", "- Gender: male", "- Age: 7 years old", "- Timezone: Asia/Kolkata"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userPath := filepath.Join(t.TempDir(), "USER.md")
+			if err := os.WriteFile(userPath, []byte(tc.existing), 0o644); err != nil {
+				t.Fatalf("WriteFile USER.md error = %v", err)
+			}
+
+			changed, err := syncUserProfileFromMetadata(userPath, tc.metadata)
+			if err != nil {
+				t.Fatalf("syncUserProfileFromMetadata error = %v", err)
+			}
+			if strings.Join(changed, ",") != strings.Join(tc.wantChanged, ",") {
+				t.Fatalf("changed = %v, want %v", changed, tc.wantChanged)
+			}
+
+			data, err := os.ReadFile(userPath)
+			if err != nil {
+				t.Fatalf("ReadFile USER.md error = %v", err)
+			}
+			got := string(data)
+			for _, want := range tc.wantContain {
+				if !strings.Contains(got, want) {
+					t.Fatalf("USER.md missing %q, got:\n%s", want, got)
+				}
+			}
+			for _, unwanted := range tc.wantAbsent {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("USER.md still contains %q, got:\n%s", unwanted, got)
+				}
+			}
+			if n := strings.Count(got, "- Name:"); n > 1 {
+				t.Fatalf("duplicated Name line (%d), got:\n%s", n, got)
+			}
+
+			// Every case must converge: a second run with the same metadata changes nothing.
+			second, err := syncUserProfileFromMetadata(userPath, tc.metadata)
+			if err != nil {
+				t.Fatalf("second syncUserProfileFromMetadata error = %v", err)
+			}
+			if len(second) != 0 {
+				t.Fatalf("second run changed = %v, want none", second)
+			}
+		})
+	}
+}
+
+func TestSyncUserProfileFromMetadataMissingFileIsNoop(t *testing.T) {
+	userPath := filepath.Join(t.TempDir(), "USER.md")
+	md := roomMetadata{}
+	md.ChildProfile.Name = "Rahul"
+
+	changed, err := syncUserProfileFromMetadata(userPath, md)
+	if err != nil {
+		t.Fatalf("syncUserProfileFromMetadata error = %v", err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("changed = %v, want none", changed)
+	}
+	// Hydration owns first-time creation; the merge must not create the file itself.
+	if _, err := os.Stat(userPath); !os.IsNotExist(err) {
+		t.Fatalf("USER.md was created by the merge, stat err = %v", err)
 	}
 }

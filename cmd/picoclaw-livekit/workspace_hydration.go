@@ -881,75 +881,98 @@ func shouldRefreshUserFromMetadata(userPath string, firstTimeWorkspace bool) (bo
 	return false, "existing_user_profile"
 }
 
-func extractTimezoneFromUserMarkdown(content string) string {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "- timezone:") {
-			idx := strings.Index(trimmed, ":")
-			if idx == -1 {
-				return ""
-			}
-			return strings.TrimSpace(trimmed[idx+1:])
-		}
-	}
-	return ""
-}
-
-func upsertUserTimezoneInUserMarkdown(content, desiredTimezone string) (updated string, changed bool, reason string) {
-	desiredTimezone = strings.TrimSpace(desiredTimezone)
-	if desiredTimezone == "" {
-		return content, false, "timezone_empty"
+// upsertUserMarkdownField rewrites (or inserts) a single "- Label: value" line in
+// USER.md, leaving every other line alone. An empty value is a no-op: room
+// metadata that omits a field must never erase what is already on disk.
+func upsertUserMarkdownField(content, label, value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return content, false
 	}
 
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	additionalNotesIdx := -1
-	for i, line := range lines {
-		if strings.EqualFold(strings.TrimSpace(line), "## Additional Notes") {
-			additionalNotesIdx = i
-			break
-		}
-	}
-
+	prefix := strings.ToLower("- " + label + ":")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "- timezone:") {
-			current := extractTimezoneFromUserMarkdown(trimmed)
-			if strings.EqualFold(current, desiredTimezone) {
-				return content, false, "timezone_unchanged"
-			}
-			lines[i] = "- Timezone: " + desiredTimezone
-			return strings.Join(lines, "\n"), true, "timezone_changed"
+		if !strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+			continue
 		}
+		// Exact compare, not EqualFold: a parent fixing the capitalization of a
+		// name is a real edit. Canonicalizing writes once, then stays stable.
+		if strings.TrimSpace(trimmed[len(prefix):]) == value {
+			return content, false
+		}
+		lines[i] = "- " + label + ": " + value
+		return strings.Join(lines, "\n"), true
 	}
 
 	insertAt := len(lines)
-	if additionalNotesIdx >= 0 {
-		insertAt = additionalNotesIdx
+	for i, line := range lines {
+		if strings.EqualFold(strings.TrimSpace(line), "## Additional Notes") {
+			insertAt = i
+			break
+		}
 	}
-	newLine := "- Timezone: " + desiredTimezone
-	lines = append(lines[:insertAt], append([]string{newLine}, lines[insertAt:]...)...)
-	return strings.Join(lines, "\n"), true, "timezone_missing"
+	// Join the field list above instead of stranding the new line after a blank.
+	for insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) == "" {
+		insertAt--
+	}
+	lines = append(lines[:insertAt], append([]string{"- " + label + ": " + value}, lines[insertAt:]...)...)
+	return strings.Join(lines, "\n"), true
 }
 
-func syncUserTimezoneInFile(userPath, desiredTimezone string) (bool, string, error) {
+// userProfileFieldsFromMetadata is the set of USER.md lines owned by the child
+// profile. Labels must match formatRoomMetadataUserContent so the first-session
+// seed and later refreshes touch the same lines.
+func userProfileFieldsFromMetadata(md roomMetadata) [][2]string {
+	child := md.ChildProfile
+	fields := [][2]string{
+		{"Name", child.Name},
+		{"Gender", child.Gender},
+		{"Interests", child.Interests},
+		{"Primary language", md.PrimaryLanguage},
+	}
+	if child.Age > 0 {
+		fields = append(fields, [2]string{"Age", strconv.Itoa(child.Age) + " years old"})
+	}
+	timezone := strings.TrimSpace(child.Timezone)
+	if timezone == "" {
+		timezone = "Asia/Kolkata"
+	}
+	return append(fields, [2]string{"Timezone", timezone})
+}
+
+// syncUserProfileFromMetadata refreshes the child-profile lines of an existing
+// USER.md from the current room metadata. USER.md is one of the two files the
+// agent itself may write and is restored from the Manager DB every session, so
+// hydration deliberately never rewrites it wholesale; this per-line merge is how
+// a portal profile edit reaches a workspace that already has a USER.md.
+func syncUserProfileFromMetadata(userPath string, md roomMetadata) ([]string, error) {
 	data, err := os.ReadFile(userPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, "user_md_missing", nil
+			return nil, nil
 		}
-		return false, "read_error", err
+		return nil, err
 	}
-	updated, changed, reason := upsertUserTimezoneInUserMarkdown(string(data), desiredTimezone)
-	if !changed {
-		return false, reason, nil
+
+	content := string(data)
+	var changed []string
+	for _, field := range userProfileFieldsFromMetadata(md) {
+		updated, ok := upsertUserMarkdownField(content, field[0], field[1])
+		if !ok {
+			continue
+		}
+		content = updated
+		changed = append(changed, field[0])
 	}
-	if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(updated)), 0o644); err != nil {
-		return false, "write_error", err
+	if len(changed) == 0 {
+		return nil, nil
 	}
-	return true, reason, nil
+	if err := os.WriteFile(userPath, []byte(ensureTrailingNewline(content)), 0o644); err != nil {
+		return nil, err
+	}
+	return changed, nil
 }
 
 func formatRoomMetadataMemoryContent(md roomMetadata) string {

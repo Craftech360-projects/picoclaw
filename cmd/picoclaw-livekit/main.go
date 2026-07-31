@@ -773,6 +773,25 @@ func main() {
 				}
 			}
 		}
+		// The Manager's stored USER.md wins over the metadata seed on every session
+		// after the first, so a portal profile edit only lands if we merge it back
+		// in after each restore. Per-line merge: the agent's own USER.md edits stay.
+		syncUserProfile := func(room, dir string) {
+			changed, err := syncUserProfileFromMetadata(filepath.Join(dir, "USER.md"), bootstrap.Metadata)
+			if err != nil {
+				logger.WarnCF("livekit", "USER.md child profile refresh failed", map[string]any{
+					"room":  room,
+					"error": err.Error(),
+				})
+				return
+			}
+			if len(changed) > 0 {
+				logger.InfoCF("livekit", "USER.md child profile refreshed from room metadata", map[string]any{
+					"room":   room,
+					"fields": changed,
+				})
+			}
+		}
 		if strings.TrimSpace(deviceMAC) != "" && managerAPIBaseURL(lkCfg.ManagerAPI) != "" && workspace != "" {
 			fastPathTimeout := liveKitWorkspaceFastPathTimeout(lkCfg.ManagerAPI)
 			fastCtx, fastCancel := context.WithTimeout(context.Background(), fastPathTimeout)
@@ -785,6 +804,7 @@ func main() {
 					"error":      err.Error(),
 				})
 			}
+			syncUserProfile(roomName, workspace)
 			if liveKitWorkspaceBackgroundRestoreEnabled(lkCfg.ManagerAPI) {
 				go func(room string, mac string, dir string) {
 					startedAt := time.Now()
@@ -804,6 +824,8 @@ func main() {
 						"device_mac":                      mac,
 						"workspace_restore_background_ms": time.Since(startedAt).Milliseconds(),
 					})
+					// The background restore rewrites USER.md too; re-merge.
+					syncUserProfile(room, dir)
 				}(roomName, deviceMAC, workspace)
 			} else {
 				logger.InfoCF("livekit", "workspace background full restore disabled by config", map[string]any{
