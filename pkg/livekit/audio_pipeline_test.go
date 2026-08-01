@@ -1057,6 +1057,84 @@ func TestSanitizeVoiceTextStripsMemoLine(t *testing.T) {
 	}
 }
 
+// splitterSpeak feeds chunks rune-by-rune through a fresh sentenceSplitter the
+// same way the pipeline's onChunk does, and returns every emitted sentence
+// plus the flush remainder.
+func splitterSpeak(chunks []string) []string {
+	sp := newSentenceSplitter()
+	var out []string
+	for _, c := range chunks {
+		for _, r := range c {
+			if s := sp.Feed(r); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	if rem := sp.Flush(); rem != "" {
+		out = append(out, rem)
+	}
+	return out
+}
+
+// Regression: the per-chunk MEMO strip only drops fragments that still START
+// with "MEMO:" after sentence-splitting, so a multi-sentence memo body leaked
+// to TTS from its second sentence on. The splitter now latches at the memo
+// anchor and drops everything after it for the rest of the turn.
+func TestSentenceSplitterMemoLatch(t *testing.T) {
+	join := func(ss []string) string { return strings.Join(ss, " ") }
+
+	// memo body with sentence punctuation, streamed across chunk boundaries
+	spoken := join(splitterSpeak([]string{
+		"[happy] Ting! Correct! ",
+		"\nMEMO: type=daily_quiz | date=2026-08-01. ",
+		"answered=3 | strengths=animals. parent_summary=Great day.",
+	}))
+	low := strings.ToLower(spoken)
+	if strings.Contains(low, "memo") || strings.Contains(spoken, "answered=3") || strings.Contains(spoken, "parent_summary") {
+		t.Fatalf("memo body leaked to TTS: %q", spoken)
+	}
+	if !strings.Contains(spoken, "Correct!") {
+		t.Fatalf("legit speech before memo was lost: %q", spoken)
+	}
+
+	// memo on the same line as speech (model skipped the newline): sentence-
+	// initial MEMO after "Correct!" must still latch
+	spoken = join(splitterSpeak([]string{"Correct! MEMO: date=2026-08-01. answered=1."}))
+	if strings.Contains(spoken, "answered=1") {
+		t.Fatalf("same-line memo leaked: %q", spoken)
+	}
+	if !strings.Contains(spoken, "Correct!") {
+		t.Fatalf("speech before same-line memo lost: %q", spoken)
+	}
+
+	// expression tag ahead of the memo still latches
+	spoken = join(splitterSpeak([]string{"Bye for now!\n[neutral] MEMO: Aarav loves dinosaurs. He said so."}))
+	if strings.Contains(spoken, "dinosaurs") {
+		t.Fatalf("tagged memo leaked: %q", spoken)
+	}
+	if !strings.Contains(spoken, "Bye for now!") {
+		t.Fatalf("speech before tagged memo lost: %q", spoken)
+	}
+
+	// once latched, later chunks stay dropped for the rest of the turn
+	spoken = join(splitterSpeak([]string{"Done!\nMEMO: a=1. ", "still bookkeeping. ", "more bookkeeping."}))
+	if strings.Contains(spoken, "bookkeeping") {
+		t.Fatalf("post-latch chunk leaked: %q", spoken)
+	}
+
+	// mid-sentence "memo:" is normal speech and must survive in full
+	spoken = join(splitterSpeak([]string{"I wrote a memo: buy milk. Fun!"}))
+	if !strings.Contains(spoken, "buy milk") || !strings.Contains(spoken, "Fun!") {
+		t.Fatalf("mid-sentence memo wrongly latched: %q", spoken)
+	}
+
+	// a fresh splitter (new turn) is unaffected by a previous turn's latch
+	spoken = join(splitterSpeak([]string{"Hello again! How are you?"}))
+	if !strings.Contains(spoken, "Hello again!") {
+		t.Fatalf("fresh splitter broken: %q", spoken)
+	}
+}
+
 func TestSanitizeVoiceTextStripsReasoningJSON(t *testing.T) {
 	cases := map[string]string{
 		// Verbatim from a live session: gemma prefixed the reply with its thought.

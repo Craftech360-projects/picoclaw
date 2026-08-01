@@ -48,11 +48,10 @@ var voiceLeadingTagCaptureRE = regexp.MustCompile(`^\s*\[([a-z]{2,12})\]`)
 // claims the gateway strips it; there is no gateway on the LiveKit path, so the
 // line was read aloud to the child. The durable summary is unaffected: teardown
 // generates its own via FinalizeSessionSummary (post_session_persistence.go).
-// ponytail: matched per TTS chunk, and the sentence splitter has already turned
-// newlines into spaces and cut on sentence punctuation, so only the fragment that
-// still starts with "MEMO:" is dropped — a multi-sentence memo body can leak from
-// the second sentence on. Upgrade path if that shows up in practice: strip in the
-// streaming buffer (sentenceSplitter.Feed) before sentence splitting.
+// The primary defense is now the memoSeen latch inside sentenceSplitter.Feed,
+// which cuts the stream at the memo anchor so multi-sentence memo bodies never
+// reach the tokenizer. This per-chunk strip stays as defense-in-depth for text
+// that bypasses the splitter (fallback greetings, filler phrases).
 var voiceMemoLineRE = regexp.MustCompile(`(?im)^\s*memo\s*:.*$`)
 
 // leadingExpressionTag returns the first leading [tag] name, or "".
@@ -222,10 +221,26 @@ func (d *speechChunkDeduper) ShouldSpeak(text string) bool {
 	return true
 }
 
+// memoAnchorRE matches "MEMO:" (optionally preceded by expression tags) at the
+// start of the current line OR at a sentence start within it — gemma sometimes
+// appends the memo after the last spoken sentence without a newline. Checked
+// against the current line slice of the splitter buffer the moment a ':' is
+// fed, so the anchor still exists (Feed converts newlines to spaces before
+// buffering). Mid-sentence "memo:" ("I wrote a memo: ...") never matches.
+var memoAnchorRE = regexp.MustCompile(`(?i)(?:^|[.!?]\s+)((?:\[[a-z]{2,12}\]\s*)*memo\s*:)$`)
+
 // sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
 type sentenceSplitter struct {
 	buf       strings.Builder
 	tokenizer *sentences.DefaultSentenceTokenizer
+	// memoSeen latches once a line-anchored "MEMO:" is fed: everything at or
+	// after it is quiz bookkeeping (see quiz_state.go), never speech. A
+	// splitter lives for one turn, so the latch resets with the next turn.
+	memoSeen bool
+	// lineStart is the buf offset where the current line began (updated on
+	// newline runes and whenever buf is reset), preserving the line anchor
+	// that the newline-to-space conversion below would otherwise destroy.
+	lineStart int
 }
 
 func newSentenceSplitter() *sentenceSplitter {
@@ -240,6 +255,9 @@ func newSentenceSplitter() *sentenceSplitter {
 }
 
 func (s *sentenceSplitter) Feed(r rune) string {
+	if s.memoSeen {
+		return ""
+	}
 	// Skip newlines entirely — they don't represent sentence boundaries for TTS
 	// and would cause tiny fragments like "(Verse 1)" to be sent as separate TTS calls.
 	if r == '\n' || r == '\r' {
@@ -247,11 +265,25 @@ func (s *sentenceSplitter) Feed(r rune) string {
 		if s.buf.Len() > 0 {
 			s.buf.WriteRune(' ')
 		}
+		s.lineStart = s.buf.Len()
 		return ""
 	}
 
 	s.buf.WriteRune(r)
 	text := s.buf.String()
+
+	// The ':' just fed may complete an anchored "MEMO:". Latch and drop the
+	// memo before the sentence tokenizer can emit any of its body; speech
+	// buffered ahead of the anchor stays and reaches TTS via Flush.
+	if r == ':' && s.lineStart <= len(text) {
+		if idx := memoAnchorRE.FindStringSubmatchIndex(text[s.lineStart:]); idx != nil {
+			kept := text[:s.lineStart+idx[2]]
+			s.buf.Reset()
+			s.buf.WriteString(kept)
+			s.memoSeen = true
+			return ""
+		}
+	}
 
 	// Only attempt to split if we have a potential sentence or clause boundary
 	if r == '.' || r == '!' || r == '?' || r == ',' || r == ';' || r == ':' {
@@ -263,6 +295,7 @@ func (s *sentenceSplitter) Feed(r rune) string {
 
 				// Keep the rest in the buffer
 				s.buf.Reset()
+				s.lineStart = 0
 				for i := 1; i < len(sentences); i++ {
 					s.buf.WriteString(sentences[i].Text)
 					if i < len(sentences)-1 {
@@ -275,6 +308,7 @@ func (s *sentenceSplitter) Feed(r rune) string {
 				// Use a higher threshold (40 chars) to avoid tiny TTS fragments
 				if len(text) > 40 {
 					s.buf.Reset()
+					s.lineStart = 0
 					return text
 				}
 			}
@@ -293,6 +327,7 @@ func (s *sentenceSplitter) simpleSplit(r rune) string {
 			return ""
 		}
 		s.buf.Reset()
+		s.lineStart = 0
 		return sentence
 	}
 	return ""
@@ -301,6 +336,7 @@ func (s *sentenceSplitter) simpleSplit(r rune) string {
 func (s *sentenceSplitter) Flush() string {
 	remaining := s.buf.String()
 	s.buf.Reset()
+	s.lineStart = 0
 	return remaining
 }
 
