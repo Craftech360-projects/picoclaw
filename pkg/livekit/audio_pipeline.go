@@ -229,6 +229,10 @@ func (d *speechChunkDeduper) ShouldSpeak(text string) bool {
 // buffering). Mid-sentence "memo:" ("I wrote a memo: ...") never matches.
 var memoAnchorRE = regexp.MustCompile(`(?i)(?:^|[.!?]\s+)((?:\[[a-z]{2,12}\]\s*)*memo\s*:)$`)
 
+// partialTagRE matches a still-incomplete expression tag ("[", "[ha") so the
+// turn classifier in Feed waits instead of misreading it as speech.
+var partialTagRE = regexp.MustCompile(`^\[[a-z]{0,12}$`)
+
 // sentenceSplitter accumulates text and emits complete sentences using a tokenizer.
 type sentenceSplitter struct {
 	buf       strings.Builder
@@ -237,6 +241,13 @@ type sentenceSplitter struct {
 	// after it is quiz bookkeeping (see quiz_state.go), never speech. A
 	// splitter lives for one turn, so the latch resets with the next turn.
 	memoSeen bool
+	// jsonLatch drops the whole turn when its first meaningful content is a
+	// '{': gemma sometimes emits a pseudo-tool-call ({"action":"write_file",...})
+	// as its entire reply, which used to be read aloud to the child. No
+	// legitimate spoken turn starts with a brace. jsonChecked marks that the
+	// first non-tag, non-space content has been classified.
+	jsonLatch   bool
+	jsonChecked bool
 	// lineStart is the buf offset where the current line began (updated on
 	// newline runes and whenever buf is reset), preserving the line anchor
 	// that the newline-to-space conversion below would otherwise destroy.
@@ -255,7 +266,7 @@ func newSentenceSplitter() *sentenceSplitter {
 }
 
 func (s *sentenceSplitter) Feed(r rune) string {
-	if s.memoSeen {
+	if s.memoSeen || s.jsonLatch {
 		return ""
 	}
 	// Skip newlines entirely — they don't represent sentence boundaries for TTS
@@ -271,6 +282,24 @@ func (s *sentenceSplitter) Feed(r rune) string {
 
 	s.buf.WriteRune(r)
 	text := s.buf.String()
+
+	// Classify the turn once its first meaningful rune arrives: a leading '{'
+	// (expression tags allowed ahead of it) means the model is emitting a
+	// pseudo-tool-call or reasoning JSON, never speech. Drop the entire turn.
+	if !s.jsonChecked {
+		lead := strings.TrimSpace(voiceExpressionTagRE.ReplaceAllString(text, " "))
+		// A lone '[' + letters may still become an expression tag; wait for
+		// more runes before classifying.
+		if lead != "" && !partialTagRE.MatchString(lead) {
+			s.jsonChecked = true
+			if lead[0] == '{' {
+				s.jsonLatch = true
+				s.buf.Reset()
+				s.lineStart = 0
+				return ""
+			}
+		}
+	}
 
 	// The ':' just fed may complete an anchored "MEMO:". Latch and drop the
 	// memo before the sentence tokenizer can emit any of its body; speech

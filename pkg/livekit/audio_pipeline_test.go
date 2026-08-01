@@ -1135,6 +1135,41 @@ func TestSentenceSplitterMemoLatch(t *testing.T) {
 	}
 }
 
+// Regression (live session 3955eccc, 2026-08-01): gemma emitted a pseudo-tool
+// call {"action":"write_file",...} as its entire reply and the JSON was read
+// aloud to the child. A turn whose first meaningful content is '{' is never
+// speech and must be dropped whole.
+func TestSentenceSplitterJSONLatch(t *testing.T) {
+	join := func(ss []string) string { return strings.Join(ss, " ") }
+
+	// verbatim shape from the live session, streamed across chunks
+	spoken := join(splitterSpeak([]string{
+		`{ "action": "write_file", "action_input": { "content": "# Long-term`,
+		` Memory. Stable facts. More sections here." } }`,
+	}))
+	if spoken != "" {
+		t.Fatalf("pseudo-tool JSON leaked to TTS: %q", spoken)
+	}
+
+	// expression tag ahead of the JSON still latches
+	spoken = join(splitterSpeak([]string{`[happy] {"action": "read_file", "path": "USER.md"}. Done.`}))
+	if strings.Contains(spoken, "action") || strings.Contains(spoken, "Done.") {
+		t.Fatalf("tagged JSON turn leaked: %q", spoken)
+	}
+
+	// braces mid-sentence after real speech began are normal and survive
+	spoken = join(splitterSpeak([]string{"Math is fun {really}. Ask me more!"}))
+	if !strings.Contains(spoken, "Math is fun") || !strings.Contains(spoken, "Ask me more!") {
+		t.Fatalf("mid-turn braces wrongly latched: %q", spoken)
+	}
+
+	// normal speech is untouched
+	spoken = join(splitterSpeak([]string{"[excited] Question seven! Which bird cannot fly?"}))
+	if !strings.Contains(spoken, "Question seven!") {
+		t.Fatalf("normal turn broken: %q", spoken)
+	}
+}
+
 func TestSanitizeVoiceTextStripsReasoningJSON(t *testing.T) {
 	cases := map[string]string{
 		// Verbatim from a live session: gemma prefixed the reply with its thought.
