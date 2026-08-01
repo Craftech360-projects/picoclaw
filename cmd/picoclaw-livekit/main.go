@@ -772,6 +772,21 @@ func main() {
 					})
 				}
 			}
+			// Drop quiz state whose date= is >48h old so a returning child starts
+			// a fresh Daily Ten instead of resuming last week's.
+			quizMemoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
+			if removed, err := livekit.PruneStaleQuizState(quizMemoryPath, time.Now()); err != nil {
+				logger.WarnCF("livekit", "Quiz state prune failed", map[string]any{
+					"room":  roomName,
+					"path":  quizMemoryPath,
+					"error": err.Error(),
+				})
+			} else if removed {
+				logger.InfoCF("livekit", "Pruned stale quiz state from MEMORY.md", map[string]any{
+					"room": roomName,
+					"path": quizMemoryPath,
+				})
+			}
 		}
 		// The Manager's stored USER.md wins over the metadata seed on every session
 		// after the first, so a portal profile edit only lands if we merge it back
