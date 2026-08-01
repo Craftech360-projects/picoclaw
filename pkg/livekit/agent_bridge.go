@@ -757,6 +757,12 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 			_ = ab.sessions.Save(sessionKey)
 			go ab.maybeSummarize(sessionKey)
 		}
+		// Final spoken reply only: tool-call iterations above must not persist
+		// MEMO lines, and canceled turns never reach this block — an unjudged
+		// answer must not advance the quiz state.
+		if ab.agentInstance != nil {
+			maybePersistQuizState(ab.agentInstance.Workspace, assistantMsg.Content)
+		}
 		if onDone != nil {
 			onDone()
 		}
