@@ -772,19 +772,20 @@ func main() {
 					})
 				}
 			}
-			// Drop quiz state whose date= is >48h old so a returning child starts
-			// a fresh Daily Ten instead of resuming last week's.
-			quizMemoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
-			if removed, err := livekit.PruneStaleQuizState(quizMemoryPath, time.Now()); err != nil {
-				logger.WarnCF("livekit", "Quiz state prune failed", map[string]any{
+			// Move any pre-file-era quiz-state section into memory/state/, then
+			// drop state files whose date= is >48h old so a returning child
+			// starts a fresh Daily Ten or story instead of resuming last
+			// week's. Ledger files are age-pruned in the same pass.
+			livekit.MigrateLegacyQuizStateSection(workspace)
+			if removed, err := livekit.PruneStaleStateFiles(workspace, time.Now()); err != nil {
+				logger.WarnCF("livekit", "State file prune failed", map[string]any{
 					"room":  roomName,
-					"path":  quizMemoryPath,
 					"error": err.Error(),
 				})
-			} else if removed {
-				logger.InfoCF("livekit", "Pruned stale quiz state from MEMORY.md", map[string]any{
-					"room": roomName,
-					"path": quizMemoryPath,
+			} else if removed > 0 {
+				logger.InfoCF("livekit", "Pruned stale state files", map[string]any{
+					"room":    roomName,
+					"removed": removed,
 				})
 			}
 		}

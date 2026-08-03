@@ -130,12 +130,13 @@ func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
 }
 
 // GetMemoryContext returns formatted memory context for the agent prompt.
-// Includes long-term memory and recent daily notes.
+// Includes long-term memory, saved runtime state files, and recent daily notes.
 func (ms *MemoryStore) GetMemoryContext() string {
 	longTerm := ms.ReadLongTerm()
+	stateFiles := ms.ReadStateFiles()
 	recentNotes := ms.GetRecentDailyNotes(3)
 
-	if longTerm == "" && recentNotes == "" {
+	if longTerm == "" && recentNotes == "" && stateFiles == "" {
 		return ""
 	}
 
@@ -146,13 +147,48 @@ func (ms *MemoryStore) GetMemoryContext() string {
 		sb.WriteString(longTerm)
 	}
 
+	if stateFiles != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n---\n\n")
+		}
+		sb.WriteString("## Saved State\n\n")
+		sb.WriteString(stateFiles)
+	}
+
 	if recentNotes != "" {
-		if longTerm != "" {
+		if sb.Len() > 0 {
 			sb.WriteString("\n\n---\n\n")
 		}
 		sb.WriteString("## Recent Daily Notes\n\n")
 		sb.WriteString(recentNotes)
 	}
 
+	return sb.String()
+}
+
+// ReadStateFiles returns the contents of memory/state/*.md — small
+// runtime-managed files (quiz scoreboard, story progress, ledgers) written by
+// the voice worker. Each file is labeled with its basename so prompts can
+// reference "the saved story state" etc. Empty string when the dir is absent.
+func (ms *MemoryStore) ReadStateFiles() string {
+	stateDir := filepath.Join(ms.memoryDir, "state")
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(stateDir, e.Name()))
+		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "### %s\n%s\n", e.Name(), strings.TrimSpace(string(data)))
+	}
 	return sb.String()
 }

@@ -240,6 +240,17 @@ func (cb *ContextBuilder) sourcePaths() []string {
 	agentDefinition := cb.LoadAgentDefinition()
 	paths := agentDefinition.trackedPaths(cb.workspace)
 	paths = append(paths, filepath.Join(cb.workspace, "memory", "MEMORY.md"))
+	// Runtime state files (quiz scoreboard, story progress) change mid-session;
+	// track the dir plus each file so a write invalidates the prompt cache.
+	stateDir := filepath.Join(cb.workspace, "memory", "state")
+	paths = append(paths, stateDir)
+	if entries, err := os.ReadDir(stateDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				paths = append(paths, filepath.Join(stateDir, e.Name()))
+			}
+		}
+	}
 	return uniquePaths(paths)
 }
 
