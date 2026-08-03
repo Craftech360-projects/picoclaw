@@ -1620,12 +1620,22 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 		return errors.New("agent bridge or provider is nil")
 	}
 
+	// Seeded per device so two children do not get the same plan on the same day;
+	// the workspace path carries the device MAC. Empty seed still rotates by date.
+	seedKey := ""
+	if ab.agentInstance != nil {
+		seedKey = ab.agentInstance.Workspace
+	}
+	// The greeting message stays in history, so the day's plan remains visible to
+	// later turns of the session, not just the opening one.
+	rendered := renderPromptPlaceholders(ab.greetingPrompt, seedKey, time.Now())
+
 	// Restored chat history may belong to a different character (card switch);
 	// naming the current persona keeps the greeting from introducing itself as
 	// the previous one.
 	greetingPrompt := providers.Message{
 		Role:    "user",
-		Content: buildGreetingInstruction(ab.characterName, ab.greetingPrompt),
+		Content: buildGreetingInstruction(ab.characterName, rendered),
 	}
 
 	if ab.sessions != nil {

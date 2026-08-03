@@ -2,6 +2,7 @@ package livekit
 
 import (
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -162,4 +163,52 @@ func maybePersistQuizState(workspace, assistantContent string) {
 		"path":     memoryPath,
 		"memo_len": len(memo),
 	})
+}
+
+// --- Daily category rotation -------------------------------------------------
+//
+// A small LLM asked for "a trivia question for a six year old" lands on the same
+// canonical handful (banana, moo, giraffe) every day, so the quiz felt repetitive
+// across days. Rotating which category opens the day is a positive instruction,
+// which steers a 31B model far better than "do not repeat yourself".
+//
+// This is prompt-driven, not character-gated: a character opts in by putting
+// {{TODAY_PLAN}} / {{TODAY_DATE}} in its greeting_prompt. Prompts without the
+// placeholders are returned untouched.
+
+// quizCategories mirrors the "Daily question plan" section of the Quizzy prompt.
+var quizCategories = []string{
+	"animals and nature",
+	"numbers and logic",
+	"words, sounds and rhymes",
+	"colours, shapes and patterns",
+	"everyday science and the human body",
+	"India and the wider world",
+	"safe everyday knowledge",
+}
+
+// quizPlanForDay returns the category order for one device on one day: the same
+// list rotated by (day + device) so consecutive days open differently and two
+// children on the same day do not get an identical plan.
+// ponytail: rotation only, not a shuffle — 7 orders is plenty and it stays
+// trivially predictable when debugging. Swap for a seeded shuffle if the
+// within-day order ever matters.
+func quizPlanForDay(seedKey string, now time.Time) []string {
+	n := len(quizCategories)
+	offset := (now.YearDay() + int(crc32.ChecksumIEEE([]byte(seedKey)))) % n
+	out := make([]string, 0, n)
+	out = append(out, quizCategories[offset:]...)
+	out = append(out, quizCategories[:offset]...)
+	return out
+}
+
+// renderPromptPlaceholders substitutes the per-day placeholders in a character's
+// greeting prompt. Cheap no-op for prompts that do not use them.
+func renderPromptPlaceholders(prompt, seedKey string, now time.Time) string {
+	if !strings.Contains(prompt, "{{TODAY_PLAN}}") && !strings.Contains(prompt, "{{TODAY_DATE}}") {
+		return prompt
+	}
+	prompt = strings.ReplaceAll(prompt, "{{TODAY_PLAN}}", strings.Join(quizPlanForDay(seedKey, now), ", "))
+	prompt = strings.ReplaceAll(prompt, "{{TODAY_DATE}}", now.Format("Monday 2006-01-02"))
+	return prompt
 }
