@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/livekit"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
@@ -829,6 +830,10 @@ func downloadWorkspaceFilesFastPath(
 	// Fast-path intentionally uses the compact legacy workspace-files payload
 	// to minimize room startup latency before first greeting.
 	err := downloadWorkspaceFilesLegacy(ctx, cfg, deviceMAC, workspaceDir)
+	// The restore may bring back a pre-file-era MEMORY.md from the manager,
+	// re-adding the legacy quiz-state section after the bootstrap migration
+	// already ran — so migrate again on the restored copy.
+	livekit.MigrateLegacyQuizStateSection(workspaceDir)
 	logger.InfoCF("livekit", "workspace fast-path restore completed", map[string]any{
 		"device_mac":                     deviceMAC,
 		"workspace_restore_fast_path_ms": time.Since(startedAt).Milliseconds(),
