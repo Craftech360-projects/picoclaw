@@ -301,16 +301,19 @@ func (s *sentenceSplitter) Feed(r rune) string {
 		}
 	}
 
-	// The ':' just fed may complete an anchored "MEMO:". Latch and drop the
-	// memo before the sentence tokenizer can emit any of its body; speech
-	// buffered ahead of the anchor stays and reaches TTS via Flush.
+	// The ':' just fed may complete an anchored "MEMO:". Latch and drop the memo
+	// before the tokenizer can emit any of its body, and release the speech
+	// buffered ahead of the anchor RIGHT NOW. Holding it until Flush cost a
+	// multi-second silence: the tokenizer only emits a sentence once a following
+	// one confirms the boundary, so the last question before the memo would
+	// otherwise wait for the entire memo line to finish generating.
 	if r == ':' && s.lineStart <= len(text) {
 		if idx := memoAnchorRE.FindStringSubmatchIndex(text[s.lineStart:]); idx != nil {
-			kept := text[:s.lineStart+idx[2]]
+			pending := strings.TrimSpace(text[:s.lineStart+idx[2]])
 			s.buf.Reset()
-			s.buf.WriteString(kept)
+			s.lineStart = 0
 			s.memoSeen = true
-			return ""
+			return pending
 		}
 	}
 

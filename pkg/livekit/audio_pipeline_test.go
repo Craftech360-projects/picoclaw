@@ -1236,3 +1236,27 @@ func TestLeadingExpressionTag(t *testing.T) {
 		}
 	}
 }
+
+// Regression (dev session 2026-08-03): the memo latch buffered the finished
+// question instead of emitting it, so the child heard nothing until the whole
+// ~340-char MEMO line had been generated — a ~7s dead gap mid-turn. The pending
+// sentence must reach TTS the moment the memo starts, not at Flush.
+func TestSentenceSplitterMemoLatchEmitsPendingSpeechImmediately(t *testing.T) {
+	sp := newSentenceSplitter()
+	var duringFeed []string
+	for _, r := range "[excited] Ting! Correct! [curious] Question three: which animal is the largest on land?\nMEMO: type=daily_quiz | answered=2 | awaiting=3" {
+		if s := sp.Feed(r); s != "" {
+			duringFeed = append(duringFeed, s)
+		}
+	}
+	joined := strings.Join(duringFeed, " ")
+	if !strings.Contains(joined, "largest on land") {
+		t.Fatalf("question was not spoken until Flush; emitted during feed: %q", joined)
+	}
+	if strings.Contains(strings.ToLower(joined), "memo") || strings.Contains(joined, "awaiting=3") {
+		t.Fatalf("memo body leaked: %q", joined)
+	}
+	if rem := sp.Flush(); strings.Contains(strings.ToLower(rem), "memo") {
+		t.Fatalf("memo leaked via flush: %q", rem)
+	}
+}
