@@ -1226,7 +1226,10 @@ func ensureToolCallTokenBudget(modelID string, options map[string]any, toolCount
 	case strings.Contains(lower, "gpt-4.1-mini"):
 		minTokens = 320
 	default:
-		minTokens = 260
+		// 260 fit a plain chat reply but truncated a story beat plus its state
+		// MEMO (~250 tokens) mid-line; the memo latch keeps the tail silent, so
+		// the extra headroom costs no perceived latency.
+		minTokens = 420
 	}
 	if current < minTokens {
 		options["max_tokens"] = minTokens
@@ -1343,13 +1346,20 @@ func (ab *AgentBridge) logToolArgsPreview(sessionKey string, args map[string]any
 	return ab.logContentPolicy.toolArgsPreview(sessionKey, args, limit)
 }
 
+// proactiveMinTokens is the floor for greeting turns. An interactive character
+// must fit beat text + a question + a ~100-token state MEMO in one reply.
+const proactiveMinTokens = 420
+
 func buildProactiveLLMOptions(base map[string]any) map[string]any {
 	out := cloneOptions(base)
-	if _, ok := out["max_tokens"]; !ok {
-		// 220 truncated interactive-character greetings mid-MEMO (beat text
-		// ~120 tokens + state MEMO ~100 tokens); observed live twice. First-audio
-		// latency is unaffected by the cap — only the turn tail grows.
-		out["max_tokens"] = 380
+	// Floor, not default-if-absent: main.go always seeds max_tokens from
+	// PICOCLAW_LIVEKIT_VOICE_MAX_TOKENS, so the old `if !ok` branch never fired
+	// and greetings ran at the raw 120-token cap — about 480 characters, which
+	// cut the reply off mid-sentence before its question and MEMO. Observed on
+	// three consecutive live sessions. max_tokens is a ceiling, not a target:
+	// short replies stay short, so raising it costs nothing for simple personas.
+	if optionInt(out["max_tokens"]) < proactiveMinTokens {
+		out["max_tokens"] = proactiveMinTokens
 	}
 	if _, ok := out["temperature"]; !ok {
 		out["temperature"] = 0.4
