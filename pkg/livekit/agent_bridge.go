@@ -171,6 +171,11 @@ type AgentBridge struct {
 	// quizAnswerReporter logs one verdict against the bank.
 	quizBatch          *QuizBatch
 	quizAnswerReporter func(questionID int64, result string)
+	// reportedQuizIDs de-duplicates verdicts within the session: the model
+	// re-emits its cumulative MEMO every turn. Guarded because proactive and
+	// async-tool turns can land concurrently with a conversation turn.
+	reportedQuizMu  sync.Mutex
+	reportedQuizIDs map[int64]bool
 
 	closeMu sync.Mutex
 	closed  bool
@@ -285,6 +290,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		greetingPrompt:            strings.TrimSpace(cfg.GreetingPrompt),
 		quizBatch:                 cfg.QuizBatch,
 		quizAnswerReporter:        cfg.QuizAnswerReporter,
+		reportedQuizIDs:           map[int64]bool{},
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
 	ab.sessionLanguageName = policy.DisplayName
@@ -774,6 +780,7 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		if ab.agentInstance != nil {
 			maybePersistQuizState(ab.agentInstance.Workspace, assistantMsg.Content)
 		}
+		ab.reportQuizVerdict(assistantMsg.Content)
 		if onDone != nil {
 			onDone()
 		}
@@ -860,6 +867,30 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 
 	// Return true to indicate that async tools are pending.
 	return true, nil
+}
+
+// reportQuizVerdict logs one scored judgment against the question bank when the
+// finished reply's MEMO carries a valid q=/result= pair. The POST is fired on
+// its own goroutine (the reporter retries and blocks) so the voice turn never
+// waits on the Manager API.
+func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
+	if ab.quizAnswerReporter == nil {
+		return
+	}
+	memo := extractQuizMemoLine(assistantContent)
+	if memo == "" {
+		return
+	}
+	ab.reportedQuizMu.Lock()
+	questionID, result, ok := parseQuizVerdict(memo, ab.quizBatch, ab.reportedQuizIDs)
+	if ok {
+		ab.reportedQuizIDs[questionID] = true
+	}
+	ab.reportedQuizMu.Unlock()
+	if !ok {
+		return
+	}
+	go ab.quizAnswerReporter(questionID, result)
 }
 
 func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text, sessionKey string) []providers.Message {

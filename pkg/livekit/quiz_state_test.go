@@ -47,6 +47,54 @@ func TestStateTypeFromMemo(t *testing.T) {
 	}
 }
 
+func TestParseQuizVerdict(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{{ID: 1}, {ID: 2}}}
+	cases := []struct {
+		name, memo string
+		reported   map[int64]bool
+		wantID     int64
+		wantResult string
+		wantOK     bool
+	}{
+		{"valid correct", "MEMO: type=daily_quiz | date=2026-08-04 | q=1 | result=correct | answered=1", map[int64]bool{}, 1, "correct", true},
+		{"valid revealed", "MEMO: type=daily_quiz | q=2 | result=revealed", map[int64]bool{}, 2, "revealed", true},
+		{"valid wrong", "MEMO: type=daily_quiz | q=2 | result=wrong | answered=2", map[int64]bool{}, 2, "wrong", true},
+		{"result casing tolerated", "MEMO: type=daily_quiz | q=1 | result=Correct", map[int64]bool{}, 1, "correct", true},
+		{"no q field", "MEMO: type=daily_quiz | date=2026-08-04 | answered=1", map[int64]bool{}, 0, "", false},
+		{"empty q field", "MEMO: type=daily_quiz | q= | result=correct", map[int64]bool{}, 0, "", false},
+		{"non-numeric q", "MEMO: type=daily_quiz | q=one | result=correct", map[int64]bool{}, 0, "", false},
+		{"no result field", "MEMO: type=daily_quiz | date=2026-08-04 | q=1 | answered=1", map[int64]bool{}, 0, "", false},
+		{"bad result", "MEMO: type=daily_quiz | q=1 | result=maybe", map[int64]bool{}, 0, "", false},
+		{"unknown id, two pending -> reject", "MEMO: type=daily_quiz | q=99 | result=correct", map[int64]bool{}, 0, "", false},
+		{"unknown id, one pending -> corrected", "MEMO: type=daily_quiz | q=99 | result=correct", map[int64]bool{1: true}, 2, "correct", true},
+		{"unknown id, none pending -> reject", "MEMO: type=daily_quiz | q=99 | result=correct", map[int64]bool{1: true, 2: true}, 0, "", false},
+		{"already reported id -> reject dup", "MEMO: type=daily_quiz | q=1 | result=correct", map[int64]bool{1: true}, 0, "", false},
+		{"story memo ignored", "MEMO: type=story | q=1 | result=correct", map[int64]bool{}, 0, "", false},
+		{"missing type ignored", "MEMO: q=1 | result=correct", map[int64]bool{}, 0, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			id, res, ok := parseQuizVerdict(c.memo, batch, c.reported)
+			if ok != c.wantOK || id != c.wantID || res != c.wantResult {
+				t.Fatalf("got (%d,%q,%v) want (%d,%q,%v)", id, res, ok, c.wantID, c.wantResult, c.wantOK)
+			}
+		})
+	}
+
+	// nil batch = the fetch failed, so there is no scored quiz to report against
+	if _, _, ok := parseQuizVerdict("MEMO: type=daily_quiz | q=1 | result=correct", nil, map[int64]bool{}); ok {
+		t.Fatal("nil batch must never report")
+	}
+	// an empty batch has no pending question to correct an id onto
+	if _, _, ok := parseQuizVerdict("MEMO: type=daily_quiz | q=1 | result=correct", &QuizBatch{}, map[int64]bool{}); ok {
+		t.Fatal("empty batch must never report")
+	}
+	// a nil reported map (never-reported session) must behave like an empty one
+	if id, res, ok := parseQuizVerdict("MEMO: type=daily_quiz | q=2 | result=wrong", batch, nil); !ok || id != 2 || res != "wrong" {
+		t.Fatalf("nil reported map: got (%d,%q,%v) want (2,\"wrong\",true)", id, res, ok)
+	}
+}
+
 func TestMaybePersistQuizStatePerTypeFiles(t *testing.T) {
 	dir := t.TempDir()
 

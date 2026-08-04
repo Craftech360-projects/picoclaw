@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +86,71 @@ func memoField(memo, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(m[1])
+}
+
+// quizVerdictResults is the closed set the answer log accepts; anything else the
+// model improvises ("skipped", "partly") is dropped rather than POSTed.
+var quizVerdictResults = map[string]bool{"correct": true, "wrong": true, "revealed": true}
+
+// parseQuizVerdict returns (questionID, result, ok). ok=false when the MEMO is
+// not a daily_quiz one, has no q=/result= fields, the result is not
+// correct|wrong|revealed, the id was already reported, or the id is not in the
+// batch — unless exactly one batch question is still unreported, in which case
+// the id is corrected to that question (the 31B model echoes ids imperfectly,
+// and when only one question can possibly be meant there is nothing to confuse).
+// A nil batch means the fetch failed, so there is no scored quiz to report on.
+func parseQuizVerdict(memo string, batch *QuizBatch, reported map[int64]bool) (int64, string, bool) {
+	if batch == nil || stateTypeFromMemo(memo) != "daily_quiz" {
+		return 0, "", false
+	}
+	result := strings.ToLower(memoField(memo, "result"))
+	if !quizVerdictResults[result] {
+		return 0, "", false
+	}
+	// A MEMO carrying only answered= is normal state persistence, not a verdict.
+	raw := memoField(memo, "q")
+	if raw == "" {
+		return 0, "", false
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		logger.WarnCF("livekit", "Quiz MEMO has unparseable q=; verdict dropped", map[string]any{"q": raw})
+		return 0, "", false
+	}
+
+	known := false
+	pending := make([]int64, 0, len(batch.Questions))
+	for _, q := range batch.Questions {
+		if q.ID == id {
+			known = true
+		}
+		if !reported[q.ID] {
+			pending = append(pending, q.ID)
+		}
+	}
+	if known {
+		if reported[id] {
+			logger.WarnCF("livekit", "Quiz verdict already reported; dropped as duplicate", map[string]any{
+				"question_id": id,
+				"result":      result,
+			})
+			return 0, "", false
+		}
+		return id, result, true
+	}
+	if len(pending) == 1 {
+		logger.InfoCF("livekit", "Quiz MEMO id not in batch; corrected to the only pending question", map[string]any{
+			"memo_id":     id,
+			"question_id": pending[0],
+			"result":      result,
+		})
+		return pending[0], result, true
+	}
+	logger.WarnCF("livekit", "Quiz MEMO id not in batch; verdict dropped", map[string]any{
+		"question_id": id,
+		"pending":     len(pending),
+	})
+	return 0, "", false
 }
 
 // maybePersistQuizState is the per-turn hook: extract the MEMO from a finished
