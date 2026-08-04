@@ -60,6 +60,26 @@ _Avoid_: Main prompt, system prompt, scaffold
 A custom instruction a parent sets for their own child (for example "bedtime is eight o'clock"), applied across every **Character** that child talks to. Parent Rules are subordinate to the **Governing Prompt**; where they conflict, the Governing Prompt wins.
 _Avoid_: User rule, custom prompt, override
 
+**Question Bank**:
+The curated, human-authored set of quiz questions Quizzy asks. Quizzy never invents questions; it only voices, judges, and encourages. Every question belongs to exactly one **Age Band** and one **Level**.
+_Avoid_: Generated questions, trivia pool
+
+**Age Band**:
+One of three fixed audience groups for Question Bank content: 3–5, 6–8, 9+. A child is in exactly one Age Band, determined by profile age.
+_Avoid_: Level, difficulty, age range
+
+**Level**:
+An authored set of ten questions within one Age Band. A child plays one Level at a time and unlocks the next by clearing all ten. Levels replace daily category rotation for Quizzy; category variety is mixed within each Level at authoring time.
+_Avoid_: Difficulty score, age band, batch
+
+**Cleared**:
+A question's terminal state for a child: answered correctly, or revealed after two wrong tries. A cleared question is never re-asked in normal play. A Level is complete when all ten questions are cleared.
+_Avoid_: Answered, done, passed
+
+**Revealed**:
+A clear that happened by Quizzy telling the answer after two wrong attempts. Counts toward Level completion, but is recorded distinctly from a correct answer.
+_Avoid_: Failed, skipped
+
 ## Example Dialogue
 
 Developer: "Should Cheeko Magic be a new Runtime Agent?"
