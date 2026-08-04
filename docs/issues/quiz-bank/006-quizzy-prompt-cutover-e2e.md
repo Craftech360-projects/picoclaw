@@ -59,6 +59,20 @@ banana/moo seeds.
 design and only gained MEMO reporting; the day-gate, safety rules, expression tags, word
 limits, identity rules and the `soul` column are untouched.
 
+**Multilingual answers (added 2026-08-04 after the cutover).** The old judging rule
+accepted only *"natural Hindi or Hinglish equivalents"*, so a child answering "pathu"
+(Malayalam) or "hathu" (Kannada) for ten could be marked wrong despite being right. Fixed
+in the prompt, not the data: the bank cannot enumerate ten-plus languages per question,
+but the model already knows the translations and only needed permission. Section 3 now
+names the major Indian languages with the ten-example, and section 4 adds "judge the
+meaning, not the language ... the listed alternatives are examples, not the complete set",
+while keeping Quizzy's own speech in the session language. `system_prompt` 9442→9923.
+
+**Caveat a prompt cannot fix:** STT runs before the judge. With the session language set
+to English, Sarvam may garble "pathu" before the model ever sees it. Check the raw
+transcript in `voice_session_messages` during the live test to separate an STT failure
+from a judging failure.
+
 **Known consequence:** with that flow every question ends `correct` or `revealed`, so
 `result=wrong` will rarely be emitted and `counts.wrong` on the progress endpoint stays
 near zero. Harmless; the value exists for a future flow that logs interim attempts.
