@@ -264,3 +264,24 @@ func TestPostQuizAnswer(t *testing.T) {
 		t.Fatalf("body = %+v", gotBody)
 	}
 }
+
+func TestRenderQuizQuestionsAssertsDayStatus(t *testing.T) {
+	qs := []QuizQuestion{{ID: 1, Text: "How many legs does a spider have?", Answer: "eight"}}
+
+	// A fresh day must contradict a restored transcript claiming otherwise.
+	fresh := RenderQuizQuestions("{{QUIZ_QUESTIONS}}", &QuizBatch{Level: 1, Band: "6-8", Questions: qs, AnsweredToday: 0})
+	for _, want := range []string{"is NOT complete", "0 of 10", "overrides it"} {
+		if !strings.Contains(fresh, want) {
+			t.Errorf("fresh-day block missing %q in:\n%s", want, fresh)
+		}
+	}
+	if strings.Contains(fresh, "IS complete") {
+		t.Error("a fresh day must not be described as complete")
+	}
+
+	// A genuinely finished day must still gate a second scored run.
+	done := RenderQuizQuestions("{{QUIZ_QUESTIONS}}", &QuizBatch{Level: 2, Band: "6-8", Questions: qs, AnsweredToday: 10, DayComplete: true})
+	if !strings.Contains(done, "IS complete") || !strings.Contains(done, "Bonus Buzz") {
+		t.Errorf("completed-day block missing its gate in:\n%s", done)
+	}
+}

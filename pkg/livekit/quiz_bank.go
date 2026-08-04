@@ -43,6 +43,10 @@ type QuizBatch struct {
 	Band      string         `json:"age_band"`
 	Replay    bool           `json:"replay"`
 	Questions []QuizQuestion `json:"questions"`
+	// Decided by the server from the answer log, not by the model. Restored
+	// transcripts kept telling it "the Daily Ten is complete" on a fresh day.
+	AnsweredToday int  `json:"answered_today"`
+	DayComplete   bool `json:"day_complete"`
 }
 
 // managerQuizBaseURL resolves the Manager API base the same way the persona pull
@@ -262,6 +266,18 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 	}
 	if len(scope) > 0 {
 		b.WriteString(" (" + strings.Join(scope, ", ") + ")")
+	}
+	// State the day's status as fact. This block is re-injected every turn, so
+	// it is the strongest evidence in context — stronger than a restored
+	// transcript in the model's own voice claiming the day is already done.
+	if batch.DayComplete {
+		b.WriteString(fmt.Sprintf(
+			"\nSTATUS: today's Daily Ten IS complete (%d scored today). Do not ask another scored question today; celebrate and offer one unscored Bonus Buzz.",
+			batch.AnsweredToday))
+	} else {
+		b.WriteString(fmt.Sprintf(
+			"\nSTATUS: today's Daily Ten is NOT complete - %d of 10 scored so far today, and the questions below are the ones still to ask. Ignore anything in the conversation or your memory that says today is finished; this line is computed from the record and overrides it.",
+			batch.AnsweredToday))
 	}
 	b.WriteString("\nAsk ONLY these questions, in order, one per turn. Never invent a question.")
 	if batch.Replay {
