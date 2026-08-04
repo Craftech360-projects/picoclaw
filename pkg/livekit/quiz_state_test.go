@@ -56,20 +56,20 @@ func TestParseQuizVerdict(t *testing.T) {
 		wantResult string
 		wantOK     bool
 	}{
-		{"valid correct", "MEMO: type=daily_quiz | date=2026-08-04 | q=1 | result=correct | answered=1", map[int64]bool{}, 1, "correct", true},
-		{"valid revealed", "MEMO: type=daily_quiz | q=2 | result=revealed", map[int64]bool{}, 2, "revealed", true},
-		{"valid wrong", "MEMO: type=daily_quiz | q=2 | result=wrong | answered=2", map[int64]bool{}, 2, "wrong", true},
-		{"result casing tolerated", "MEMO: type=daily_quiz | q=1 | result=Correct", map[int64]bool{}, 1, "correct", true},
+		{"valid correct", "MEMO: type=daily_quiz | date=2026-08-04 | scored_q=1 | result=correct | answered=1", map[int64]bool{}, 1, "correct", true},
+		{"valid revealed", "MEMO: type=daily_quiz | scored_q=2 | result=revealed", map[int64]bool{}, 2, "revealed", true},
+		{"valid wrong", "MEMO: type=daily_quiz | scored_q=2 | result=wrong | answered=2", map[int64]bool{}, 2, "wrong", true},
+		{"result casing tolerated", "MEMO: type=daily_quiz | scored_q=1 | result=Correct", map[int64]bool{}, 1, "correct", true},
 		{"no q field", "MEMO: type=daily_quiz | date=2026-08-04 | answered=1", map[int64]bool{}, 0, "", false},
-		{"empty q field", "MEMO: type=daily_quiz | q= | result=correct", map[int64]bool{}, 0, "", false},
-		{"non-numeric q", "MEMO: type=daily_quiz | q=one | result=correct", map[int64]bool{}, 0, "", false},
-		{"no result field", "MEMO: type=daily_quiz | date=2026-08-04 | q=1 | answered=1", map[int64]bool{}, 0, "", false},
-		{"bad result", "MEMO: type=daily_quiz | q=1 | result=maybe", map[int64]bool{}, 0, "", false},
-		{"unknown id, two pending -> reject", "MEMO: type=daily_quiz | q=99 | result=correct", map[int64]bool{}, 0, "", false},
-		{"unknown id, one pending -> corrected", "MEMO: type=daily_quiz | q=99 | result=correct", map[int64]bool{1: true}, 2, "correct", true},
-		{"unknown id, none pending -> reject", "MEMO: type=daily_quiz | q=99 | result=correct", map[int64]bool{1: true, 2: true}, 0, "", false},
-		{"already reported id -> reject dup", "MEMO: type=daily_quiz | q=1 | result=correct", map[int64]bool{1: true}, 0, "", false},
-		{"story memo ignored", "MEMO: type=story | q=1 | result=correct", map[int64]bool{}, 0, "", false},
+		{"empty q field", "MEMO: type=daily_quiz | scored_q= | result=correct", map[int64]bool{}, 0, "", false},
+		{"non-numeric q", "MEMO: type=daily_quiz | scored_q=one | result=correct", map[int64]bool{}, 0, "", false},
+		{"no result field", "MEMO: type=daily_quiz | date=2026-08-04 | scored_q=1 | answered=1", map[int64]bool{}, 0, "", false},
+		{"bad result", "MEMO: type=daily_quiz | scored_q=1 | result=maybe", map[int64]bool{}, 0, "", false},
+		{"unknown id, two pending -> reject", "MEMO: type=daily_quiz | scored_q=99 | result=correct", map[int64]bool{}, 0, "", false},
+		{"unknown id, one pending -> corrected", "MEMO: type=daily_quiz | scored_q=99 | result=correct", map[int64]bool{1: true}, 2, "correct", true},
+		{"unknown id, none pending -> reject", "MEMO: type=daily_quiz | scored_q=99 | result=correct", map[int64]bool{1: true, 2: true}, 0, "", false},
+		{"already reported id -> reject dup", "MEMO: type=daily_quiz | scored_q=1 | result=correct", map[int64]bool{1: true}, 0, "", false},
+		{"story memo ignored", "MEMO: type=story | scored_q=1 | result=correct", map[int64]bool{}, 0, "", false},
 		{"missing type ignored", "MEMO: q=1 | result=correct", map[int64]bool{}, 0, "", false},
 	}
 	for _, c := range cases {
@@ -82,15 +82,15 @@ func TestParseQuizVerdict(t *testing.T) {
 	}
 
 	// nil batch = the fetch failed, so there is no scored quiz to report against
-	if _, _, ok := parseQuizVerdict("MEMO: type=daily_quiz | q=1 | result=correct", nil, map[int64]bool{}); ok {
+	if _, _, ok := parseQuizVerdict("MEMO: type=daily_quiz | scored_q=1 | result=correct", nil, map[int64]bool{}); ok {
 		t.Fatal("nil batch must never report")
 	}
 	// an empty batch has no pending question to correct an id onto
-	if _, _, ok := parseQuizVerdict("MEMO: type=daily_quiz | q=1 | result=correct", &QuizBatch{}, map[int64]bool{}); ok {
+	if _, _, ok := parseQuizVerdict("MEMO: type=daily_quiz | scored_q=1 | result=correct", &QuizBatch{}, map[int64]bool{}); ok {
 		t.Fatal("empty batch must never report")
 	}
 	// a nil reported map (never-reported session) must behave like an empty one
-	if id, res, ok := parseQuizVerdict("MEMO: type=daily_quiz | q=2 | result=wrong", batch, nil); !ok || id != 2 || res != "wrong" {
+	if id, res, ok := parseQuizVerdict("MEMO: type=daily_quiz | scored_q=2 | result=wrong", batch, nil); !ok || id != 2 || res != "wrong" {
 		t.Fatalf("nil reported map: got (%d,%q,%v) want (2,\"wrong\",true)", id, res, ok)
 	}
 }
@@ -242,5 +242,152 @@ func TestPruneStaleStateFiles(t *testing.T) {
 	// missing dir -> no-op
 	if removed, err := PruneStaleStateFiles(t.TempDir(), now); err != nil || removed != 0 {
 		t.Fatalf("missing dir: removed=%d err=%v", removed, err)
+	}
+}
+
+// --- Bank state file ---------------------------------------------------------
+
+func TestWriteQuizBankStateSurvivesAsStateFile(t *testing.T) {
+	ws := t.TempDir()
+	batch := &QuizBatch{Level: 2, Band: "6-8", Questions: []QuizQuestion{
+		{ID: 11, Text: "Which planet is closest to the sun?", Answer: "Mercury"},
+		{ID: 12, Text: "What is nine times three?", Answer: "twenty-seven", Accepted: []string{"27"}},
+	}}
+	now := time.Date(2026, 8, 4, 9, 0, 0, 0, time.UTC)
+	if err := WriteQuizBankState(ws, batch, now); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDir(ws), quizBankStateFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("bank state file not written: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{"date=2026-08-04", "id=11", "Which planet is closest", "id=12", "27"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bank state missing %q in:\n%s", want, got)
+		}
+	}
+	// Must carry date= so PruneStaleStateFiles can age it out; without it the
+	// file is kept forever and a stale list gets injected tomorrow.
+	if quizMemoDateRE.FindStringSubmatch(got) == nil {
+		t.Error("bank state has no parseable date=; prune would keep it forever")
+	}
+}
+
+func TestWriteQuizBankStateRemovesFileWhenBatchUnavailable(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Now()
+	if err := WriteQuizBankState(ws, &QuizBatch{Level: 1, Questions: []QuizQuestion{{ID: 1, Text: "Q?", Answer: "A"}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDir(ws), quizBankStateFile)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("expected file to exist first")
+	}
+	// A failed fetch must clear it: serving yesterday's list would let the child
+	// be asked questions the server never selected.
+	if err := WriteQuizBankState(ws, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("nil batch must remove the stale bank state file")
+	}
+	if err := WriteQuizBankState(ws, &QuizBatch{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("empty batch must remove the stale bank state file")
+	}
+}
+
+func TestPruneStaleStateFilesAgesOutBankFile(t *testing.T) {
+	ws := t.TempDir()
+	base := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	if err := WriteQuizBankState(ws, &QuizBatch{Level: 1, Questions: []QuizQuestion{{ID: 1, Text: "Q?", Answer: "A"}}}, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PruneStaleStateFiles(ws, base.Add(4*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir(ws), quizBankStateFile)); !os.IsNotExist(err) {
+		t.Error("a four-day-old bank file should have been pruned")
+	}
+}
+
+// --- Verdict attribution and the invented-question guard ---------------------
+
+func TestParseQuizVerdictUsesScoredQNotAwaiting(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{
+		{ID: 1, Text: "How many legs does a spider have?"},
+		{ID: 2, Text: "What colour do you get when you mix red and yellow?"},
+	}}
+	// The live regression: the model scores question one while asking question
+	// two in the same breath. Reporting awaiting= logged every answer one
+	// question late.
+	memo := "MEMO: type=daily_quiz | date=2026-08-04 | answered=1 | awaiting=2 | " +
+		"scored_q=1 | scored_text=How many legs does a spider have | result=correct"
+	id, result, ok := parseQuizVerdict(memo, batch, map[int64]bool{})
+	if !ok || id != 1 || result != "correct" {
+		t.Fatalf("got (%d,%q,%v), want (1,correct,true) — verdict must follow scored_q", id, result, ok)
+	}
+}
+
+func TestParseQuizVerdictRejectsInventedQuestion(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{
+		{ID: 7, Text: "What do we call water when it freezes and turns hard?"},
+		{ID: 8, Text: "What do we call a baby dog?"},
+	}}
+	// Exactly what happened live: the list fell out of context, the model
+	// invented a question and reported it against a real bank id.
+	memo := "MEMO: type=daily_quiz | date=2026-08-04 | answered=6 | awaiting=8 | " +
+		"scored_q=7 | scored_text=Which animal is known as the king of the jungle | result=correct"
+	if _, _, ok := parseQuizVerdict(memo, batch, map[int64]bool{}); ok {
+		t.Error("a scored_text that does not match the bank question must not be logged")
+	}
+}
+
+func TestParseQuizVerdictAcceptsRewordedQuestion(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{
+		{ID: 1, Text: "How many legs does a spider have?"},
+	}}
+	// Quizzy is told to ask warmly in her own words, so the guard must tolerate
+	// padding and punctuation while still rejecting a different question.
+	memo := "MEMO: type=daily_quiz | date=2026-08-04 | scored_q=1 | " +
+		"scored_text=Can you tell me, how many legs does a spider have? | result=correct"
+	if _, _, ok := parseQuizVerdict(memo, batch, map[int64]bool{}); !ok {
+		t.Error("a warmly reworded version of the same question must still count")
+	}
+}
+
+func TestParseQuizVerdictAllowsMissingScoredText(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{{ID: 3, Text: "Which planet do we live on?"}}}
+	// Absent scored_text cannot be cross-checked; the id validation still
+	// applies, so accept rather than silently dropping real answers.
+	memo := "MEMO: type=daily_quiz | date=2026-08-04 | scored_q=3 | result=revealed"
+	id, result, ok := parseQuizVerdict(memo, batch, map[int64]bool{})
+	if !ok || id != 3 || result != "revealed" {
+		t.Fatalf("got (%d,%q,%v), want (3,revealed,true)", id, result, ok)
+	}
+}
+
+func TestQuestionTextMatchesBank(t *testing.T) {
+	cases := []struct {
+		name, asked, bank string
+		want              bool
+	}{
+		{"identical", "What is five plus seven?", "What is five plus seven?", true},
+		{"reworded warmly", "Ooh, can you tell me what is five plus seven?", "What is five plus seven?", true},
+		{"case and punctuation", "WHAT IS FIVE PLUS SEVEN", "What is five plus seven?", true},
+		{"different question", "Which animal is the king of the jungle?", "What do we call a baby dog?", false},
+		{"the live giraffe invention", "Which animal has a very long neck to reach leaves?", "What do we call a baby dog?", false},
+		{"empty asked", "", "What is five plus seven?", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := questionTextMatchesBank(c.asked, c.bank); got != c.want {
+				t.Errorf("questionTextMatchesBank(%q, %q) = %v, want %v", c.asked, c.bank, got, c.want)
+			}
+		})
 	}
 }

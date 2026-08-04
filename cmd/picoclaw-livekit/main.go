@@ -690,6 +690,17 @@ func main() {
 					"questions": len(qb.Questions),
 				})
 			}
+			// The batch also goes to memory/state/, which ReadStateFiles re-injects
+			// into the system prompt every turn. A greeting message alone does not
+			// survive history compaction: on 2026-08-04 history collapsed 24 -> 8
+			// mid-quiz and Quizzy invented the remaining questions. A failed fetch
+			// writes nothing and clears any stale file.
+			if err := livekit.WriteQuizBankState(workspace, quizBatchForSession, time.Now()); err != nil {
+				logger.WarnCF("livekit", "Failed to write quiz bank state file", map[string]any{
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+			}
 		}
 
 		// Per-character ElevenLabs voice (ai_agent_template.elevenlabs_voice_id).

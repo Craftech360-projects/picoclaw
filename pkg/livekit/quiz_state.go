@@ -45,6 +45,90 @@ func stateDir(workspace string) string {
 	return filepath.Join(workspace, "memory", stateDirName)
 }
 
+// quizBankStateFile holds the curated questions selected for this session.
+//
+// It lives in memory/state/ rather than in a chat message because
+// MemoryStore.ReadStateFiles re-injects every file there into the system prompt
+// on EVERY turn, while a chat message is evicted the moment history compacts.
+// Observed live 2026-08-04: history collapsed 24 -> 8 messages mid-quiz, the
+// injected list went with it, and Quizzy invented the rest of the Daily Ten
+// while still numbering it correctly from the surviving scoreboard.
+const quizBankStateFile = "quiz_bank.md"
+
+// WriteQuizBankState persists the session's curated questions so they survive
+// history compaction and cold restarts. A nil or empty batch REMOVES the file:
+// serving yesterday's list would let a child be asked questions the server
+// never selected for them.
+func WriteQuizBankState(workspace string, batch *QuizBatch, now time.Time) error {
+	if strings.TrimSpace(workspace) == "" {
+		return nil
+	}
+	path := filepath.Join(stateDir(workspace), quizBankStateFile)
+	if batch == nil || len(batch.Questions) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(stateDir(workspace), 0o755); err != nil {
+		return err
+	}
+
+	var sb strings.Builder
+	// The date= is what PruneStaleStateFiles matches on; without it the file is
+	// kept forever (prune is fail-open on unparseable dates).
+	fmt.Fprintf(&sb, "QUIZ_BANK: type=quiz_bank | date=%s | level=%d | band=%s | replay=%t\n\n",
+		now.Format("2006-01-02"), batch.Level, batch.Band, batch.Replay)
+	sb.WriteString(RenderQuizQuestions("{{QUIZ_QUESTIONS}}", batch))
+	sb.WriteString("\n")
+	return os.WriteFile(path, []byte(sb.String()), 0o600)
+}
+
+// questionTextMatchesBank reports whether the question the model says it just
+// judged is recognisably the bank question bearing that id.
+//
+// Quizzy is instructed to ask warmly in her own words, so this tolerates
+// padding and punctuation; it exists to catch a wholly invented question being
+// reported against a real id, which is how four false "cleared" rows reached
+// the database on 2026-08-04. An empty asked-text is accepted: nothing to
+// check, and dropping real answers is worse than missing a guard.
+func questionTextMatchesBank(asked, bank string) bool {
+	askedWords := contentWords(asked)
+	bankWords := contentWords(bank)
+	if len(askedWords) == 0 || len(bankWords) == 0 {
+		return true
+	}
+	overlap := 0
+	for word := range bankWords {
+		if askedWords[word] {
+			overlap++
+		}
+	}
+	// Half the bank question's distinctive words must reappear. An invented
+	// question shares only filler ("what", "is"), which is stripped below.
+	return overlap*2 >= len(bankWords)
+}
+
+var quizFillerWords = map[string]bool{
+	"a": true, "an": true, "the": true, "is": true, "are": true, "do": true,
+	"does": true, "you": true, "we": true, "what": true, "which": true,
+	"when": true, "how": true, "can": true, "tell": true, "me": true,
+	"to": true, "of": true, "in": true, "on": true, "and": true, "it": true,
+	"that": true, "this": true, "your": true, "my": true, "ooh": true,
+}
+
+func contentWords(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, field := range strings.Fields(strings.ToLower(s)) {
+		word := strings.Trim(field, ".,!?;:'\"()-")
+		if word == "" || quizFillerWords[word] {
+			continue
+		}
+		out[word] = true
+	}
+	return out
+}
+
 // extractQuizMemoLine returns the last line-anchored "MEMO:" line of an
 // assistant reply, with expression tags stripped. "" when absent.
 func extractQuizMemoLine(content string) string {
@@ -107,22 +191,27 @@ func parseQuizVerdict(memo string, batch *QuizBatch, reported map[int64]bool) (i
 	if !quizVerdictResults[result] {
 		return 0, "", false
 	}
-	// A MEMO carrying only answered= is normal state persistence, not a verdict.
-	raw := memoField(memo, "q")
+	// scored_q, never awaiting: every turn both judges the previous answer and
+	// asks the next question, so reading the pending id logged each answer one
+	// question late (observed live 2026-08-04).
+	raw := memoField(memo, "scored_q")
 	if raw == "" {
 		return 0, "", false
 	}
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		logger.WarnCF("livekit", "Quiz MEMO has unparseable q=; verdict dropped", map[string]any{"q": raw})
+		logger.WarnCF("livekit", "Quiz MEMO has unparseable scored_q=; verdict dropped", map[string]any{"scored_q": raw})
 		return 0, "", false
 	}
+	scoredText := memoField(memo, "scored_text")
 
 	known := false
+	bankText := ""
 	pending := make([]int64, 0, len(batch.Questions))
 	for _, q := range batch.Questions {
 		if q.ID == id {
 			known = true
+			bankText = q.Text
 		}
 		if !reported[q.ID] {
 			pending = append(pending, q.ID)
@@ -133,6 +222,17 @@ func parseQuizVerdict(memo string, batch *QuizBatch, reported map[int64]bool) (i
 			logger.WarnCF("livekit", "Quiz verdict already reported; dropped as duplicate", map[string]any{
 				"question_id": id,
 				"result":      result,
+			})
+			return 0, "", false
+		}
+		// The id alone cannot show that the question actually ASKED was the one
+		// bearing it: four invented questions were logged against real bank ids
+		// before this check existed.
+		if !questionTextMatchesBank(scoredText, bankText) {
+			logger.WarnCF("livekit", "Quiz verdict does not match the bank question; dropped as invented", map[string]any{
+				"question_id":   id,
+				"bank_question":  bankText,
+				"asked_question": scoredText,
 			})
 			return 0, "", false
 		}
