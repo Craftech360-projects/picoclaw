@@ -382,6 +382,11 @@ func TestQuestionTextMatchesBank(t *testing.T) {
 		{"different question", "Which animal is the king of the jungle?", "What do we call a baby dog?", false},
 		{"the live giraffe invention", "Which animal has a very long neck to reach leaves?", "What do we call a baby dog?", false},
 		{"empty asked", "", "What is five plus seven?", true},
+		// Live false negative: the model abbreviates because the prompt asks it
+		// to name the question in a few plain words.
+		{"abbreviated by the model", "days in a week", "How many days are there in one week?", true},
+		{"abbreviated, still wrong question", "king of the jungle", "What do we call water when it freezes and turns hard?", false},
+		{"single distinctive word", "spider", "How many legs does a spider have?", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

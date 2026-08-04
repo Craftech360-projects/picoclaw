@@ -99,14 +99,18 @@ func questionTextMatchesBank(asked, bank string) bool {
 		return true
 	}
 	overlap := 0
-	for word := range bankWords {
-		if askedWords[word] {
+	for word := range askedWords {
+		if bankWords[word] {
 			overlap++
 		}
 	}
-	// Half the bank question's distinctive words must reappear. An invented
-	// question shares only filler ("what", "is"), which is stripped below.
-	return overlap*2 >= len(bankWords)
+	// Asymmetric on purpose: the model is told to name the question "in a few
+	// plain words", so it abbreviates ("days in a week" for "How many days are
+	// there in one week?"). Requiring a share of the BANK's words rejected that
+	// valid answer live. What matters is that what it DID write belongs to the
+	// bank question; an invented question shares nothing but filler, which is
+	// stripped above.
+	return overlap*5 >= len(askedWords)*3
 }
 
 var quizFillerWords = map[string]bool{
