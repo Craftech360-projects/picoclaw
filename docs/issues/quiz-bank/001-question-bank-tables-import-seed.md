@@ -1,6 +1,6 @@
 # 001 — Question Bank tables + xlsx import + seed content
 
-**Type:** HITL · **Status:** open (implementation done; two criteria need the user)
+**Type:** HITL · **Status:** closed
 **Spec:** `docs/superpowers/specs/2026-08-04-quizzy-question-bank-design.md` · **Plan:** `docs/superpowers/plans/2026-08-04-quizzy-question-bank.md` (Tasks 1, 4, 8-step-1) · **ADR:** `docs/adr/0005-quizzy-scored-questions-come-from-a-curated-bank.md`
 **Repo:** manager-api-node (branch `feat/quizzy-question-bank`)
 
@@ -22,10 +22,10 @@ model quiz_question_answer {
 
 ## Acceptance criteria
 
-- [x] Migration applied via `prisma migrate` (never hand-created tables) — applied to **DB2** (`shlrfpbqkfnxqcmuatvs`, what `.env` targets). **DB1 still pending: needs credentials.**
+- [x] Migration applied via `prisma migrate` (never hand-created tables) to **both dev DBs** — DB2 (`shlrfpbqkfnxqcmuatvs`) and DB1 (`tsiocygczplmnjpqmutc`, what the dev box uses)
 - [x] `npx prisma migrate status` clean; `prisma validate` passes
 - [x] Import script run twice on a fixture reports identical counts (idempotent); bad band / missing answer rows are skipped with row numbers
-- [ ] 20 seed questions for band 6-8 (codes `6-8-L01-Q01`…`6-8-L02-Q10`) **signed off by the user** — present in DB2, sign-off outstanding, not yet in DB1
+- [x] 20 seed questions for band 6-8 (codes `6-8-L01-Q01`…`6-8-L02-Q10`) **signed off by the user** (2026-08-04) and present in both dev DBs
 - [x] Committed on the manager repo branch
 
 ## Blocked by
@@ -57,10 +57,12 @@ skipped by spreadsheet row number with the offending column named, and the run e
 `answer_text`, and 6 of 20 rows have an empty list — the judge must match against both
 fields and case-fold. Answer casing is inconsistent across the file by design.
 
-**Unverified / needs the user:** DB1 migration + seed (no credentials — see §4 of the
-plan), and sign-off on the 20 questions. Content was reviewed for factual accuracy and
-child-plausible phrasings were added (`my nose`, `plant eater`, `moth`, `sunshine`,
-`8 legs`), but a curator should still read them.
+**DB1 rollout (2026-08-04):** questions signed off by the user; migration deployed and
+seed imported to DB1. Only this migration was pending there — the eight subscription
+migrations in DB1's ledger have no local counterpart and were left untouched. Verified
+on DB1: 10 questions per Level across two Levels, CHECK constraints enforcing (23514),
+re-import idempotent, DB2 unaffected. Both dev DBs now hold the identical bank.
+Prod (DigitalOcean) deliberately untouched.
 
 **Pre-existing, not mine:** `tests/unit/prisma-client-guard.test.js` fails on a clean
 tree (verified by stashing); commit `fafa9549` added `pending_card_pairing` to the
