@@ -167,6 +167,10 @@ type AgentBridge struct {
 	// greetingPrompt is the per-character opening instruction pulled from
 	// ai_agent_template.greeting_prompt; empty falls back to the generic one.
 	greetingPrompt string
+	// quizBatch is this session's curated question set (nil = no scored quiz);
+	// quizAnswerReporter logs one verdict against the bank.
+	quizBatch          *QuizBatch
+	quizAnswerReporter func(questionID int64, result string)
 
 	closeMu sync.Mutex
 	closed  bool
@@ -221,6 +225,11 @@ type AgentBridgeConfig struct {
 	// GreetingPrompt is the character's own opening instruction from
 	// ai_agent_template.greeting_prompt. Empty -> generic greeting instruction.
 	GreetingPrompt string
+	// QuizBatch is the curated question set pulled for this session; nil means
+	// the bank was unreachable or unused, and no scored quiz runs.
+	QuizBatch *QuizBatch
+	// QuizAnswerReporter logs one scored verdict against the bank.
+	QuizAnswerReporter func(questionID int64, result string)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -274,6 +283,8 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		allowedToolNames:          normalizeAllowedToolNames(cfg.AllowedToolNames),
 		characterName:             cfg.CharacterName,
 		greetingPrompt:            strings.TrimSpace(cfg.GreetingPrompt),
+		quizBatch:                 cfg.QuizBatch,
+		quizAnswerReporter:        cfg.QuizAnswerReporter,
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
 	ab.sessionLanguageName = policy.DisplayName
@@ -1642,6 +1653,10 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 	// The greeting message stays in history, so the day's plan remains visible to
 	// later turns of the session, not just the opening one.
 	rendered := renderPromptPlaceholders(ab.greetingPrompt, seedKey, time.Now())
+	// Curated questions replace {{QUIZ_QUESTIONS}}; a nil batch renders the
+	// explicit "no scored quiz" instruction instead of leaving the LLM free to
+	// invent one.
+	rendered = RenderQuizQuestions(rendered, ab.quizBatch)
 
 	// Restored chat history may belong to a different character (card switch);
 	// naming the current persona keeps the greeting from introducing itself as

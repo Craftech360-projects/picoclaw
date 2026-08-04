@@ -664,6 +664,34 @@ func main() {
 			}
 		}
 
+		// Scored quiz questions come from the curated bank, not the LLM (ADR-0005).
+		// Character-agnostic gate: only personas whose greeting carries the
+		// placeholder pay for the call, so Cheeko/Nani never hit the endpoint.
+		var quizBatchForSession *livekit.QuizBatch
+		if strings.Contains(personaGreeting, "{{QUIZ_QUESTIONS}}") {
+			qbCtx, qbCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			qb, qbErr := livekit.FetchQuizBatch(qbCtx, lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC)
+			qbCancel()
+			if qbErr != nil {
+				// No batch = no scored quiz this session; Quizzy offers free chat.
+				// The session must never fail because the bank is unreachable.
+				logger.WarnCF("livekit", "Quiz batch fetch failed; scored quiz disabled this session", map[string]any{
+					"character":  characterName,
+					"device_mac": deviceMAC,
+					"error":      qbErr.Error(),
+				})
+			} else {
+				quizBatchForSession = qb
+				logger.InfoCF("livekit", "Quiz batch fetched", map[string]any{
+					"character": characterName,
+					"level":     qb.Level,
+					"band":      qb.Band,
+					"replay":    qb.Replay,
+					"questions": len(qb.Questions),
+				})
+			}
+		}
+
 		// Per-character ElevenLabs voice (ai_agent_template.elevenlabs_voice_id).
 		// Sarvam gets its per-character speaker from room metadata before the TTS
 		// client is built, but the ElevenLabs id only arrives with the persona pull
@@ -935,11 +963,17 @@ func main() {
 			voiceTemperature = *t
 		}
 		bridge, err := livekit.NewAgentBridge(livekit.AgentBridgeConfig{
-			Config:            sessionCfg,
-			Provider:          sessionProvider,
-			ModelID:           sessionModelID,
-			CharacterName:     characterName,
-			GreetingPrompt:    personaGreeting,
+			Config:         sessionCfg,
+			Provider:       sessionProvider,
+			ModelID:        sessionModelID,
+			CharacterName:  characterName,
+			GreetingPrompt: personaGreeting,
+			QuizBatch:      quizBatchForSession,
+			QuizAnswerReporter: livekit.NewQuizAnswerReporter(
+				lkCfg.ManagerAPI,
+				managerAPIServiceKey(),
+				deviceMAC,
+			),
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
 			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
