@@ -1346,7 +1346,10 @@ func (ab *AgentBridge) logToolArgsPreview(sessionKey string, args map[string]any
 func buildProactiveLLMOptions(base map[string]any) map[string]any {
 	out := cloneOptions(base)
 	if _, ok := out["max_tokens"]; !ok {
-		out["max_tokens"] = 220
+		// 220 truncated interactive-character greetings mid-MEMO (beat text
+		// ~120 tokens + state MEMO ~100 tokens); observed live twice. First-audio
+		// latency is unaffected by the cap — only the turn tail grows.
+		out["max_tokens"] = 380
 	}
 	if _, ok := out["temperature"]; !ok {
 		out["temperature"] = 0.4
