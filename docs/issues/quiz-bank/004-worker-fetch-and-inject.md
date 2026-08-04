@@ -1,6 +1,6 @@
 # 004 — Worker fetches the batch and injects {{QUIZ_QUESTIONS}}
 
-**Type:** AFK · **Status:** ready
+**Type:** AFK · **Status:** closed (dev-box E2E deferred to 006)
 **Spec / Plan:** as 001 (plan Tasks 5–6)
 **Repo:** picoclaw (branch `feat/quizzy-question-bank`)
 
@@ -30,4 +30,27 @@ Ask ONLY these questions, in order, one per turn. Never invent a question.
 
 ## Blocked by
 
-- 002 (endpoint must exist on the dev box)
+- 002 (endpoint must exist on the dev box) — closed
+
+## Resolution
+
+Shipped in `9c7369f` (picoclaw). Built in parallel with 002 against the frozen response
+contract; URL construction verified compatible afterwards (base already carries `/toy`).
+
+`pkg/livekit/quiz_bank.go` exports `QuizQuestion`, `QuizBatch`, `FetchQuizBatch`,
+`PostQuizAnswer`, `RenderQuizQuestions`, `NewQuizAnswerReporter` — HTTP shape copied from
+`doFetchManagerCharacterSession`. 12 table-driven tests: rendering (ids, alternates,
+replay framing, nil batch no-quiz text, placeholder-free passthrough) and fetching
+(envelope unwrap, string→int64 ids, unparseable id dropped, HTTP and envelope errors,
+empty MAC short-circuit). `go test ./pkg/livekit/` shows only the known pre-existing
+`TestSynthesizeAndPlayLogsTTSProviderType` failure.
+
+The fetch is gated on `strings.Contains(personaGreeting, "{{QUIZ_QUESTIONS}}")`, so
+Cheeko, Nani and every other character make no quiz call at all. Failure is warn-and-
+continue with a nil batch, which renders the explicit do-not-invent instruction.
+
+`NewQuizAnswerReporter` (one retry, then log-and-drop) is wired onto the bridge but
+unused until SUB-005. Dev-box deploy and live-session checks deferred to SUB-006.
+
+`go build ./...` fails only on `mautrix/crypto/libolm` (missing cgo headers on this
+Windows box) — reproduced on a stashed clean tree, not caused by this change.

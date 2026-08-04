@@ -1,6 +1,6 @@
 # 005 — Verdict reporting: MEMO q=/result= → answer log
 
-**Type:** AFK · **Status:** ready
+**Type:** AFK · **Status:** closed (dev-box E2E deferred to 006)
 **Spec / Plan:** as 001 (plan Task 7)
 **Repo:** picoclaw
 
@@ -25,4 +25,22 @@ Validation rules (the contract — from the grill session):
 
 ## Blocked by
 
-- 003 (answer endpoint), 004 (batch + reporter plumbing on the bridge)
+- 003 (answer endpoint), 004 (batch + reporter plumbing on the bridge) — both closed
+
+## Resolution
+
+Shipped in `4ecefab` (picoclaw). `parseQuizVerdict` covers all 18 table cases: valid
+correct/wrong/revealed, tolerated result casing, missing/empty/non-numeric `q`, missing
+or invalid `result`, unknown id with 2+ pending (reject), unknown id with exactly 1
+pending (corrected), unknown id with 0 pending (reject), duplicate (reject), `type=story`
+MEMO (never reports), missing type, nil batch, empty batch, nil reported map.
+
+**Concurrency fix beyond the plan:** the check-and-mark of `reportedQuizIDs` is guarded
+by a mutex. `runIterationWithProfile` is reachable from three concurrent call sites
+(conversation, proactive, async-tool continuation) and `sessionLLMLocks` only serialises
+per session key, so an unguarded map write could panic the worker. The lock covers only
+the pure parse, never the HTTP POST, which stays async so a voice turn is never blocked.
+
+`go test ./pkg/livekit/` shows only the known pre-existing
+`TestSynthesizeAndPlayLogsTTSProviderType` failure (re-confirmed by stashing).
+Live-session verification deferred to SUB-006.

@@ -1,6 +1,6 @@
 # 002 — Selection endpoint: GET /quiz/next-questions
 
-**Type:** AFK · **Status:** ready
+**Type:** AFK · **Status:** closed
 **Spec / Plan:** as 001 (plan Tasks 2–3, selection half)
 **Repo:** manager-api-node
 
@@ -29,4 +29,24 @@ Response: `{age_band, age_band_defaulted, language, level, replay, frontier_warn
 
 ## Blocked by
 
-- 001 (tables + seed content)
+- 001 (tables + seed content) — closed
+
+## Resolution
+
+Shipped in `5520e416` (manager-api-node). 18 pure-logic Jest tests green; full suite 367
+passing with only the known pre-existing `prisma-client-guard` failure. Verified by curl
+against dev DB2: 10 questions at level 1 with string ids; unknown MAC returns band `6-8`
+with `age_band_defaulted: true`; empty bank returns 200 with `level: null`; champion
+replay confirmed by clearing all 20 and backdating level-2 rows (replay follows
+`max(answered_at)`, not level order); a partially-cleared level returns only its
+remaining 7; missing `device_mac` returns 400; no service key returns 401.
+
+**Two integration facts the worker depends on** (both verified compatible with SUB-004):
+- The API mounts under base path `/toy`, so the real URL is `/toy/quiz/next-questions`.
+  The Go client appends to a base that already carries `/toy`, same as the working
+  character-session call.
+- Device MACs are stored upper-case; lookup normalises, and answer-row reads are
+  case-insensitive so clears match whatever case SUB-003 writes.
+
+`language` in the response reports the *effective* language questions came from (falls
+back to `en`), not the raw profile value. Not consumed by the worker.
