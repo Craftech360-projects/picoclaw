@@ -19,7 +19,7 @@ Prompt changes on the `quizzy` row (backup first, explicit column lists, show th
 ## Acceptance criteria
 
 - [ ] Prompt backup exists on the dev box; **user approved the diff** before the UPDATE ran
-- [ ] Live session on test device `00:16:3e-ac-b5-38` (child "Kishore"): transcript in `voice_session_messages` shows only seeded questions — zero invented scored questions; `quiz_question_answer` rows match the child's actual answers; `memory/state/daily_quiz.md` MEMOs carry `q=`/`result=`
+- [ ] Live session on test device `00:16:3e:ac:b5:38` (child "Kishore"): transcript in `voice_session_messages` shows only seeded questions — zero invented scored questions; `quiz_question_answer` rows match the child's actual answers; `memory/state/daily_quiz.md` MEMOs carry `q=`/`result=`
 - [ ] Failure path: with manager-api stopped, Quizzy offers free chat, invents no scored questions, writes no answer rows
 - [ ] Next-day check: partial level resumes with only uncleared questions; completing all ten → celebration, Bonus Buzz, second scored run refused
 - [ ] Deploy boundary respected: dev box only; prod promotion is a separate, user-granted decision
