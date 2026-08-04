@@ -93,24 +93,50 @@ func WriteQuizBankState(workspace string, batch *QuizBatch, now time.Time) error
 // the database on 2026-08-04. An empty asked-text is accepted: nothing to
 // check, and dropping real answers is worse than missing a guard.
 func questionTextMatchesBank(asked, bank string) bool {
-	askedWords := contentWords(asked)
-	bankWords := contentWords(bank)
-	if len(askedWords) == 0 || len(bankWords) == 0 {
+	if len(contentWords(asked)) == 0 || len(contentWords(bank)) == 0 {
 		return true
 	}
+	// One distinctive word is enough. The model paraphrases in its own
+	// vocabulary ("number of eyes" for "How many eyes do you have?"), so any
+	// share-of-the-words threshold drops real answers - two were lost live that
+	// way. An invented question shares nothing but filler, which is stripped.
+	// Mis-attribution is caught by verdictMatchesClaimedQuestion instead.
+	return wordOverlap(asked, bank) >= 1
+}
+
+// wordOverlap counts the distinctive words two texts share.
+func wordOverlap(asked, bank string) int {
+	bankWords := contentWords(bank)
 	overlap := 0
-	for word := range askedWords {
+	for word := range contentWords(asked) {
 		if bankWords[word] {
 			overlap++
 		}
 	}
-	// Asymmetric on purpose: the model is told to name the question "in a few
-	// plain words", so it abbreviates ("days in a week" for "How many days are
-	// there in one week?"). Requiring a share of the BANK's words rejected that
-	// valid answer live. What matters is that what it DID write belongs to the
-	// bank question; an invented question shares nothing but filler, which is
-	// stripped above.
-	return overlap*5 >= len(askedWords)*3
+	return overlap
+}
+
+// verdictMatchesClaimedQuestion reports whether scored_text identifies the
+// question the model claims it judged better than anything else in the batch.
+//
+// A single shared word is enough to prove the question was not invented, but
+// not that the right id was reported: two questions in one Level can both
+// mention "animal". Requiring the claimed question to be the strongest match
+// catches an id pointing at the wrong question without punishing paraphrase.
+func verdictMatchesClaimedQuestion(asked, claimedText string, batch *QuizBatch) bool {
+	if !questionTextMatchesBank(asked, claimedText) {
+		return false
+	}
+	if len(contentWords(asked)) == 0 || batch == nil {
+		return true
+	}
+	claimed := wordOverlap(asked, claimedText)
+	for _, question := range batch.Questions {
+		if wordOverlap(asked, question.Text) > claimed {
+			return false
+		}
+	}
+	return true
 }
 
 var quizFillerWords = map[string]bool{
@@ -232,7 +258,7 @@ func parseQuizVerdict(memo string, batch *QuizBatch, reported map[int64]bool) (i
 		// The id alone cannot show that the question actually ASKED was the one
 		// bearing it: four invented questions were logged against real bank ids
 		// before this check existed.
-		if !questionTextMatchesBank(scoredText, bankText) {
+		if !verdictMatchesClaimedQuestion(scoredText, bankText, batch) {
 			logger.WarnCF("livekit", "Quiz verdict does not match the bank question; dropped as invented", map[string]any{
 				"question_id":   id,
 				"bank_question":  bankText,

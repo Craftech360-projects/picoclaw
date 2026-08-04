@@ -396,3 +396,38 @@ func TestQuestionTextMatchesBank(t *testing.T) {
 		})
 	}
 }
+
+func TestQuestionTextMatchesBankAcceptsParaphrase(t *testing.T) {
+	// Live false negative: the model summarised in its own words, so "number"
+	// never appears in the bank text and a proportion rule dropped a real answer.
+	if !questionTextMatchesBank("number of eyes", "How many eyes do you have?") {
+		t.Error("a paraphrase sharing one distinctive word must be accepted")
+	}
+}
+
+func TestVerdictMatchesClaimedQuestion(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{
+		{ID: 1, Text: "Which animal says meow?"},
+		{ID: 2, Text: "Which animal has a long trunk?"},
+		{ID: 3, Text: "How many eyes do you have?"},
+	}}
+	cases := []struct {
+		name, asked, claimed string
+		want                 bool
+	}{
+		{"paraphrase of the claimed question", "number of eyes", "How many eyes do you have?", true},
+		{"exact claimed question", "Which animal says meow?", "Which animal says meow?", true},
+		{"invented question matches nothing", "king of the jungle", "How many eyes do you have?", false},
+		// Both questions mention "animal"; the reported id must be the better fit.
+		{"id points at the wrong question", "animal with a long trunk", "Which animal says meow?", false},
+		{"weak but unambiguous overlap", "the meow animal", "Which animal says meow?", true},
+		{"nothing to check", "", "How many eyes do you have?", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := verdictMatchesClaimedQuestion(c.asked, c.claimed, batch); got != c.want {
+				t.Errorf("verdictMatchesClaimedQuestion(%q, %q) = %v, want %v", c.asked, c.claimed, got, c.want)
+			}
+		})
+	}
+}
