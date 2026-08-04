@@ -827,16 +827,28 @@ func downloadWorkspaceFilesFastPath(
 	workspaceDir string,
 ) error {
 	startedAt := time.Now()
-	// Fast-path intentionally uses the compact legacy workspace-files payload
-	// to minimize room startup latency before first greeting.
-	err := downloadWorkspaceFilesLegacy(ctx, cfg, deviceMAC, workspaceDir)
-	// The restore may bring back a pre-file-era MEMORY.md from the manager,
+	// The compact legacy workspace-files payload carries only the five core
+	// files (verified against the manager: AGENT/USER/SOUL/HEARTBEAT/MEMORY),
+	// so runtime state — memory/state/*.md, the quiz scoreboard, story progress
+	// and the no-repeat ledgers — never landed before the greeting. It arrived
+	// only via the background full restore, which races the greeting and loses
+	// on a cold pod with an ephemeral workspace: the greeting then starts a new
+	// story instead of resuming the half-told one. The sync snapshot carries
+	// every file and measured faster than the legacy payload (~25ms vs ~110ms),
+	// so try it first and keep legacy as the fallback.
+	err := tryDownloadWorkspaceSync(ctx, cfg, deviceMAC, workspaceDir)
+	usedSyncSnapshot := err == nil
+	if err != nil {
+		err = downloadWorkspaceFilesLegacy(ctx, cfg, deviceMAC, workspaceDir)
+	}
+	// Either restore may bring back a pre-file-era MEMORY.md from the manager,
 	// re-adding the legacy quiz-state section after the bootstrap migration
 	// already ran — so migrate again on the restored copy.
 	livekit.MigrateLegacyQuizStateSection(workspaceDir)
 	logger.InfoCF("livekit", "workspace fast-path restore completed", map[string]any{
 		"device_mac":                     deviceMAC,
 		"workspace_restore_fast_path_ms": time.Since(startedAt).Milliseconds(),
+		"used_sync_snapshot":             usedSyncSnapshot,
 	})
 	return err
 }
