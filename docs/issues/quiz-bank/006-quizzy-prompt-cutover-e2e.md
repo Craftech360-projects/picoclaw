@@ -1,6 +1,7 @@
 # 006 — Quizzy prompt cutover + full E2E verification
 
-**Type:** HITL · **Status:** open — deployed and cut over; awaiting live-session verification
+**Type:** HITL · **Status:** closed 2026-08-05 — verified in live sessions; one criterion
+carried forward to [007](007-api-down-free-chat-path.md)
 **Spec / Plan:** as 001 (plan Tasks 8–9)
 **Repo:** none (dev DB `ai_agent_template` row + dev box verification)
 
@@ -20,10 +21,15 @@ Prompt changes on the `quizzy` row (backup first, explicit column lists, show th
 
 - [x] Prompt backup exists on the dev box (`/root/quizzy_prompts_20260804.bak`, 15970 bytes);
       **user approved the diff** 2026-08-04 before the UPDATE ran
-- [ ] Live session on test device `00:16:3e:ac:b5:38` (child "Kishore"): transcript in `voice_session_messages` shows only seeded questions — zero invented scored questions; `quiz_question_answer` rows match the child's actual answers; `memory/state/daily_quiz.md` MEMOs carry `q=`/`result=`
-- [ ] Failure path: with manager-api stopped, Quizzy offers free chat, invents no scored questions, writes no answer rows
-- [ ] Next-day check: partial level resumes with only uncleared questions; completing all ten → celebration, Bonus Buzz, second scored run refused
-- [ ] Deploy boundary respected: dev box only; prod promotion is a separate, user-granted decision
+- [x] Live session on test device `00:16:3e:ac:b5:38` (child "Kishore"): zero invented
+      scored questions across every session on 2026-08-05; `quiz_question_answer` rows match;
+      MEMOs carry the judged question and result
+- [ ] **Carried forward to 007** — Failure path: with manager-api stopped, Quizzy offers free
+      chat, invents no scored questions, writes no answer rows. Never exercised.
+- [x] Next-day check: resume verified, though by backdating rows rather than a real calendar
+      rollover (see below)
+- [x] Deploy boundary respected: dev box only. Prod was surveyed read-only on 2026-08-05;
+      nothing written. Promotion remains a separate, user-granted decision.
 
 ## Blocked by
 
@@ -80,3 +86,44 @@ near zero. Harmless; the value exists for a future flow that logs interim attemp
 **Remaining — needs a human at the device:** the live session, the API-down free-chat
 check, and tomorrow's resume check. Rollback if needed: restore from
 `/root/quizzy_prompts_20260804.bak` (CSV, explicit columns).
+
+## Closed 2026-08-05
+
+**The live session criterion passed.** Multiple real sessions on `00:16:3e:ac:b5:38` ran
+band 6-8 level 2 (ids 11–20) and level 3 (ids 102–111). Every scored question came from the
+bank — zero invented. Answer rows matched, and MEMOs carried the judged question and verdict.
+
+One defect surfaced and is worth recording because it is NOT the drift this ticket guarded
+against. Question 14 was answered **out of order** — the sequence logged was
+`12,13,15,16,17,18,19,20,14`. Cause: the turn that judged q14 died mid-stream (22.6s to first
+token, then a timeout with the fallback line), so no MEMO came back and no answer was posted.
+Quizzy moved on, and because `next-questions` recomputes Cleared from the log, q14 stayed
+uncleared and was re-served at the end. **The record ended correct** — the server being the
+source of truth is what saved it. But the child heard an apology instead of a verdict, then
+got the question again out of sequence. Root cause was LLM upstream latency, fixed separately
+(`5421d49`); the durable fix for lost-verdict reordering is proposed but unbuilt.
+
+**Field-name correction:** this ticket specifies MEMOs carrying `q=<id>`. The implemented
+field is `scored_q=` (with `scored_text=`), because verdict attribution is to the question
+just *judged*, not the one pending — reading the pending id logged every answer one question
+late. Anything written against `q=` will not match.
+
+**Next-day resume verified, with a caveat on method.** Rather than wait for a calendar
+rollover, answer rows were backdated one day. `14:C1:9F:D6:44:F4` cleared 3-5 level 1 and was
+correctly served level 2; Kishore cleared 6-8 level 2 and was served level 3. The day-gate was
+observed closing at `answered_today=10 → day_complete=true` and re-opening once rows moved.
+The mechanism is proven; the celebration / Bonus Buzz / refuse-second-run *dialogue* was not
+observed live with a child.
+
+**A bug this ticket's verification found.** `quiz_bank.md` was never being written for Quizzy
+at all — `WriteQuizBankState` sat in the non-quiz branch after a refactor, and worse, a
+Cheeko or Nani session on the same device actively deleted it. Fixed in `dccd90d`. This was
+the real mechanism behind "question drift after summarization": the state file that exists to
+survive compaction was absent.
+
+**Prod readiness note (read-only survey, 2026-08-05).** Prod has no quiz tables and the
+migration is unapplied; the `quiz_master` row exists but is **not** cut over. Of 55 devices,
+only 10 have a kid profile — the other 45 would default to band 6-8 regardless of the child's
+real age. Of the 10 profiled, **nine are band 3-5 and one is 6-8**, so the band with the most
+live validation serves the fewest real children. Promotion should not proceed until the
+unprofiled-device policy is decided and band 3-5 has end-to-end session coverage.
