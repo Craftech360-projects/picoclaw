@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -109,6 +110,21 @@ func (p *Provider) buildRequestBody(
 	requestBody := map[string]any{
 		"model":    model,
 		"messages": common.SerializeMessages(messages),
+	}
+
+	// OpenRouter fans one model slug out across upstreams whose latency differs
+	// by orders of magnitude. Measured against this exact 25k-char prompt on
+	// google/gemma-4-31b-it: DeepInfra warm 717ms / worst 1486ms, Parasail warm
+	// 1552ms but a 52,130ms outlier in six requests. Default routing weights
+	// price, so it will hand a child that 52s wait sooner or later. Pinning the
+	// order also keeps the prefix cache warm - each upstream caches separately,
+	// so bouncing between them wastes the byte-stable prompt prefix.
+	if order := openRouterProviderOrder(p.apiBase); len(order) > 0 {
+		requestBody["provider"] = map[string]any{
+			"order": order,
+			// Degrade rather than fail: a slow greeting beats no greeting.
+			"allow_fallbacks": true,
+		}
 	}
 
 	// When fallback uses a different provider (e.g. DeepSeek), that provider must not inject web_search_preview.
@@ -488,6 +504,28 @@ func parseToolArgsBestEffort(raw string) (map[string]any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// openRouterProviderOrder returns the pinned upstream order for OpenRouter
+// requests, or nil to leave routing alone.
+//
+// Env-driven rather than config: the right upstream changes as endpoints are
+// added and their performance drifts, and retuning it should not need a
+// rebuild and redeploy of the worker. Unset means OpenRouter's default routing,
+// so this is inert until someone opts in.
+//
+//	OPENROUTER_PROVIDER_ORDER="DeepInfra,Crusoe"
+func openRouterProviderOrder(apiBase string) []string {
+	if !strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(os.Getenv("OPENROUTER_PROVIDER_ORDER"), ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func isGeminiModelID(model string) bool {
