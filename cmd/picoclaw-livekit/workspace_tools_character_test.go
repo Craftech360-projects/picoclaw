@@ -1,0 +1,48 @@
+package main
+
+import "testing"
+
+// Both directions of this gate fail silently: Quizzy keeping its tools looks
+// like a normal session, and Cheeko losing them is an invisible capability
+// regression nobody notices until a child asks for the weather.
+func TestLiveKitCharacterToolGate(t *testing.T) {
+	tests := []struct {
+		character string
+		wantTools bool
+	}{
+		{"quizzy", false},
+		{"Quizzy", false}, // character name arrives from room metadata, casing not guaranteed
+		{" quizzy ", false},
+		{"cheeko", true},
+		{"Cheeko German", true},
+		{"nani", true},
+		{"", true},           // unknown character must keep tools, never silently lose them
+		{"quizmaster", true}, // near-miss must not match
+	}
+
+	for _, tt := range tests {
+		if got := liveKitCharacterUsesTools(tt.character); got != tt.wantTools {
+			t.Errorf("liveKitCharacterUsesTools(%q) = %v, want %v", tt.character, got, tt.wantTools)
+		}
+	}
+}
+
+// A toolless character must be denied at BOTH registration paths. The forced
+// path exists to rescue a misconfigured agent, and if it is not gated too it
+// hands back every tool the allowlist just refused.
+func TestToollessCharacterDeniedOnBothPaths(t *testing.T) {
+	for _, name := range liveKitVoiceAllowedTools {
+		if isLiveKitVoiceAllowedToolFor("quizzy", name) {
+			t.Errorf("quizzy was allowed tool %q via the allowlist path", name)
+		}
+		if !isLiveKitVoiceAllowedToolFor("cheeko", name) {
+			t.Errorf("cheeko was denied tool %q it should keep", name)
+		}
+	}
+
+	// nil instance is safe here only because a toolless character returns before
+	// touching it - which is itself the behaviour under test.
+	if added := ensureLiveKitVoiceToolsFor("quizzy", nil, nil, nil); added != nil {
+		t.Errorf("forced-tool path registered %v for quizzy, want none", added)
+	}
+}

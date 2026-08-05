@@ -940,7 +940,7 @@ func main() {
 
 		if defaultAgent := singleAgentRegistry.GetDefaultAgent(); defaultAgent != nil {
 			for _, toolName := range defaultAgent.Tools.List() {
-				if !isLiveKitVoiceAllowedTool(toolName) {
+				if !isLiveKitVoiceAllowedToolFor(characterName, toolName) {
 					continue
 				}
 				if t, ok := defaultAgent.Tools.Get(toolName); ok {
@@ -948,7 +948,7 @@ func main() {
 				}
 			}
 		}
-		if added := ensureLiveKitWorkspaceFileTools(agentInstance, &sessionCfg.Agents.Defaults, sessionCfg); len(added) > 0 {
+		if added := ensureLiveKitVoiceToolsFor(characterName, agentInstance, &sessionCfg.Agents.Defaults, sessionCfg); len(added) > 0 {
 			logger.WarnCF("livekit", "Forced required workspace file tools for LiveKit agent", map[string]any{
 				"room":               roomName,
 				"workspace_identity": workspaceIdentity,

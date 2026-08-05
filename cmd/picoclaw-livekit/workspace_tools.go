@@ -359,6 +359,65 @@ func liveKitVoiceToolAllowlist() []string {
 	return out
 }
 
+// liveKitToollessCharacters lists characters that get NO tools registered.
+//
+// Quizzy's persona says "Never call tools and never write tool-call syntax;
+// everything you need is already in your context" — and that is literally true.
+// State files reach it through ReadStateFiles, which injects memory/state/*.md
+// into the system prompt on every turn, and the MEMO scoreboard comes back as
+// plain text that quiz_state.go parses and persists. Neither direction touches
+// a tool, and tool_call_count is 0 on every observed turn.
+//
+// So the seven definitions were pure downside: a tool call mid-turn costs an
+// extra LLM round trip while a child waits, and leaked call syntax reaching TTS
+// has already muted an entire turn once.
+//
+// Kept as a literal rather than an env override on purpose: this codebase has a
+// documented history of `env:` tags with no reader (docs/issues/013), and the
+// character set changes rarely enough that editing this line is honest.
+var liveKitToollessCharacters = []string{"quizzy"}
+
+// liveKitCharacterUsesTools reports whether a character should have the voice
+// tool set registered. Unknown or empty characters keep tools — losing them is
+// a silent capability regression, so the default must be permissive.
+func liveKitCharacterUsesTools(character string) bool {
+	character = strings.TrimSpace(character)
+	if character == "" {
+		return true
+	}
+	for _, toolless := range liveKitToollessCharacters {
+		if strings.EqualFold(toolless, character) {
+			return false
+		}
+	}
+	return true
+}
+
+// isLiveKitVoiceAllowedToolFor is isLiveKitVoiceAllowedTool narrowed by
+// character: a toolless character allows nothing.
+func isLiveKitVoiceAllowedToolFor(character, name string) bool {
+	if !liveKitCharacterUsesTools(character) {
+		return false
+	}
+	return isLiveKitVoiceAllowedTool(name)
+}
+
+// ensureLiveKitVoiceToolsFor is ensureLiveKitWorkspaceFileTools gated by
+// character. The force-registration path exists so a misconfigured agent still
+// gets its workspace file tools; a toolless character must not be "rescued"
+// that way, or the tools it was denied above come straight back.
+func ensureLiveKitVoiceToolsFor(
+	character string,
+	agentInstance *agent.AgentInstance,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+) []string {
+	if !liveKitCharacterUsesTools(character) {
+		return nil
+	}
+	return ensureLiveKitWorkspaceFileTools(agentInstance, defaults, cfg)
+}
+
 func isLiveKitVoiceAllowedTool(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
