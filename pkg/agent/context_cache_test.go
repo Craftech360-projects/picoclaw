@@ -263,13 +263,6 @@ func TestMtimeAutoInvalidation(t *testing.T) {
 			contentV2:  "# Updated Agent",
 			checkField: "Updated Agent",
 		},
-		{
-			name:       "memory file change",
-			file:       "memory/MEMORY.md",
-			contentV1:  "# Memory\nUser likes Go.",
-			contentV2:  "# Memory\nUser likes Rust.",
-			checkField: "User likes Rust",
-		},
 	}
 
 	for _, tt := range tests {
@@ -402,12 +395,6 @@ func TestNewFileCreationInvalidatesCache(t *testing.T) {
 			file:       "SOUL.md",
 			content:    "# Soul\nBe kind and helpful.",
 			checkField: "Be kind and helpful",
-		},
-		{
-			name:       "new memory file",
-			file:       "memory/MEMORY.md",
-			content:    "# Memory\nUser prefers dark mode.",
-			checkField: "User prefers dark mode",
 		},
 	}
 
@@ -783,5 +770,29 @@ func BenchmarkBuildMessagesWithCache(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cb.BuildMessages(history, "summary", "new message", nil, "cli", "test", "", "")
+	}
+}
+
+// Memory deliberately does NOT invalidate the static cache anymore: it moved
+// to the per-request dynamic context (state files rewrite every turn, and
+// invalidating the prefix each turn defeated provider KV caching). Changes
+// must surface through the dynamic context instead.
+func TestMemoryWritesDoNotChurnStaticCache(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{"memory/MEMORY.md": "# Memory -- User likes Go."})
+	defer os.RemoveAll(tmpDir)
+
+	cb := NewContextBuilder(tmpDir)
+	sp1 := cb.BuildSystemPromptWithCache()
+
+	fullPath := filepath.Join(tmpDir, "memory", "MEMORY.md")
+	os.WriteFile(fullPath, []byte("# Memory -- User likes Rust."), 0o644)
+	future := time.Now().Add(2 * time.Second)
+	os.Chtimes(fullPath, future, future)
+
+	if sp2 := cb.BuildSystemPromptWithCache(); sp2 != sp1 {
+		t.Fatal("memory writes must not rebuild the static prompt")
+	}
+	if dyn := cb.buildDynamicContext("", "", "", ""); !strings.Contains(dyn, "User likes Rust") {
+		t.Fatalf("memory change must surface in the dynamic context, got: %s", dyn)
 	}
 }

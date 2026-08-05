@@ -157,11 +157,12 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 %s`, skillsSummary))
 	}
 
-	// Memory context
-	memoryContext := cb.memory.GetMemoryContext()
-	if memoryContext != "" {
-		parts = append(parts, "# Memory\n\n"+memoryContext)
-	}
+	// Memory (long-term, Saved State, daily notes) deliberately does NOT live
+	// here: state files rewrite every turn, so having them in this block gave
+	// the provider a different cache prefix on every request and KV cache
+	// reuse never happened (observed: static_chars drifting 38395->39059
+	// turn-by-turn, greeting TTFT up to 26s). Memory is appended to the
+	// per-request dynamic context instead - same content, stable prefix.
 
 	// Multi-Message Sending (if enabled)
 	if cb.splitOnMarker {
@@ -234,24 +235,12 @@ func (cb *ContextBuilder) InvalidateCache() {
 }
 
 // sourcePaths returns non-skill workspace source files tracked for cache
-// invalidation (bootstrap files + memory). Skill roots are handled separately
-// because they require both directory-level and recursive file-level checks.
+// invalidation (bootstrap files only). Memory and state files are NOT tracked:
+// they moved out of the static prompt into the per-request dynamic context and
+// are re-read fresh each turn, so their writes must not churn this cache.
 func (cb *ContextBuilder) sourcePaths() []string {
 	agentDefinition := cb.LoadAgentDefinition()
-	paths := agentDefinition.trackedPaths(cb.workspace)
-	paths = append(paths, filepath.Join(cb.workspace, "memory", "MEMORY.md"))
-	// Runtime state files (quiz scoreboard, story progress) change mid-session;
-	// track the dir plus each file so a write invalidates the prompt cache.
-	stateDir := filepath.Join(cb.workspace, "memory", "state")
-	paths = append(paths, stateDir)
-	if entries, err := os.ReadDir(stateDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				paths = append(paths, filepath.Join(stateDir, e.Name()))
-			}
-		}
-	}
-	return uniquePaths(paths)
+	return uniquePaths(agentDefinition.trackedPaths(cb.workspace))
 }
 
 // skillRoots returns all skill root directories that can affect
@@ -602,6 +591,15 @@ func (cb *ContextBuilder) buildDynamicContext(channel, chatID, senderID, senderD
 	}
 	if profile := cb.currentUserProfileSummary(); profile != "" {
 		fmt.Fprintf(&sb, "\n\n## Current User Profile\n%s", profile)
+	}
+
+	// Per-device, per-turn memory. Lives here (not in the cached static block)
+	// so the static prefix stays byte-stable across turns; being last also
+	// puts today's Saved State closest to generation, where attention is
+	// strongest.
+	if memoryContext := cb.memory.GetMemoryContext(); memoryContext != "" {
+		sb.WriteString("\n\n---\n\n# Memory\n\n")
+		sb.WriteString(memoryContext)
 	}
 
 	return sb.String()

@@ -615,6 +615,25 @@ func main() {
 			"character":    characterName,
 			"character_id": characterID,
 		})
+		// Start the quiz-batch fetch now so it overlaps the persona pull below;
+		// it needs only the device MAC. The buffered channel means the goroutine
+		// never leaks even when nobody reads the result.
+		quizFetchCh := make(chan *livekit.QuizBatch, 1)
+		quizFetchCtx, quizFetchCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		go func() {
+			defer quizFetchCancel()
+			qb, err := livekit.FetchQuizBatch(quizFetchCtx, lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC)
+			if err != nil {
+				logger.DebugCF("livekit", "Speculative quiz batch fetch did not complete", map[string]any{
+					"device_mac": deviceMAC,
+					"error":      err.Error(),
+				})
+				quizFetchCh <- nil
+				return
+			}
+			quizFetchCh <- qb
+		}()
+
 		parentRuleFromMeta := strings.TrimSpace(bootstrap.Metadata.ChildProfile.ParentRule)
 		logger.DebugCF("livekit", "Parent rule from room metadata", map[string]any{
 			"present":     parentRuleFromMeta != "",
@@ -665,20 +684,20 @@ func main() {
 		}
 
 		// Scored quiz questions come from the curated bank, not the LLM (ADR-0005).
-		// Character-agnostic gate: only personas whose greeting carries the
-		// placeholder pay for the call, so Cheeko/Nani never hit the endpoint.
+		// The fetch depends only on the device MAC, so it was started before the
+		// persona pull (quizFetchCh below) and runs in parallel with it; the
+		// result is only consumed when the greeting carries the placeholder, so
+		// Cheeko/Nani sessions just discard one small speculative GET instead of
+		// serialising two HTTP round-trips at session start.
 		var quizBatchForSession *livekit.QuizBatch
 		if strings.Contains(personaGreeting, "{{QUIZ_QUESTIONS}}") {
-			qbCtx, qbCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			qb, qbErr := livekit.FetchQuizBatch(qbCtx, lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC)
-			qbCancel()
-			if qbErr != nil {
+			qb := <-quizFetchCh
+			if qb == nil {
 				// No batch = no scored quiz this session; Quizzy offers free chat.
 				// The session must never fail because the bank is unreachable.
 				logger.WarnCF("livekit", "Quiz batch fetch failed; scored quiz disabled this session", map[string]any{
 					"character":  characterName,
 					"device_mac": deviceMAC,
-					"error":      qbErr.Error(),
 				})
 			} else {
 				quizBatchForSession = qb
@@ -690,6 +709,8 @@ func main() {
 					"questions": len(qb.Questions),
 				})
 			}
+		} else {
+			quizFetchCancel() // abort the speculative fetch; nobody will read it
 			// The batch also goes to memory/state/, which ReadStateFiles re-injects
 			// into the system prompt every turn. A greeting message alone does not
 			// survive history compaction: on 2026-08-04 history collapsed 24 -> 8

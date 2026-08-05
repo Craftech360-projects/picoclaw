@@ -129,10 +129,60 @@ func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
 	return sb.String()
 }
 
+// promptSessionSummaryCap bounds how many "## Session Summaries" bullets reach
+// the prompt. MEMORY.md grows without bound (one device reached 39K chars), and
+// every extra char is re-processed by the LLM on every turn. The file itself is
+// never truncated - only the prompt view is capped.
+const promptSessionSummaryCap = 10
+
+// capSessionSummaries keeps only the newest max bullets of a literal
+// "## Session Summaries" section, leaving everything else byte-identical.
+// Content without that section passes through untouched.
+func capSessionSummaries(content string, max int) string {
+	lines := strings.Split(content, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "## Session Summaries" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return content
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "## ") {
+			end = i
+			break
+		}
+	}
+	var bullets []int
+	for i := start + 1; i < end; i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "- ") {
+			bullets = append(bullets, i)
+		}
+	}
+	if len(bullets) <= max {
+		return content
+	}
+	drop := make(map[int]bool, len(bullets)-max)
+	for _, idx := range bullets[:len(bullets)-max] {
+		drop[idx] = true
+	}
+	kept := lines[:0:0]
+	for i, line := range lines {
+		if !drop[i] {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 // GetMemoryContext returns formatted memory context for the agent prompt.
 // Includes long-term memory, saved runtime state files, and recent daily notes.
 func (ms *MemoryStore) GetMemoryContext() string {
-	longTerm := ms.ReadLongTerm()
+	longTerm := capSessionSummaries(ms.ReadLongTerm(), promptSessionSummaryCap)
 	stateFiles := ms.ReadStateFiles()
 	recentNotes := ms.GetRecentDailyNotes(3)
 
