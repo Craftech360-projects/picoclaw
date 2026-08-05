@@ -296,6 +296,7 @@ func parseStreamResponse(
 	var textContent strings.Builder
 	var finishReason string
 	var usage *UsageInfo
+	var routedProvider string
 
 	// Tool call assembly: OpenAI streams tool calls as incremental deltas
 	type toolAccum struct {
@@ -345,10 +346,19 @@ func parseStreamResponse(
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *UsageInfo `json:"usage"`
+			// OpenRouter names the upstream it routed to on every chunk. The same
+			// model slug fans out across endpoints whose TTFT differs by ~20x, so
+			// without this the slow turns are indistinguishable from the fast ones.
+			Provider string `json:"provider"`
 		}
 
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue // skip malformed chunks
+		}
+
+		if chunk.Provider != "" && chunk.Provider != routedProvider {
+			routedProvider = chunk.Provider
+			log.Printf("openai_compat stream: routed to upstream provider %q", routedProvider)
 		}
 
 		if chunk.Usage != nil {
