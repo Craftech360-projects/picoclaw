@@ -709,8 +709,6 @@ func main() {
 					"questions": len(qb.Questions),
 				})
 			}
-		} else {
-			quizFetchCancel() // abort the speculative fetch; nobody will read it
 			// The batch also goes to memory/state/, which ReadStateFiles re-injects
 			// into the system prompt every turn. A greeting message alone does not
 			// survive history compaction: on 2026-08-04 history collapsed 24 -> 8
@@ -722,6 +720,8 @@ func main() {
 					"error":      err.Error(),
 				})
 			}
+		} else {
+			quizFetchCancel() // abort the speculative fetch; nobody will read it
 		}
 
 		// Per-character ElevenLabs voice (ai_agent_template.elevenlabs_voice_id).
