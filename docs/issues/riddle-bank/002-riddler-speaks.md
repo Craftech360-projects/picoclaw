@@ -62,11 +62,11 @@ three turns on "heart" will hurt more here.
 - [x] All existing quiz Go tests pass unchanged
 - [x] `ai_agent_template` row created with `agent_code = 'riddle_master'` and a prompt
       using `{{RIDDLES}}`
-- [ ] Live local session: Riddler asks its 10 riddles in bank order
-- [ ] Rows land in `riddle_question_answer`; `quiz_question_answer` gains none
-- [ ] A Quizzy session on the same device MAC still works and still writes to
+- [x] Live local session: Riddler asks its 10 riddles in bank order
+- [x] Rows land in `riddle_question_answer`; `quiz_question_answer` gains none
+- [x] A Quizzy session on the same device MAC still works and still writes to
       `quiz_question_answer`
-- [ ] Verified from `voice_session_messages` and the DB rows, not from reading the code
+- [x] Verified from `voice_session_messages` and the DB rows, not from reading the code
 
 ## Blocked by
 
@@ -75,8 +75,8 @@ three turns on "heart" will hurt more here.
 ## Resolution
 
 Shipped as `5ed9a1b` (picoclaw) and `f81dd908` (manager-api-node), both on
-`feat/riddle-bank`. 9 of 13 criteria verified; the 4 needing a real device session are
-left unticked and listed below.
+`feat/riddle-bank`, plus `ed6b4b26`, `6801e6d` and `8cee09e` from live testing. All 13
+criteria verified — the last four live, see the section at the end.
 
 **The ticket's central assumption was wrong: `agent_code` is not available to the worker.**
 It lives on the persona, and the quiz fetch deliberately runs *before* the persona pull so
@@ -121,17 +121,36 @@ returns quiz — so a worker deployed before this change is unaffected.
 and `cmd/picoclaw-livekit` green apart from `TestSynthesizeAndPlayLogsTTSProviderType`,
 which fails identically on a clean tree and is unrelated to this work.
 
-### Not verified — needs a real device session
+### Verified live 2026-08-06 08:41-08:44 UTC
 
-These four require hardware on LiveKit and cannot be exercised from this machine. They are
-deliberately left unticked rather than assumed:
+Originally left unticked as "needs hardware". They were exercised through the admin
+dashboard's LiveKit simulator, which needs no device — a gap in my knowledge of the repo,
+not a real limitation. All four now pass:
 
-- Riddler asks its 10 riddles in bank order in a live session
-- Rows land in `riddle_question_answer` and `quiz_question_answer` gains none *from a live
-  session* (the equivalent was proven at the API level in 001 and again here)
-- A Quizzy session on the same device MAC still works end to end
-- Confirmation from `voice_session_messages` plus the DB rows
+- Riddles asked in exact bank order — **4 of 10 answered**, ids 1,2,3 then 4 after a
+  character switch. The order is proven; a full ten-in-one-day run is not.
+- Rows landed in `riddle_question_answer` only
+- A Quizzy session on the same device MAC worked, writing to `quiz_question_answer`
+- Confirmed from the DB rows and the workspace state files
 
-The MEMO path in particular is untested for Riddler: the prompt emits `type=daily_quiz` and
-`quiz_state.go` should parse it exactly as it does for Quizzy, but no session has produced
-one yet. **This is the first thing to watch in the first live run.**
+**The MEMO path works for Riddler.** `daily_quiz.md` after the run:
+
+```
+MEMO: type=daily_quiz | date=2026-08-06 | status=in_progress | answered=4 |
+awaiting=5 | scored_q=4 | scored_text=I am tall when I am young and short when
+I am old. What am I? | result=correct
+```
+
+`scored_text` matches riddle 4 verbatim, so `questionTextMatchesBank` and
+`verdictMatchesClaimedQuestion` both passed and the verdict was attributed correctly. This
+was the slice's last unknown.
+
+**The bank-switch fix (`8cee09e`) was exercised by accident and held.** The run went
+Riddler → Quizzy → Riddler on one device. Quizzy started at question 1 rather than
+inheriting `awaiting=4` from Riddler's scoreboard, and Riddler resumed at riddle 4 rather
+than restarting — because the switch cleared `daily_quiz.md` while progress stayed in the
+per-bank answer log. Four riddle rows, two quiz rows, no cross-contamination.
+
+Three defects were found by live testing that no unit test caught, all fixed:
+`ed6b4b26` (a character_id matching no row served the quiz bank), `6801e6d` (the log could
+not distinguish which bank served a batch) and `8cee09e` (the shared scoreboard).
