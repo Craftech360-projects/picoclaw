@@ -55,6 +55,28 @@ func stateDir(workspace string) string {
 // while still numbering it correctly from the surviving scoreboard.
 const quizBankStateFile = "quiz_bank.md"
 
+// quizMemoStateFile is the MEMO scoreboard, written from the memo's own
+// type= field. Both Quizzy and Riddler emit type=daily_quiz — deliberately,
+// since that literal is what the parser matches — so they share this one file.
+const quizMemoStateFile = "daily_quiz.md"
+
+var quizBankBankRE = regexp.MustCompile(`(?i)\bbank\s*=\s*([a-z_]+)`)
+
+// previousBank reads which bank last wrote the bank state file.
+//
+// Files written before banks existed carry no bank=; quiz was the only bank
+// then, so that is what they are treated as.
+func previousBank(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "" // no prior session; nothing to switch away from
+	}
+	if m := quizBankBankRE.FindStringSubmatch(string(data)); m != nil {
+		return strings.ToLower(m[1])
+	}
+	return "quiz"
+}
+
 // WriteQuizBankState persists the session's curated questions so they survive
 // history compaction and cold restarts. A nil or empty batch REMOVES the file:
 // serving yesterday's list would let a child be asked questions the server
@@ -70,15 +92,33 @@ func WriteQuizBankState(workspace string, batch *QuizBatch, now time.Time) error
 		}
 		return nil
 	}
+	// A child who leaves Riddler mid-game and opens Quizzy shares one workspace.
+	// This file is overwritten below so it self-heals, but the MEMO scoreboard is
+	// written only when a MEMO is parsed and would otherwise survive the switch —
+	// and since both characters emit type=daily_quiz, Quizzy would read Riddler's
+	// "answered=3 | awaiting=<riddle id>" as its own and resume at the wrong
+	// question. Progress itself is safe: it lives in the answer log, per bank.
+	bank := strings.ToLower(strings.TrimSpace(batch.Bank))
+	if prev := previousBank(path); prev != "" && bank != "" && prev != bank {
+		if err := os.Remove(filepath.Join(stateDir(workspace), quizMemoStateFile)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		logger.InfoCF("livekit", "Bank changed; cleared the previous bank's scoreboard", map[string]any{
+			"previous_bank": prev,
+			"bank":          bank,
+		})
+	}
+
 	if err := os.MkdirAll(stateDir(workspace), 0o755); err != nil {
 		return err
 	}
 
 	var sb strings.Builder
 	// The date= is what PruneStaleStateFiles matches on; without it the file is
-	// kept forever (prune is fail-open on unparseable dates).
-	fmt.Fprintf(&sb, "QUIZ_BANK: type=quiz_bank | date=%s | level=%d | band=%s | replay=%t\n\n",
-		now.Format("2006-01-02"), batch.Level, batch.Band, batch.Replay)
+	// kept forever (prune is fail-open on unparseable dates). bank= is what
+	// previousBank reads back to detect a switch.
+	fmt.Fprintf(&sb, "QUIZ_BANK: type=quiz_bank | date=%s | bank=%s | level=%d | band=%s | replay=%t\n\n",
+		now.Format("2006-01-02"), bank, batch.Level, batch.Band, batch.Replay)
 	sb.WriteString(RenderQuizQuestions("{{QUIZ_QUESTIONS}}", batch))
 	sb.WriteString("\n")
 	return os.WriteFile(path, []byte(sb.String()), 0o600)

@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 )
@@ -207,5 +210,102 @@ func TestPromptWantsQuizBatch(t *testing.T) {
 				t.Errorf("PromptWantsQuizBatch(%q) = %v, want %v", tc.prompt, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Bank switching -----------------------------------------------------------
+
+// A child who abandons Riddler mid-game and opens Quizzy shares one workspace.
+// quiz_bank.md is overwritten at session start so it self-heals, but the MEMO
+// scoreboard daily_quiz.md is written only when a MEMO is parsed and would
+// survive the switch. Both characters emit type=daily_quiz, so Quizzy would read
+// Riddler's "answered=3 | awaiting=<riddle id>" as its own and resume at the
+// wrong question.
+func TestWriteQuizBankStateClearsScoreboardWhenBankChanges(t *testing.T) {
+	ws := t.TempDir()
+	memo := filepath.Join(stateDir(ws), "daily_quiz.md")
+	now := time.Date(2026, 8, 6, 9, 0, 0, 0, time.UTC)
+
+	riddles := &QuizBatch{Bank: "riddle", Level: 1, Band: "6-8", Questions: []QuizQuestion{
+		{ID: 1, Text: "I have hands but cannot clap. What am I?", Answer: "a clock"},
+	}}
+	quiz := &QuizBatch{Bank: "quiz", Level: 1, Band: "6-8", Questions: []QuizQuestion{
+		{ID: 1, Text: "How many legs does a spider have?", Answer: "eight"},
+	}}
+
+	if err := WriteQuizBankState(ws, riddles, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(memo, []byte("MEMO: type=daily_quiz | date=2026-08-06 | answered=3 | awaiting=4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same bank again: mid-game resume must still work.
+	if err := WriteQuizBankState(ws, riddles, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(memo); err != nil {
+		t.Fatal("same-bank session must keep the scoreboard; resume depends on it")
+	}
+
+	// Switching banks: the other game's scoreboard must not be inherited.
+	if err := WriteQuizBankState(ws, quiz, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(memo); !os.IsNotExist(err) {
+		t.Error("switching banks must clear the previous bank's scoreboard")
+	}
+}
+
+func TestWriteQuizBankStateRecordsWhichBankPlayed(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Date(2026, 8, 6, 9, 0, 0, 0, time.UTC)
+	batch := &QuizBatch{Bank: "riddle", Level: 1, Questions: []QuizQuestion{{ID: 1, Text: "Q?", Answer: "A"}}}
+
+	if err := WriteQuizBankState(ws, batch, now); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir(ws), quizBankStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The header is the only record of which bank last played; the switch
+	// detection above reads it back.
+	if !strings.Contains(string(data), "bank=riddle") {
+		t.Errorf("bank not recorded in the header:\n%s", data)
+	}
+}
+
+func TestWriteQuizBankStateTreatsAMissingBankAsQuiz(t *testing.T) {
+	// Files written before banks existed carry no bank=. Quiz was the only bank
+	// then, so a riddle session must still clear their scoreboard.
+	ws := t.TempDir()
+	now := time.Date(2026, 8, 6, 9, 0, 0, 0, time.UTC)
+	if err := os.MkdirAll(stateDir(ws), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "QUIZ_BANK: type=quiz_bank | date=2026-08-05 | level=1 | band=6-8 | replay=false\n\nold\n"
+	if err := os.WriteFile(filepath.Join(stateDir(ws), quizBankStateFile), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	memo := filepath.Join(stateDir(ws), "daily_quiz.md")
+	if err := os.WriteFile(memo, []byte("MEMO: type=daily_quiz | date=2026-08-06"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	riddles := &QuizBatch{Bank: "riddle", Level: 1, Questions: []QuizQuestion{{ID: 1, Text: "Q?", Answer: "A"}}}
+	if err := WriteQuizBankState(ws, riddles, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(memo); !os.IsNotExist(err) {
+		t.Error("a legacy bank-less file must be treated as quiz and its scoreboard cleared")
+	}
+}
+
+func TestWriteQuizBankStateFirstEverSessionIsNotAnError(t *testing.T) {
+	ws := t.TempDir()
+	batch := &QuizBatch{Bank: "riddle", Level: 1, Questions: []QuizQuestion{{ID: 1, Text: "Q?", Answer: "A"}}}
+	if err := WriteQuizBankState(ws, batch, time.Now()); err != nil {
+		t.Fatalf("no prior state must not error: %v", err)
 	}
 }
