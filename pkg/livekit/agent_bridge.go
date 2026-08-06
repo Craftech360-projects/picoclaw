@@ -707,8 +707,11 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		"session":        sessionKey,
 		"character":      ab.characterName,
 		"profile":        profile,
+		// No "provider" field: it was the model slug's leading segment, which on an
+		// OpenRouter slug is the model's AUTHOR (google/gemma-4-31b-it:deepinfra
+		// logged provider=google while every byte went to openrouter.ai). The
+		// endpoint is not known here, and model_id already carries the prefix.
 		"model_id":       ab.modelID,
-		"provider":       modelProtocol(ab.modelID),
 		"messages":       len(messages),
 		"tools":          len(toolDefs),
 		"max_tokens":     llmOptionValue(llmOpts, "max_tokens"),
@@ -1297,18 +1300,6 @@ func optionInt(v any) int {
 	default:
 		return 0
 	}
-}
-
-func modelProtocol(modelID string) string {
-	trimmed := strings.TrimSpace(modelID)
-	if trimmed == "" {
-		return ""
-	}
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) < 2 {
-		return "unknown"
-	}
-	return strings.ToLower(parts[0])
 }
 
 func trimForLog(content string, limit int) string {
