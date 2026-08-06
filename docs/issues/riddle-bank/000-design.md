@@ -31,8 +31,8 @@ The worker never learns what a riddle is. It passes the character through and ec
 whichever bank the API says it got.
 
 ```
-GET /quiz/next-questions?device_mac=X&character=riddler
-    -> bank router: character -> 'riddle'
+GET /quiz/next-questions?device_mac=X&character=riddle_master
+    -> bank router: agent_code -> 'riddle'
     -> batch (unchanged shape) + "bank": "riddle"
 
 POST /quiz/answer { device_mac, question_id, result, bank: "riddle" }
@@ -59,8 +59,10 @@ Three touch points, all small:
 1. `quiz_bank.go` — `{{RIDDLES}}` recognised as an alias of `{{QUIZ_QUESTIONS}}`; `FetchQuizBatch`
    takes the character and appends `&character=`; `QuizBatch` gains a `Bank` field.
 2. `quiz_state.go` — the answer reporter sends `bank` on the POST.
-3. `main.go` — pass `characterName` (already in scope at the speculative-fetch site, line ~615)
-   into `FetchQuizBatch`.
+3. `main.go` — pass the character's **`agent_code`** into `FetchQuizBatch` at the
+   speculative-fetch site (line ~615). Not the display name: `agent_code` is the join key
+   everywhere else, and `characterName` there is the display name. Confirm which value that
+   variable actually holds before wiring it.
 
 The fetch stays speculative and still cancels at line ~724 when the resolved prompt has no
 placeholder.
