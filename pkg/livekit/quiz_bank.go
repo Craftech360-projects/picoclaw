@@ -25,6 +25,11 @@ import (
 
 const quizQuestionsPlaceholder = "{{QUIZ_QUESTIONS}}"
 
+// riddlesPlaceholder is an alias, not a second mechanism: Riddler plays the
+// identical game against a different bank, and its prompt reads wrong asking for
+// "quiz questions". Both substitute the same block.
+const riddlesPlaceholder = "{{RIDDLES}}"
+
 // QuizQuestion is one curated question as served by GET /quiz/next-questions.
 // The API sends ids as strings (Postgres bigint); ID is the parsed form and is
 // what the MEMO channel validates verdicts against.
@@ -47,6 +52,10 @@ type QuizBatch struct {
 	// transcripts kept telling it "the Daily Ten is complete" on a fresh day.
 	AnsweredToday int  `json:"answered_today"`
 	DayComplete   bool `json:"day_complete"`
+	// Bank is echoed by the API so the verdict can be logged against the same
+	// bank the questions came from. The worker never decides this and never
+	// needs to know what the value means.
+	Bank string `json:"bank"`
 }
 
 // managerQuizBaseURL resolves the Manager API base the same way the persona pull
@@ -92,13 +101,27 @@ func FetchQuizBatch(
 	cfg config.LiveKitServiceManagerAPIConfig,
 	serviceKey string,
 	deviceMac string,
+	characterID string,
+	characterName string,
 ) (*QuizBatch, error) {
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" {
 		return nil, fmt.Errorf("device mac is empty")
 	}
 
+	// The character selects the bank, but the worker cannot name it: agent_code
+	// lives on the persona, and this fetch deliberately runs BEFORE the persona
+	// pull so the two overlap. Room metadata carries only the id and the display
+	// name, so both go out and the API resolves them. Empty values are omitted —
+	// a blank character_id= would be resolved as a real (missing) id rather than
+	// falling through to the quiz bank.
 	endpoint := managerQuizBaseURL(cfg) + "/quiz/next-questions?device_mac=" + url.QueryEscape(deviceMac)
+	if id := strings.TrimSpace(characterID); id != "" {
+		endpoint += "&character_id=" + url.QueryEscape(id)
+	}
+	if name := strings.TrimSpace(characterName); name != "" {
+		endpoint += "&character=" + url.QueryEscape(name)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -160,17 +183,26 @@ func PostQuizAnswer(
 	deviceMac string,
 	questionID int64,
 	result string,
+	bank string,
 ) error {
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" {
 		return fmt.Errorf("device mac is empty")
 	}
 
-	payload, err := json.Marshal(map[string]string{
+	fields := map[string]string{
 		"device_mac":  deviceMac,
 		"question_id": strconv.FormatInt(questionID, 10),
 		"result":      result,
-	})
+	}
+	// Omitted rather than sent blank: the API rejects an unrecognised bank, and
+	// "" is not one of its names. No bank means the quiz default, which is what
+	// every caller before this change sent.
+	if bank = strings.TrimSpace(bank); bank != "" {
+		fields["bank"] = bank
+	}
+
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return err
 	}
@@ -210,16 +242,18 @@ func NewQuizAnswerReporter(
 	cfg config.LiveKitServiceManagerAPIConfig,
 	serviceKey string,
 	deviceMac string,
+	bank string,
 ) func(questionID int64, result string) {
 	return func(questionID int64, result string) {
 		for attempt := 1; attempt <= 2; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err := PostQuizAnswer(ctx, cfg, serviceKey, deviceMac, questionID, result)
+			err := PostQuizAnswer(ctx, cfg, serviceKey, deviceMac, questionID, result, bank)
 			cancel()
 			if err == nil {
 				logger.DebugCF("livekit", "Quiz answer reported", map[string]any{
 					"question_id": questionID,
 					"result":      result,
+					"bank":        bank,
 				})
 				return
 			}
@@ -227,6 +261,7 @@ func NewQuizAnswerReporter(
 				logger.WarnCF("livekit", "Quiz answer report failed; dropping", map[string]any{
 					"question_id": questionID,
 					"result":      result,
+					"bank":        bank,
 					"error":       err.Error(),
 				})
 				return
@@ -240,11 +275,25 @@ func NewQuizAnswerReporter(
 // prompt. Prompts without the placeholder (Cheeko, Nani, ...) come back
 // untouched. A nil or empty batch replaces the placeholder with an explicit
 // no-quiz instruction — the LLM may invent unscored content only.
+// PromptWantsQuizBatch reports whether a greeting carries either bank
+// placeholder, and is therefore a character the batch must be fetched for.
+//
+// Callers MUST use this rather than testing for a placeholder themselves. main.go
+// used to hardcode "{{QUIZ_QUESTIONS}}", so adding {{RIDDLES}} silently sent every
+// Riddler session down the no-quiz branch: batch discarded, bank state file never
+// written, and the child told the bank was unavailable.
+func PromptWantsQuizBatch(prompt string) bool {
+	return strings.Contains(prompt, quizQuestionsPlaceholder) ||
+		strings.Contains(prompt, riddlesPlaceholder)
+}
+
 func RenderQuizQuestions(prompt string, batch *QuizBatch) string {
-	if !strings.Contains(prompt, quizQuestionsPlaceholder) {
+	if !PromptWantsQuizBatch(prompt) {
 		return prompt
 	}
-	return strings.ReplaceAll(prompt, quizQuestionsPlaceholder, quizQuestionsBlock(batch))
+	block := quizQuestionsBlock(batch)
+	prompt = strings.ReplaceAll(prompt, quizQuestionsPlaceholder, block)
+	return strings.ReplaceAll(prompt, riddlesPlaceholder, block)
 }
 
 func quizQuestionsBlock(batch *QuizBatch) string {

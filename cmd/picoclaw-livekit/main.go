@@ -622,7 +622,14 @@ func main() {
 		quizFetchCtx, quizFetchCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		go func() {
 			defer quizFetchCancel()
-			qb, err := livekit.FetchQuizBatch(quizFetchCtx, lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC)
+			// characterName here is the DISPLAY name ("Cheeko", "Bheem"), not
+			// agent_code — room metadata carries no agent_code, and the persona
+			// pull that would know it has not run yet. Both identifiers go out
+			// and the Manager API resolves whichever it can.
+			qb, err := livekit.FetchQuizBatch(
+				quizFetchCtx, lkCfg.ManagerAPI, managerAPIServiceKey(),
+				deviceMAC, characterID, characterName,
+			)
 			if err != nil {
 				logger.DebugCF("livekit", "Speculative quiz batch fetch did not complete", map[string]any{
 					"device_mac": deviceMAC,
@@ -690,7 +697,7 @@ func main() {
 		// Cheeko/Nani sessions just discard one small speculative GET instead of
 		// serialising two HTTP round-trips at session start.
 		var quizBatchForSession *livekit.QuizBatch
-		if strings.Contains(personaGreeting, "{{QUIZ_QUESTIONS}}") {
+		if livekit.PromptWantsQuizBatch(personaGreeting) {
 			qb := <-quizFetchCh
 			if qb == nil {
 				// No batch = no scored quiz this session; Quizzy offers free chat.
@@ -1005,6 +1012,10 @@ func main() {
 				lkCfg.ManagerAPI,
 				managerAPIServiceKey(),
 				deviceMAC,
+				// Whatever bank served this session's questions is the bank the
+				// verdicts belong to. Empty when there is no batch, which the
+				// API reads as the quiz default.
+				quizBatchBank(quizBatchForSession),
 			),
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
@@ -2096,4 +2107,14 @@ func resolvedModelAPIBase(cfg *config.Config, modelName string) string {
 		}
 	}
 	return ""
+}
+
+// quizBatchBank reads the bank the API served this session's questions from.
+// Nil-safe: no batch means no scored game, and an empty bank is what the API
+// reads as its quiz default.
+func quizBatchBank(batch *livekit.QuizBatch) string {
+	if batch == nil {
+		return ""
+	}
+	return batch.Bank
 }

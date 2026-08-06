@@ -128,6 +128,8 @@ func TestFetchQuizBatch(t *testing.T) {
 			config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL},
 			"svc-key",
 			"00:16:3e:ac:b5:38",
+			"",
+			"",
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -164,7 +166,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb")
+		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -180,7 +182,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb")
+		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -199,7 +201,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb"); err == nil {
+		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", ""); err == nil {
 			t.Fatal("want error on HTTP 500")
 		}
 	})
@@ -211,7 +213,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb"); err == nil {
+		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", ""); err == nil {
 			t.Fatal("want error on non-zero api code")
 		}
 	})
@@ -224,7 +226,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "  "); err == nil {
+		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "  ", "", ""); err == nil {
 			t.Fatal("want error for empty device mac")
 		}
 		if called {
@@ -253,6 +255,7 @@ func TestPostQuizAnswer(t *testing.T) {
 		"aa:bb",
 		482,
 		"correct",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
