@@ -710,6 +710,10 @@ func main() {
 				quizBatchForSession = qb
 				logger.InfoCF("livekit", "Quiz batch fetched", map[string]any{
 					"character": characterName,
+					// Without this the log cannot tell a Riddler session that got
+					// riddles from one that silently got quiz questions — which is
+					// exactly what happened on the first live run.
+					"bank":      qb.Bank,
 					"level":     qb.Level,
 					"band":      qb.Band,
 					"replay":    qb.Replay,
