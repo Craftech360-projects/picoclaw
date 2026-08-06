@@ -329,11 +329,15 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 			batch.AnsweredToday))
 	}
 	b.WriteString("\nAsk ONLY these questions, in order, one per turn. Never invent a question.")
+	b.WriteString("\nIf the child does not answer, encourage and re-ask the same question — never move on to the next question until this one has been judged.")
 	if batch.Replay {
 		b.WriteString("\nThese are champion rounds — the child has beaten every level; frame them as a victory lap.")
 	}
 	for i, q := range batch.Questions {
-		b.WriteString(fmt.Sprintf("\n%d. (id=%d) %s — Answer: %s", i+1, q.ID, q.Text, q.Answer))
+		// Numbered from answered+1, not 1: after N scored the model announces
+		// "question N+1" and hunts for that label. A remainder list restarting
+		// at 1 invited it to skip to label N+1 (the 2026-08-06 bees skip).
+		b.WriteString(fmt.Sprintf("\n%d. (id=%d) %s — Answer: %s", batch.AnsweredToday+i+1, q.ID, q.Text, q.Answer))
 		if alternates := trimmedNonEmpty(q.Accepted); len(alternates) > 0 {
 			b.WriteString(" (also accept: " + strings.Join(alternates, ", ") + ")")
 		}
