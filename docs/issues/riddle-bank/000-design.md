@@ -20,6 +20,7 @@ Background reading, not repeated here: `docs/adr/0005-quizzy-scored-questions-co
 | Game loop | Identical to Quizzy | No hints, no attempt counts, no child-led mode. Ten a day, three levels, `correct`/`revealed` |
 | Storage | Separate `riddle_*` tables | A riddle can never leak into Quizzy's level state — the queries point at different tables |
 | Daily budget | Per bank | 10 quiz + 10 riddles = 20. Falls out of separate tables for free |
+| Day gate (added 2026-08-06, both banks) | 10/day cap, **or** finishing a level — whichever first | The Daily Ten is a cap, not a quota: a level finished on question six must not open the next level the same day. After-level treat is the generated, unscored Bonus Buzz — never bank questions |
 | Service code | **One service, table pair passed in** | Isolation is a property of the tables. Duplicating 554 lines buys nothing and creates a permanent sync obligation |
 | Placeholder | **New `{{RIDDLES}}` alias**, `{{QUIZ_QUESTIONS}}` still works | Prompt reads correctly for whoever edits it in the admin UI later |
 
