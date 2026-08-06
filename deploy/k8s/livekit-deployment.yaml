@@ -51,7 +51,7 @@ spec:
               app: picoclaw-livekit
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:d68b03583f047c70045613dced2b9b93a843b435cb7b84abac5590854f64fcb3
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:782eef1a96f65b5df3a9ac05bdf5b1ee193a83b1f330fffd13dc4c4e5b9438c9
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -64,6 +64,13 @@ spec:
               containerPort: 8192
               protocol: TCP
           env:
+            # Pin the OpenRouter upstream. Measured on the real 25k-char prompt:
+            # Crusoe warm 1022ms / worst 1233ms, against a 52,130ms outlier from
+            # Parasail and 6 tok/s from DeepInfra's fp8 endpoint. Default routing
+            # weights price and hands out those endpoints. Unset = OpenRouter's
+            # own routing, so removing this line is a safe rollback.
+            - name: OPENROUTER_PROVIDER_ORDER
+              value: "Crusoe,CoreWeave"
             - name: PICOCLAW_CONFIG
               value: /etc/picoclaw/config.json
             - name: PICOCLAW_HOME

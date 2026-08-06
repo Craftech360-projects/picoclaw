@@ -73,7 +73,7 @@ Two tables mirroring the quiz pair, migration `add_riddle_question_bank`:
 
 - `riddle_question` — `code` (unique, the upsert key), `riddle_text`, `answer_text`,
   `accepted_answers` JSONB, `age_band`, `level`, `language`, `active`
-- `riddle_question_answer` — append-only: `device_mac`, `riddle_id`, `result`, `answered_at`
+- `riddle_question_answer` — append-only: `device_mac`, `question_id`, `result`, `answered_at`
 
 Derive-don't-store carries over whole. There is no riddle progress table:
 
@@ -98,8 +98,8 @@ It gains a bank parameter instead:
 ```js
 // src/services/banks.js — ponytail: a lookup table, not a second service
 const BANKS = {
-  quiz:   { questions: prisma.quiz_question,   answers: prisma.quiz_question_answer,   fk: 'question_id' },
-  riddle: { questions: prisma.riddle_question, answers: prisma.riddle_question_answer, fk: 'riddle_id'   },
+  quiz:   { questions: prisma.quiz_question,   answers: prisma.quiz_question_answer   },
+  riddle: { questions: prisma.riddle_question, answers: prisma.riddle_question_answer },
 };
 const CHARACTER_BANK = { quiz_master: 'quiz', riddle_master: 'riddle' };
 const bankFor = (character) => CHARACTER_BANK[character] ?? 'quiz';
@@ -108,9 +108,9 @@ const bankFor = (character) => CHARACTER_BANK[character] ?? 'quiz';
 Every service function takes `bank` as its first argument and defaults to `'quiz'`. Adding a
 third bank later is two more lines.
 
-The `fk` indirection exists because the answer tables name their foreign key differently
-(`question_id` vs `riddle_id`). If that irritates, name the riddle column `question_id` too and
-drop `fk` — either is fine, decide at implementation time and keep it consistent.
+`riddle_question_answer` names its foreign key **`question_id`**, not `riddle_id`, so the two
+answer tables are column-identical and the shared service needs no field indirection. The name
+is slightly off for a riddle; identical query code is worth more than the better noun.
 
 ---
 
