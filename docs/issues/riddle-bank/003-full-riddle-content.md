@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 assignee: claude
 ---
 
@@ -40,18 +40,17 @@ limit Quizzy has and is not addressed here.
 - [x] Every `code` is unique across all files
 - [x] Import runs clean and is idempotent — a second run changes no rows
 - [x] Import exits non-zero if any band/level lacks exactly 10 active riddles
-- [ ] Band 3-5 played end to end in a live local session, all 10 of level 1 answered
+- [x] Band 3-5 played end to end in a live local session, all 10 of level 1 answered
 - [x] No riddle's answer_text duplicates another's within the same band
 
 ## Blocked by
 
 - `docs/issues/riddle-bank/001-riddle-bank-over-http.md`
 
-## Progress
+## Resolution
 
-Content shipped as `454436f2` in `manager-api-node` on `feat/riddle-bank`. Seven of the
-eight criteria pass. The ticket stays open on the eighth, which needs a human at a
-microphone — see below.
+Content shipped as `454436f2` in `manager-api-node` on `feat/riddle-bank`. All eight
+criteria pass, the last one live across three sessions on 2026-08-06.
 
 **Verified against the running dev stack**, not just by reading the files:
 
@@ -78,35 +77,48 @@ would have told a child they were wrong when they were right: `a pine tree` for 
 cactus riddle, `fog` for darkness, `sound` for light, common bird species for the
 3-5 bird riddle, and `an auto | a rickshaw` for the school-run riddle.
 
-### What is left, and why an agent cannot do it
+### Verified live 2026-08-06, band 3-5
 
-The last criterion needs a **live voice session**, and the only child-input path in the
-whole stack is a real microphone: `handleDataMessage` in `pkg/livekit/room_session.go`
-accepts `ready_for_greeting`, `end_prompt`, `shutdown_request`, `abort` and
-`session_language_update` — there is no text-injection topic, so answers can only arrive
-as audio through STT. The admin dashboard's Test tab calls `getUserMedia`. An agent has
-no voice.
+The last criterion needs a real microphone. `handleDataMessage` in
+`pkg/livekit/room_session.go` accepts only `ready_for_greeting`, `end_prompt`,
+`shutdown_request`, `abort` and `session_language_update` — there is no text-injection
+topic, so a child's answer can only arrive as audio through STT, and the dashboard's Test
+tab calls `getUserMedia`. Driving `POST /quiz/answer` instead would have faked the
+criterion and cleared the level the real run needed, so it was not done. A human ran it.
 
-Driving the ten answers through `POST /quiz/answer` instead would have been faking the
-criterion, not verifying it — and worse, it would have cleared 3-5 level 1 and closed the
-day gate, making the real session impossible. So it was deliberately not done.
+All ten of band 3-5 level 1 answered `correct`, ids 31-40, confirmed from
+`riddle_question_answer` rather than the logs. `progress` afterwards:
+`current_level: 2, levels_completed: 1`, and the next batch is 10 fresh level-2 riddles.
+Two riddle rows and no quiz rows were written per answer, so the banks stayed separate.
 
-**The run is staged and ready.** Device `00:16:3E:AC:B5:38`, band 3-5, day gate open:
+**The Daily Ten closed for the first time.** `daily_quiz.md` after the first session:
 
-1. Delete `C:\Users\rahul\.picoclaw\workspace-device-00163eacb538\memory\state\daily_quiz.md`
-   — it still holds `answered=4 | awaiting=5` from the 6-8 run on 2026-08-06. The bank did
-   not change (riddle to riddle), only the band, so `WriteQuizBankState` does not clear it
-   and the model would resume mid-scoreboard.
-2. Open `http://localhost:4000`, Test tab, character **Riddler**, allow the microphone.
-3. Answer all ten. Expect them in id order 31-40, starting "I am yellow and long and
-   monkeys love to eat me."
-4. Confirm from the rows, not the logs: 10 rows in `riddle_question_answer` for that MAC
-   today, and `daily_quiz.md` showing `status=completed | answered=10`.
+```
+MEMO: type=daily_quiz | date=2026-08-06 | status=completed | answered=10 |
+first_try=8 | with_hint=2 | missed=0 | scored_q=40 | ... | parent_summary=Fantastic
+job! Rahul solved 10 riddles ...
+```
 
-The kid profile's `birth_date` was moved from 2018-06-15 to 2022-06-15 to put the device
-in band 3-5. **Restore it after the run** with `node riddle-3-5-testprep.tmp.js restore
-00163eacb538` (untracked, in the `manager-api-node` root, alongside the saved value).
+That closes the unknown carried in from 002 — no Riddler session had ever reached ten, so
+the day gate and the `status=completed` MEMO were unproven for this character.
 
-This run also closes the older unknown carried in from 002: no Riddler session has ever
-reached ten, so the day gate closing at 10 and the `status=completed` MEMO are unproven
-for this character in either band.
+**It took three sessions, and the reason is worth recording.** The first was staged on a
+false reading: the throwaway prep script passed the MAC as `00163eacb538` while answers
+are stored `00:16:3e:ac:b5:38`, so `clearDayGate` backdated zero rows and reported
+`{ backdated: 0 }`, indistinguishable from "nothing to clear". `quiz_bank.md` therefore
+said "4 of 10 scored so far today" — from the morning's 6-8 run — and Riddler correctly
+started at the fourth riddle and stopped at ten, answering 34-40. It behaved exactly as
+designed; the setup was wrong.
+
+`resolveDeviceContext` normalizes the MAC, but `macFilter` does not, and `macFilter` is
+what `loadClearedIds`, the day-gate count, `leastRecentlyPlayedLevel`, `recordAnswer` and
+`clearDayGate`'s raw SQL all use. A colonless MAC therefore resolves the right age band
+while seeing zero progress. Out of scope here; raised as its own task.
+
+**Two guards fired during the third session and both held.** The model reported a verdict
+for `memo_id=32` when only id 33 was pending; `Quiz MEMO id not in batch; corrected to the
+only pending question` remapped it. The repeat verdict on the next turn was dropped:
+`Quiz verdict already reported; dropped as duplicate`.
+
+The kid profile's `birth_date` was moved to 2022-06-15 for the run and **restored to
+2018-06-15** afterwards; the prep script and its saved value were deleted.
