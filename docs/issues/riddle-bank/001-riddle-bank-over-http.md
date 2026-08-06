@@ -114,10 +114,23 @@ claimed bank. A riddle answer wrote one row to `riddle_question_answer` and none
 `quiz_question_answer`; an absent bank defaulted to quiz; an unknown bank returned 400.
 Test rows were on a synthetic MAC and were removed.
 
-**Not done, deliberately:** the riddle tables were not added to
-`src/config/prisma-client-guard.js`. `quiz_question` is not in that list either, and a
-missing riddle table degrades to an empty bank rather than breaking a session — promoting
-that to a hard boot failure is a behaviour change this slice did not ask for.
+**Startup guard (`32282b52`, added after review at the user's request).** Both banks'
+tables — quiz and riddle — are now in `REQUIRED_PRISMA_MODELS` in
+`src/config/prisma-client-guard.js`. A deploy that ships the code without the migration
+now fails at boot with a clear message instead of serving every child an empty bank and
+looking like a content problem.
+
+Consequence for 005: the schema-before-code deploy order is now **mandatory**, not merely
+recommended. Applying the migration first is no longer a nicety — the API will not start
+without it.
+
+The guard's test fixture was hand-listed and had already rotted (the suite was failing on
+`pending_card_pairing` before this work). It is now built from `REQUIRED_PRISMA_MODELS`,
+so it cannot drift again. That suite passes for the first time in this branch.
+
+Note: on the dev box `SKIP_DB_SYNC=1` skips the database-table half of the guard at boot,
+so only the delegate half runs there. Both halves were verified explicitly against the dev
+database by calling them directly.
 
 **Test evidence:** 86 passing across the four quiz/riddle unit suites; `quiz.logic.js`
 byte-identical and its tests unchanged. Three suites fail on a clean tree too
