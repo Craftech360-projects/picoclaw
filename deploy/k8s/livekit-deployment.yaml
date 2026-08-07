@@ -64,13 +64,14 @@ spec:
               containerPort: 8192
               protocol: TCP
           env:
-            # Pin the OpenRouter upstream. Measured on the real 25k-char prompt:
-            # Crusoe warm 1022ms / worst 1233ms, against a 52,130ms outlier from
-            # Parasail and 6 tok/s from DeepInfra's fp8 endpoint. Default routing
-            # weights price and hands out those endpoints. Unset = OpenRouter's
-            # own routing, so removing this line is a safe rollback.
-            - name: OPENROUTER_PROVIDER_ORDER
-              value: "Crusoe,CoreWeave"
+            # No OPENROUTER_PROVIDER_ORDER here on purpose. Unset no longer means
+            # OpenRouter's price-weighted default - the worker now asks for
+            # sort=latency, which tracks the fleet as endpoints change instead of
+            # freezing one choice. The pin this replaces named Crusoe,CoreWeave,
+            # and CoreWeave measured ~4x slower end to end than latency-sorted
+            # routing on 2026-08-07. Set this variable again only to pin a
+            # specific upstream (it still wins over the sort), and re-measure
+            # before trusting a name.
             - name: PICOCLAW_CONFIG
               value: /etc/picoclaw/config.json
             - name: PICOCLAW_HOME
