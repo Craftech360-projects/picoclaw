@@ -245,6 +245,7 @@ func (p *Provider) Chat(
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
+	protocoltypes.ReportDispatch(ctx)
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
@@ -295,6 +296,7 @@ func (p *Provider) ChatStream(
 	// the entire request lifecycle including body reads, which would kill long streams.
 	// Context cancellation still provides the safety net.
 	streamClient := &http.Client{Transport: p.httpClient.Transport}
+	protocoltypes.ReportDispatch(ctx)
 	resp, err := streamClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)

@@ -50,6 +50,41 @@ that boundary before theorising further — it splits the 1,300 ms in two and
 decides which half of the list below to chase. Everything else here is
 speculation until that exists.
 
+## Measured 2026-08-07, after the probe landed
+
+27 warm live Cheeko greetings, two worker processes, `sort: latency` routing:
+
+| | median | worst |
+|---|---|---|
+| `llm_request_build_ms` (worker-side: render, history, `BuildMessages`, slot) | **82 ms** | 177 ms |
+| `llm_provider_ttft_ms` (dispatch → first token) | **993 ms** | 2,339 ms |
+| `llm_first_token_ms` (the two summed) | **1,115 ms** | 2,419 ms |
+
+**Two things follow, and both contradict what this ticket assumed.**
+
+1. **Worker-side cost is ~80 ms, not seconds.** Hypothesis 3 (context assembly)
+   is closed by its own stated test — it predicted "if it is under ~50 ms, close
+   this branch"; 82 ms total covers assembly *plus* history, slot wait and
+   marshalling, so no single part of it is worth optimising. Hypothesis 5 (slot
+   contention) is closed with it: there is no room for a meaningful wait inside
+   82 ms.
+2. **The gap this ticket exists to explain did not reproduce.** The premise was a
+   2,863 ms live median against a 1,214–1,549 ms isolated one. Today the live
+   median is 1,115 ms — at or below the isolated figures, with the same routing.
+   Whatever produced the 1,300 ms is not present in these 27 samples.
+
+The parent plan's criterion (median < 2,000 ms, worst < 4,000 ms) is **met** by
+this run: 1,115 ms median, 2,419 ms worst.
+
+**Do not close this ticket on one afternoon's numbers.** The measurement that
+motivated it was real, and a provider-side effect that comes and goes — which is
+what hypotheses 1 and 2 describe — would look exactly like this. What the probe
+has established is where to look when it returns: `llm_provider_ttft_ms` is now
+separately visible, so a recurrence can be attributed without re-deriving any of
+this. Cold start (hypothesis 2) was also milder than recorded: the first greeting
+after each worker start was 1,827 ms and 1,568 ms, against a 1,115 ms warm
+median — a few hundred ms, not the ~2,900 ms measured previously.
+
 ## Hypotheses, ranked, each with its prediction
 
 **1. Prefix-cache misses from upstream bouncing.** `sort: latency` was observed
@@ -91,8 +126,11 @@ nothing else holds the session lock at session start.
 
 ## Acceptance criteria
 
-- [ ] A marker exists between request-built and first-SSE-byte, so worker-side
-      and provider-side time are separately visible in the turn summary
+- [x] A marker exists between request-built and first-SSE-byte, so worker-side
+      and provider-side time are separately visible in the turn summary —
+      `llm_request_build_ms` and `llm_provider_ttft_ms` in `Turn latency summary`,
+      fed by `protocoltypes.WithDispatchProbe`. Both read 0 on providers that do
+      not call `ReportDispatch` (only `openai_compat` does).
 - [ ] The ~1,300 ms is attributed — not necessarily fixed — with numbers
       supporting the attribution
 - [ ] Greeting TTFT median under 2,000 ms and worst under 4,000 ms across 5
