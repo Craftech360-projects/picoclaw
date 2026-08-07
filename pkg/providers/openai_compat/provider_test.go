@@ -616,8 +616,46 @@ func TestNormalizeModel_UsesAPIBase(t *testing.T) {
 	if got := normalizeModel("deepseek/deepseek-chat", "https://api.deepseek.com/v1"); got != "deepseek-chat" {
 		t.Fatalf("normalizeModel(deepseek) = %q, want %q", got, "deepseek-chat")
 	}
+	// openrouter/auto is a real model whose author IS "openrouter", so both
+	// segments must survive. Stripping here would send "auto" and 400.
 	if got := normalizeModel("openrouter/auto", "https://openrouter.ai/api/v1"); got != "openrouter/auto" {
 		t.Fatalf("normalizeModel(openrouter) = %q, want %q", got, "openrouter/auto")
+	}
+	// An OpenRouter id is exactly author/model. Config carrying picoclaw's
+	// internal gateway prefix on top of a full id is one segment too long and
+	// OpenRouter rejects it outright, so the prefix has to come off. This is
+	// what took the active provider row down on 2026-08-07.
+	if got := normalizeModel(
+		"openrouter/google/gemma-4-31b-it", "https://openrouter.ai/api/v1",
+	); got != "google/gemma-4-31b-it" {
+		t.Fatalf("normalizeModel(prefixed openrouter) = %q, want %q", got, "google/gemma-4-31b-it")
+	}
+	// The same shape ships in defaults.go, so it must normalize too.
+	if got := normalizeModel(
+		"openrouter/openai/gpt-5.4", "https://openrouter.ai/api/v1",
+	); got != "openai/gpt-5.4" {
+		t.Fatalf("normalizeModel(defaults entry) = %q, want %q", got, "openai/gpt-5.4")
+	}
+	// A bare id must pass through untouched; its author is not the gateway.
+	if got := normalizeModel(
+		"google/gemma-4-31b-it", "https://openrouter.ai/api/v1",
+	); got != "google/gemma-4-31b-it" {
+		t.Fatalf("normalizeModel(bare openrouter id) = %q, want %q", got, "google/gemma-4-31b-it")
+	}
+	// Google's OpenAI-compatible endpoint 404s on a prefixed id; verified live
+	// 2026-08-07 that only the bare "gemma-4-31b-it" returns 200.
+	if got := normalizeModel(
+		"gemini/gemma-4-31b-it", "https://generativelanguage.googleapis.com/v1beta/openai",
+	); got != "gemma-4-31b-it" {
+		t.Fatalf("normalizeModel(gemini) = %q, want %q", got, "gemma-4-31b-it")
+	}
+	// Stripping the prefix must not hide a real Gemini model from the thought
+	// signature check, which keys off the "gemini-" substring.
+	if got := normalizeModel(
+		"gemini/gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai",
+	); got != "gemini-2.5-pro" || !isGeminiModelID(got) {
+		t.Fatalf("normalizeModel(gemini pro) = %q (isGemini=%v), want gemini-2.5-pro/true",
+			got, isGeminiModelID(got))
 	}
 	if got := normalizeModel("vivgrid/managed", "https://api.vivgrid.com/v1"); got != "managed" {
 		t.Fatalf("normalizeModel(vivgrid) = %q, want %q", got, "managed")

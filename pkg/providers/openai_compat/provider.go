@@ -558,14 +558,30 @@ func normalizeModel(model, apiBase string) string {
 		return model
 	}
 
-	if strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+	if isOpenRouterBase(apiBase) {
+		// An OpenRouter id is exactly author/model, where the author is the
+		// model's creator ("google/gemma-4-31b-it"), not the gateway. Config
+		// written in picoclaw's internal "openrouter/<id>" form - the form
+		// defaults.go itself uses - therefore arrives one segment too long, and
+		// OpenRouter rejects it with "not a valid model ID". Strip the gateway
+		// prefix only when what remains is still author/model, so that
+		// openrouter/auto, a real model whose author genuinely is "openrouter",
+		// keeps both of its segments.
+		if strings.EqualFold(before, "openrouter") && strings.Contains(after, "/") {
+			return after
+		}
 		return model
 	}
 
 	prefix := strings.ToLower(before)
 	switch prefix {
+	// "gemini" belongs here for the same reason as "google": Google's
+	// OpenAI-compatible endpoint wants the bare id ("gemma-4-31b-it"), and a
+	// gemini/ prefix on the way in makes it 404. Real Gemini models are still
+	// recognised downstream by isGeminiModelID's "gemini-" substring, which
+	// survives the strip, so thought signatures are unaffected.
 	case "litellm", "moonshot", "nvidia", "groq", "ollama", "deepseek", "google",
-		"openrouter", "zhipu", "mistral", "vivgrid", "minimax", "novita":
+		"gemini", "openrouter", "zhipu", "mistral", "vivgrid", "minimax", "novita":
 		return after
 	default:
 		return model
