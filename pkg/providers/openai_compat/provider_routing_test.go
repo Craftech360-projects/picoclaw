@@ -15,6 +15,8 @@ func TestOpenRouterProviderPin(t *testing.T) {
 		apiBase   string
 		env       string
 		wantOrder []string
+		wantSort  string
+		wantNone  bool
 	}{
 		{
 			name:      "pins the configured order on openrouter",
@@ -29,16 +31,21 @@ func TestOpenRouterProviderPin(t *testing.T) {
 			wantOrder: []string{"DeepInfra", "Crusoe"},
 		},
 		{
-			name:    "unset leaves routing to openrouter",
-			apiBase: openRouter,
-			env:     "",
+			// Unset used to mean OpenRouter's default, which weights PRICE and
+			// measurably hands out multi-second upstreams. Latency is the default
+			// the voice path needs; an explicit order still overrides it.
+			name:     "unset sorts by latency rather than price",
+			apiBase:  openRouter,
+			env:      "",
+			wantSort: "latency",
 		},
 		{
 			// Sending an OpenRouter-only field to another OpenAI-compatible host
 			// risks a 400 on a provider that rejects unknown fields.
-			name:    "never sent to a non-openrouter host",
-			apiBase: "https://api.openai.com/v1",
-			env:     "DeepInfra,Crusoe",
+			name:     "never sent to a non-openrouter host",
+			apiBase:  "https://api.openai.com/v1",
+			env:      "DeepInfra,Crusoe",
+			wantNone: true,
 		},
 	}
 
@@ -55,7 +62,7 @@ func TestOpenRouterProviderPin(t *testing.T) {
 			)
 
 			raw, present := body["provider"]
-			if tt.wantOrder == nil {
+			if tt.wantNone {
 				if present {
 					t.Fatalf("provider field should be absent, got %#v", raw)
 				}
@@ -70,6 +77,28 @@ func TestOpenRouterProviderPin(t *testing.T) {
 				t.Fatalf("provider field is %T, want map[string]any", raw)
 			}
 
+			// A hard pin turns one bad upstream into a failed greeting; the
+			// child should hear a slow answer rather than nothing.
+			if fallbacks, ok := pin["allow_fallbacks"].(bool); !ok || !fallbacks {
+				t.Errorf("allow_fallbacks = %v, want true", pin["allow_fallbacks"])
+			}
+
+			if tt.wantSort != "" {
+				if got := pin["sort"]; got != tt.wantSort {
+					t.Fatalf("sort = %v, want %q", got, tt.wantSort)
+				}
+				if _, hasOrder := pin["order"]; hasOrder {
+					t.Errorf("order must be absent when sorting, got %#v", pin["order"])
+				}
+				return
+			}
+
+			// An explicit order must win outright: mixing in a sort would let
+			// OpenRouter reorder the very pin that exists to stop it.
+			if _, hasSort := pin["sort"]; hasSort {
+				t.Errorf("sort must be absent when an order is pinned, got %#v", pin["sort"])
+			}
+
 			order, ok := pin["order"].([]string)
 			if !ok {
 				t.Fatalf("order is %T, want []string", pin["order"])
@@ -81,12 +110,6 @@ func TestOpenRouterProviderPin(t *testing.T) {
 				if order[i] != want {
 					t.Errorf("order[%d] = %q, want %q", i, order[i], want)
 				}
-			}
-
-			// A hard pin turns one bad upstream into a failed greeting; the
-			// child should hear a slow answer rather than nothing.
-			if fallbacks, ok := pin["allow_fallbacks"].(bool); !ok || !fallbacks {
-				t.Errorf("allow_fallbacks = %v, want true", pin["allow_fallbacks"])
 			}
 		})
 	}

@@ -119,12 +119,24 @@ func (p *Provider) buildRequestBody(
 	// price, so it will hand a child that 52s wait sooner or later. Pinning the
 	// order also keeps the prefix cache warm - each upstream caches separately,
 	// so bouncing between them wastes the byte-stable prompt prefix.
-	if order := openRouterProviderOrder(p.apiBase); len(order) > 0 {
-		requestBody["provider"] = map[string]any{
-			"order": order,
+	// Measured 2026-08-07 against the 21k-char Riddler greeting, 5 samples each:
+	// unpinned median 1111ms TTFT / ~4.0s total, and the model-slug ":deepinfra"
+	// suffix does NOT pin (those requests were served by CoreWeave and Parasail).
+	// sort=latency picked Cerebras: 760ms TTFT / ~0.8s total. Price routing is
+	// what hands out the Parasail 52s outlier the constant below documents.
+	if isOpenRouterBase(p.apiBase) {
+		provider := map[string]any{
 			// Degrade rather than fail: a slow greeting beats no greeting.
 			"allow_fallbacks": true,
 		}
+		// An explicit order still wins - it is how a deployment pins one upstream
+		// to keep its prefix cache warm.
+		if order := openRouterProviderOrder(p.apiBase); len(order) > 0 {
+			provider["order"] = order
+		} else {
+			provider["sort"] = "latency"
+		}
+		requestBody["provider"] = provider
 	}
 
 	// When fallback uses a different provider (e.g. DeepSeek), that provider must not inject web_search_preview.
@@ -515,8 +527,12 @@ func parseToolArgsBestEffort(raw string) (map[string]any, bool) {
 // so this is inert until someone opts in.
 //
 //	OPENROUTER_PROVIDER_ORDER="DeepInfra,Crusoe"
+func isOpenRouterBase(apiBase string) bool {
+	return strings.Contains(strings.ToLower(apiBase), "openrouter.ai")
+}
+
 func openRouterProviderOrder(apiBase string) []string {
-	if !strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+	if !isOpenRouterBase(apiBase) {
 		return nil
 	}
 	var out []string
