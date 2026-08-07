@@ -163,23 +163,30 @@ Detecting a repeat needs sight of the previous greeting, which lives only in the
 transcript. Under A, after a reset, Cheeko can reopen with wording it already
 used.
 
-**Two findings that change how to handle that:**
+**Three findings that change how to handle that:**
 
-1. **`last_session` does not exist in `MEMORY.md`.** Grep returns zero hits on
-   the test device, yet Cheeko's greeting is explicitly told to read it. So
-   Cheeko's intended continuity source was never implemented, and whatever
-   personalisation it manages today is leaning on the raw transcript by
-   accident. This is a pre-existing bug, independent of this ticket.
-2. **The anti-repetition rule is already failing with history present.** The
-   stored transcript contains two identical consecutive greetings ("Good
-   afternoon, Rahul. Ten riddles today. Riddle one…" at messages 2 and 4). So
-   the capability A would remove is not currently working anyway.
+1. **`MEMORY.md` IS injected — do not build a new mechanism for this.**
+   `GetMemoryContext` (`pkg/agent/memory.go:184`) reads it via `ReadLongTerm`
+   and appends it to the **dynamic** per-request context, not the static block.
+   It carries a `## Session Summaries` section that already holds **71 dated
+   entries** on the test device, capped to the newest 10 at injection
+   (`promptSessionSummaryCap`, `memory.go:136`). Cheeko therefore already
+   receives recent session context, and that context survives option A.
+2. **What is missing is not `last_session`, it is a character label.** The
+   summaries are device-scoped and unlabelled — `- 2026-06-29 16:22:00 IST
+   (9 messages): …` — so Cheeko reads Quizzy's and Riddler's sessions as if they
+   were its own. The gap is one field on an existing writer plus a prompt that
+   points at the real section name, not a new store.
+3. **The anti-repetition rule already fails with history present.** The stored
+   transcript holds two identical consecutive greetings ("Good afternoon,
+   Rahul. Ten riddles today. Riddle one…" at messages 2 and 4). The capability
+   A would remove is not working today.
 
-Therefore A's real cost for Cheeko is close to zero today, and becomes zero once
-`last_session` is written. **Implement `last_session` first, then A** — that
-ordering makes Cheeko strictly better off, since a written `last_session`
-outperforms transcript replay for personalisation and costs a fraction of the
-tokens.
+So A's cost to Cheeko is smaller than first assessed: its continuity source is
+`## Session Summaries`, which A does not touch. The transcript was never its
+intended source. Labelling the summaries per character is worth doing **before**
+A on correctness grounds — Cheeko currently personalises from other characters'
+sessions — but A does not depend on it.
 
 ### Cross-character contamination (applies whatever you choose)
 
@@ -207,9 +214,10 @@ pair is a separate, larger decision — note it, do not bundle it here.
       record it rather than assuming it
 - [ ] `MEMO: type=daily_quiz` handling unaffected — quiz/riddle verdicts still
       attribute correctly after a reset session (see the traps in the parent plan)
-- [ ] If A: `last_session` is written to `MEMORY.md` **before** the reset ships,
-      so Cheeko's personalisation moves onto its intended source rather than
-      losing the transcript it currently leans on by accident
+- [ ] Session-summary bullets in `MEMORY.md` carry the character that produced
+      them, and Cheeko's `greeting_prompt` points at `## Session Summaries`
+      rather than the non-existent `last_session` key. Correctness fix, worth
+      landing before A, but not a blocker for it
 - [ ] Verified per character, not just on one: Quizzy and Riddler resume from
       the MEMO after a reset, Nani still genders correctly from `USER.md`, and
       Cheeko still opens with a personal hook
@@ -218,11 +226,9 @@ pair is a separate, larger decision — note it, do not bundle it here.
 
 Checked on 2026-08-07, all dead ends:
 
-- **`memory/MEMORY.md` is not injected into the prompt.** It is the largest file
-  in the workspace (27,965 bytes) and grows every session, but
-  `buildStaticContext` (`pkg/agent/context.go:458`) injects AGENT.md, SOUL.md,
-  USER.md and IDENTITY.md only; MEMORY.md appears solely as a path the model is
-  told to write to. Trimming it buys nothing.
+- ~~`memory/MEMORY.md` is not injected into the prompt.~~ **This was wrong and is
+  corrected below** — it is injected. The error came from reading
+  `buildStaticContext` alone and concluding from its absence there.
 - **Tools are already excluded from the greeting** — `tools=0` in every live
   greeting, dropped at `agent_bridge.go:685`.
 - **Summarization is not broken.** The meta file carries a real summary and
