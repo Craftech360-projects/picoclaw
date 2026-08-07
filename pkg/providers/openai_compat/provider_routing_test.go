@@ -60,6 +60,28 @@ func TestOpenRouterProviderRouting(t *testing.T) {
 			if fallbacks, ok := routing["allow_fallbacks"].(bool); !ok || !fallbacks {
 				t.Errorf("allow_fallbacks = %v, want true", routing["allow_fallbacks"])
 			}
+			// Parasail served 21.7s and 16.9s first-token turns live. Latency sort
+			// alone did not keep it out, so the exclusion must reach the wire —
+			// and as a slug, since OpenRouter matches slugs, not display names.
+			ignored, _ := routing["ignore"].([]string)
+			found := false
+			for _, v := range ignored {
+				if v == "parasail" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("ignore = %v, want it to contain %q", routing["ignore"], "parasail")
+			}
+			// Deprioritises the outliers not named above. Seconds, not milliseconds:
+			// a 1000x unit error here fails silently by deprioritising everything.
+			cutoff, ok := routing["preferred_max_latency"].(map[string]any)
+			if !ok {
+				t.Fatalf("preferred_max_latency is %T, want an object", routing["preferred_max_latency"])
+			}
+			if p90, _ := cutoff["p90"].(int); p90 <= 0 || p90 > 10 {
+				t.Errorf("preferred_max_latency p90 = %v, want a plausible value in seconds", cutoff["p90"])
+			}
 		})
 	}
 }

@@ -124,9 +124,21 @@ func (p *Provider) buildRequestBody(
 	// endpoints are added and drift, a pinned name silently goes stale, and a pin
 	// is only a preference anyway - order:["Cerebras"] with fallbacks enabled was
 	// observed being served by DeepInfra.
+	// sort=latency ranks on OpenRouter's aggregate stats, which is not the same as
+	// avoiding the tail: on 2026-08-07 it served two consecutive live turns from
+	// Parasail at 21,704ms and 16,909ms first-token, the same upstream carrying the
+	// 52,130ms outlier above. preferred_max_latency alone would not have stopped
+	// either one - OpenRouter documents it as deprioritising, not excluding - so the
+	// known-bad upstream is named and the cutoff covers the ones that are not.
 	if isOpenRouterBase(p.apiBase) {
 		requestBody["provider"] = map[string]any{
 			"sort": "latency",
+			// ponytail: one name, not a policy. If a second upstream turns
+			// pathological, tighten preferred_max_latency before growing this list.
+			"ignore": []string{"parasail"},
+			// Seconds, per OpenRouter. p90=3 leaves headroom over the ~1.4-2.7s
+			// first-token measured from the healthy upstreams (DeepInfra, ModelRun).
+			"preferred_max_latency": map[string]any{"p50": 1, "p90": 3},
 			// Degrade rather than fail: a slow greeting beats no greeting.
 			"allow_fallbacks": true,
 		}
