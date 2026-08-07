@@ -115,6 +115,85 @@ If chosen, say so in an ADR so this is not re-investigated a third time.
 Recommendation: **A**, with the threshold written down and a comment tying it
 to the 45s reconnect hint. Revisit **D** on its own merits.
 
+## What option A actually costs, per character
+
+Checked 2026-08-07 against the live `greeting_prompt` of each character. The
+question is not "does this character value continuity" but "where is it told to
+read continuity from" — anything reading `USER.md`, `MEMORY.md` or Saved State
+is unaffected, because A resets only the transcript.
+
+| Character | Reads continuity from | Cost of A |
+|---|---|---|
+| **Quizzy** | Saved State MEMO | **None — A helps** |
+| **Riddler** | Saved State MEMO | **None — A helps** |
+| **Nani** | `USER.md` (gender, for "beti") | **None** |
+| **Cheeko** | `MEMORY.md` + prior greeting wording | **Partial, see below** |
+
+**Quizzy and Riddler are not merely unharmed — their prompts already fight the
+transcript.** Both say, verbatim:
+
+> Neither conversation summaries nor earlier turns you can see in the chat
+> history mean a quiz is in progress or finished — that history spans previous
+> [sessions]
+
+and
+
+> If there is no such MEMO, the day is NOT complete no matter what any
+> conversation summary says
+
+That defensive wording exists because stale replayed history was misleading the
+model about quiz progress. Quiz and riddle resume run off
+`memory/state/daily_quiz.md` (verified present and authoritative: `MEMO:
+type=daily_quiz | date=2026-08-07 | status=in_progress | awaiting=81`) plus the
+answer rows in the database. A removes a known hazard for these two.
+
+**Nani** only reads `USER.md`, which A does not touch.
+
+**Cheeko is the only real cost**, and only in one respect. Its personalisation
+hook is aimed at durable memory, which survives A:
+
+> Before speaking, silently check the device's current local time and the
+> child's recent USER.md and MEMORY.md, especially last_session
+
+But it also says:
+
+> Do not repeat the same memory or greeting wording on consecutive sessions
+
+Detecting a repeat needs sight of the previous greeting, which lives only in the
+transcript. Under A, after a reset, Cheeko can reopen with wording it already
+used.
+
+**Two findings that change how to handle that:**
+
+1. **`last_session` does not exist in `MEMORY.md`.** Grep returns zero hits on
+   the test device, yet Cheeko's greeting is explicitly told to read it. So
+   Cheeko's intended continuity source was never implemented, and whatever
+   personalisation it manages today is leaning on the raw transcript by
+   accident. This is a pre-existing bug, independent of this ticket.
+2. **The anti-repetition rule is already failing with history present.** The
+   stored transcript contains two identical consecutive greetings ("Good
+   afternoon, Rahul. Ten riddles today. Riddle one…" at messages 2 and 4). So
+   the capability A would remove is not currently working anyway.
+
+Therefore A's real cost for Cheeko is close to zero today, and becomes zero once
+`last_session` is written. **Implement `last_session` first, then A** — that
+ordering makes Cheeko strictly better off, since a written `last_session`
+outperforms transcript replay for personalisation and costs a fraction of the
+tokens.
+
+### Cross-character contamination (applies whatever you choose)
+
+The session key is **device-scoped, not character-scoped** —
+`livekit:device:<mac>`, one transcript per device shared by every character. A
+child who plays with Cheeko and then switches to Quizzy has Cheeko's turns
+replayed into Quizzy's context, which is precisely what Quizzy's defensive
+prompt wording is fighting. Nine device workspaces exist on this machine, each
+with a single shared transcript.
+
+A reduces this but does not fix it: a character switch inside the retention
+window still cross-contaminates. Scoping the transcript per character-device
+pair is a separate, larger decision — note it, do not bundle it here.
+
 ## Acceptance criteria
 
 - [ ] A decision is recorded (ADR under `docs/adr/`) naming the chosen option
@@ -128,6 +207,12 @@ to the 45s reconnect hint. Revisit **D** on its own merits.
       record it rather than assuming it
 - [ ] `MEMO: type=daily_quiz` handling unaffected — quiz/riddle verdicts still
       attribute correctly after a reset session (see the traps in the parent plan)
+- [ ] If A: `last_session` is written to `MEMORY.md` **before** the reset ships,
+      so Cheeko's personalisation moves onto its intended source rather than
+      losing the transcript it currently leans on by accident
+- [ ] Verified per character, not just on one: Quizzy and Riddler resume from
+      the MEMO after a reset, Nani still genders correctly from `USER.md`, and
+      Cheeko still opens with a personal hook
 
 ## Do not re-derive these
 
