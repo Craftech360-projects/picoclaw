@@ -4,55 +4,32 @@ import (
 	"testing"
 )
 
-// The pin must reach the wire, apply only to OpenRouter, and stay off unless
-// asked for. Getting any of these wrong is silent: requests keep succeeding,
-// they just keep hitting the 52-second upstream this exists to avoid.
-func TestOpenRouterProviderPin(t *testing.T) {
+// Latency sorting must reach the wire and must go only to OpenRouter. Getting
+// either wrong is silent: requests keep succeeding, they just go back to being
+// routed by price, which is what put a 52-second upstream in front of a child.
+func TestOpenRouterProviderRouting(t *testing.T) {
 	const openRouter = "https://openrouter.ai/api/v1"
 
 	tests := []struct {
-		name      string
-		apiBase   string
-		env       string
-		wantOrder []string
-		wantSort  string
-		wantNone  bool
+		name     string
+		apiBase  string
+		wantSort string
 	}{
 		{
-			name:      "pins the configured order on openrouter",
-			apiBase:   openRouter,
-			env:       "DeepInfra,Crusoe",
-			wantOrder: []string{"DeepInfra", "Crusoe"},
-		},
-		{
-			name:      "tolerates spaces and empty entries",
-			apiBase:   openRouter,
-			env:       " DeepInfra , , Crusoe ,",
-			wantOrder: []string{"DeepInfra", "Crusoe"},
-		},
-		{
-			// Unset used to mean OpenRouter's default, which weights PRICE and
-			// measurably hands out multi-second upstreams. Latency is the default
-			// the voice path needs; an explicit order still overrides it.
-			name:     "unset sorts by latency rather than price",
+			name:     "sorts by latency on openrouter",
 			apiBase:  openRouter,
-			env:      "",
 			wantSort: "latency",
 		},
 		{
 			// Sending an OpenRouter-only field to another OpenAI-compatible host
 			// risks a 400 on a provider that rejects unknown fields.
-			name:     "never sent to a non-openrouter host",
-			apiBase:  "https://api.openai.com/v1",
-			env:      "DeepInfra,Crusoe",
-			wantNone: true,
+			name:    "never sent to a non-openrouter host",
+			apiBase: "https://api.openai.com/v1",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("OPENROUTER_PROVIDER_ORDER", tt.env)
-
 			p := NewProvider("k", tt.apiBase, "")
 			body := p.buildRequestBody(
 				[]Message{{Role: "user", Content: "hi"}},
@@ -62,7 +39,7 @@ func TestOpenRouterProviderPin(t *testing.T) {
 			)
 
 			raw, present := body["provider"]
-			if tt.wantNone {
+			if tt.wantSort == "" {
 				if present {
 					t.Fatalf("provider field should be absent, got %#v", raw)
 				}
@@ -72,45 +49,44 @@ func TestOpenRouterProviderPin(t *testing.T) {
 			if !present {
 				t.Fatal("provider field missing from request body")
 			}
-			pin, ok := raw.(map[string]any)
+			routing, ok := raw.(map[string]any)
 			if !ok {
 				t.Fatalf("provider field is %T, want map[string]any", raw)
 			}
-
-			// A hard pin turns one bad upstream into a failed greeting; the
-			// child should hear a slow answer rather than nothing.
-			if fallbacks, ok := pin["allow_fallbacks"].(bool); !ok || !fallbacks {
-				t.Errorf("allow_fallbacks = %v, want true", pin["allow_fallbacks"])
+			if got := routing["sort"]; got != tt.wantSort {
+				t.Errorf("sort = %v, want %q", got, tt.wantSort)
 			}
-
-			if tt.wantSort != "" {
-				if got := pin["sort"]; got != tt.wantSort {
-					t.Fatalf("sort = %v, want %q", got, tt.wantSort)
-				}
-				if _, hasOrder := pin["order"]; hasOrder {
-					t.Errorf("order must be absent when sorting, got %#v", pin["order"])
-				}
-				return
-			}
-
-			// An explicit order must win outright: mixing in a sort would let
-			// OpenRouter reorder the very pin that exists to stop it.
-			if _, hasSort := pin["sort"]; hasSort {
-				t.Errorf("sort must be absent when an order is pinned, got %#v", pin["sort"])
-			}
-
-			order, ok := pin["order"].([]string)
-			if !ok {
-				t.Fatalf("order is %T, want []string", pin["order"])
-			}
-			if len(order) != len(tt.wantOrder) {
-				t.Fatalf("order = %v, want %v", order, tt.wantOrder)
-			}
-			for i, want := range tt.wantOrder {
-				if order[i] != want {
-					t.Errorf("order[%d] = %q, want %q", i, order[i], want)
-				}
+			// One bad upstream should degrade the greeting, not fail it.
+			if fallbacks, ok := routing["allow_fallbacks"].(bool); !ok || !fallbacks {
+				t.Errorf("allow_fallbacks = %v, want true", routing["allow_fallbacks"])
 			}
 		})
+	}
+}
+
+// OPENROUTER_PROVIDER_ORDER used to pin a named upstream, and unset meant
+// OpenRouter's price-weighted default - so forgetting it silently bought the
+// slowest routing available. The variable is gone; this pins that it stays gone
+// rather than being quietly reintroduced as a second source of truth.
+func TestOpenRouterProviderOrderEnvIsIgnored(t *testing.T) {
+	t.Setenv("OPENROUTER_PROVIDER_ORDER", "Crusoe,CoreWeave")
+
+	p := NewProvider("k", "https://openrouter.ai/api/v1", "")
+	body := p.buildRequestBody(
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"google/gemma-4-31b-it",
+		nil,
+	)
+
+	routing, ok := body["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider field is %T, want map[string]any", body["provider"])
+	}
+	if _, hasOrder := routing["order"]; hasOrder {
+		t.Errorf("order = %#v, want absent: the env var must no longer route", routing["order"])
+	}
+	if got := routing["sort"]; got != "latency" {
+		t.Errorf("sort = %v, want \"latency\" regardless of the env var", got)
 	}
 }

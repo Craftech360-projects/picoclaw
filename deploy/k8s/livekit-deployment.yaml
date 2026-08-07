@@ -64,14 +64,10 @@ spec:
               containerPort: 8192
               protocol: TCP
           env:
-            # No OPENROUTER_PROVIDER_ORDER here on purpose. Unset no longer means
-            # OpenRouter's price-weighted default - the worker now asks for
-            # sort=latency, which tracks the fleet as endpoints change instead of
-            # freezing one choice. The pin this replaces named Crusoe,CoreWeave,
-            # and CoreWeave measured ~4x slower end to end than latency-sorted
-            # routing on 2026-08-07. Set this variable again only to pin a
-            # specific upstream (it still wins over the sort), and re-measure
-            # before trusting a name.
+            # There is no OpenRouter upstream pin here, and no env var to set:
+            # the worker always asks OpenRouter for sort=latency. This replaced a
+            # Crusoe,CoreWeave pin, which measured ~4x slower end to end than
+            # latency sorting on 2026-08-07.
             - name: PICOCLAW_CONFIG
               value: /etc/picoclaw/config.json
             - name: PICOCLAW_HOME

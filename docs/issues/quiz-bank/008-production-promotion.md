@@ -76,10 +76,9 @@ Order is load-bearing: each step's failure mode is the next step's silent bug.
    - Verify the code shipped — the image has no `strings`, and a `strings` miss returns a
      misleading 0:
      `docker run --entrypoint sh <img> -c "grep -ac 'routed to upstream' /usr/local/bin/picoclaw-livekit"`
-   - `OPENROUTER_PROVIDER_ORDER` is no longer needed and was removed from the deployment
-     (2026-08-07). Unset now means `sort=latency`, not OpenRouter's price-weighted
-     default, so there is nothing to set for routing to be active. Setting it still
-     pins a named upstream and overrides the sort — re-measure before doing so.
+   - Nothing to set for OpenRouter routing. `OPENROUTER_PROVIDER_ORDER` was deleted
+     outright on 2026-08-07 — the worker always asks for `sort=latency`. If an old
+     manifest or shell still exports it, it is inert and can be dropped.
    - CVE baseline: 1 CRITICAL + 3 HIGH, identical to the running image. Compare against the
      live digest's scan rather than blocking on the raw count.
 

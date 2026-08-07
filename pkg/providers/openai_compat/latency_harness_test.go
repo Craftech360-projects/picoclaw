@@ -186,18 +186,23 @@ func TestLatencyHarness(t *testing.T) {
 	promptLen := len(systemPrompt) + len(p.GreetingPrompt)
 	tools := harnessTools()
 
+	// extraBody merges last, so each entry replaces the provider block the
+	// request builder produces. "shipped_default" sends whatever that builder
+	// currently emits, so it re-measures the real behaviour rather than a copy
+	// of it that can drift.
 	configs := []struct {
 		name      string
-		env       string         // OPENROUTER_PROVIDER_ORDER
-		extraBody map[string]any // overrides the built provider block
+		extraBody map[string]any
 	}{
-		{name: "baseline_unpinned", env: ""},
-		{name: "pinned_deepinfra", env: "DeepInfra"},
-		{name: "sort_latency", env: "", extraBody: map[string]any{
-			"provider": map[string]any{"sort": "latency", "allow_fallbacks": true},
+		{name: "shipped_default"},
+		{name: "price_routing", extraBody: map[string]any{
+			"provider": map[string]any{"sort": "price", "allow_fallbacks": true},
 		}},
-		{name: "sort_throughput", env: "", extraBody: map[string]any{
+		{name: "sort_throughput", extraBody: map[string]any{
 			"provider": map[string]any{"sort": "throughput", "allow_fallbacks": true},
+		}},
+		{name: "pinned_deepinfra", extraBody: map[string]any{
+			"provider": map[string]any{"order": []string{"DeepInfra"}, "allow_fallbacks": true},
 		}},
 	}
 
@@ -210,8 +215,6 @@ func TestLatencyHarness(t *testing.T) {
 
 	for _, cfg := range configs {
 		t.Run(cfg.name, func(t *testing.T) {
-			t.Setenv("OPENROUTER_PROVIDER_ORDER", cfg.env)
-
 			opts := []Option{}
 			if cfg.extraBody != nil {
 				opts = append(opts, WithExtraBody(cfg.extraBody))

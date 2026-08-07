@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -112,31 +111,25 @@ func (p *Provider) buildRequestBody(
 		"messages": common.SerializeMessages(messages),
 	}
 
-	// OpenRouter fans one model slug out across upstreams whose latency differs
-	// by orders of magnitude. Measured against this exact 25k-char prompt on
-	// google/gemma-4-31b-it: DeepInfra warm 717ms / worst 1486ms, Parasail warm
-	// 1552ms but a 52,130ms outlier in six requests. Default routing weights
-	// price, so it will hand a child that 52s wait sooner or later. Pinning the
-	// order also keeps the prefix cache warm - each upstream caches separately,
-	// so bouncing between them wastes the byte-stable prompt prefix.
-	// Measured 2026-08-07 against the 21k-char Riddler greeting, 5 samples each:
-	// unpinned median 1111ms TTFT / ~4.0s total, and the model-slug ":deepinfra"
-	// suffix does NOT pin (those requests were served by CoreWeave and Parasail).
-	// sort=latency picked Cerebras: 760ms TTFT / ~0.8s total. Price routing is
-	// what hands out the Parasail 52s outlier the constant below documents.
+	// OpenRouter fans one model slug out across upstreams whose latency differs by
+	// orders of magnitude, and its default routing weights PRICE, so it will hand
+	// a child a multi-second wait sooner or later. Measured 2026-08-07 against the
+	// 21k-char Riddler greeting, 5 samples each: price routing gave 1111ms TTFT /
+	// ~4.0s total on CoreWeave, against 760ms / ~0.8s for sort=latency. The
+	// ":deepinfra" style slug suffix is not an alternative - those requests were
+	// still served by CoreWeave and Parasail, the latter carrying a measured
+	// 52,130ms outlier.
+	//
+	// Sorting rather than a fixed list on purpose: the fastest upstream changes as
+	// endpoints are added and drift, a pinned name silently goes stale, and a pin
+	// is only a preference anyway - order:["Cerebras"] with fallbacks enabled was
+	// observed being served by DeepInfra.
 	if isOpenRouterBase(p.apiBase) {
-		provider := map[string]any{
+		requestBody["provider"] = map[string]any{
+			"sort": "latency",
 			// Degrade rather than fail: a slow greeting beats no greeting.
 			"allow_fallbacks": true,
 		}
-		// An explicit order still wins - it is how a deployment pins one upstream
-		// to keep its prefix cache warm.
-		if order := openRouterProviderOrder(p.apiBase); len(order) > 0 {
-			provider["order"] = order
-		} else {
-			provider["sort"] = "latency"
-		}
-		requestBody["provider"] = provider
 	}
 
 	// When fallback uses a different provider (e.g. DeepSeek), that provider must not inject web_search_preview.
@@ -518,30 +511,11 @@ func parseToolArgsBestEffort(raw string) (map[string]any, bool) {
 	return nil, false
 }
 
-// openRouterProviderOrder returns the pinned upstream order for OpenRouter
-// requests, or nil to leave routing alone.
-//
-// Env-driven rather than config: the right upstream changes as endpoints are
-// added and their performance drifts, and retuning it should not need a
-// rebuild and redeploy of the worker. Unset means OpenRouter's default routing,
-// so this is inert until someone opts in.
-//
-//	OPENROUTER_PROVIDER_ORDER="DeepInfra,Crusoe"
+// isOpenRouterBase reports whether requests to this API base go through
+// OpenRouter, which is the only host that understands the "provider" routing
+// field. Sending it elsewhere risks a 400 from hosts that reject unknown fields.
 func isOpenRouterBase(apiBase string) bool {
 	return strings.Contains(strings.ToLower(apiBase), "openrouter.ai")
-}
-
-func openRouterProviderOrder(apiBase string) []string {
-	if !isOpenRouterBase(apiBase) {
-		return nil
-	}
-	var out []string
-	for _, part := range strings.Split(os.Getenv("OPENROUTER_PROVIDER_ORDER"), ",") {
-		if v := strings.TrimSpace(part); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 func isGeminiModelID(model string) bool {
