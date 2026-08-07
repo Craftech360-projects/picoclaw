@@ -638,6 +638,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	rs.participant = ps
 	rs.mu.Unlock()
 
+	// Before anything reads the history: the greeting must see the already-reset
+	// transcript, not reset it afterwards.
+	rs.bridge.ExpireStaleTranscript(ps.sessionKey)
+
 	if rs.stt == nil {
 		logger.WarnC("livekit", "STT provider not configured")
 		rs.speakSTTUnavailableFallback(errors.New("stt provider not configured"))

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -73,6 +74,19 @@ func (b *JSONLBackend) TruncateHistory(key string, keepLast int) {
 // space from logically truncated messages (no-op when there are none).
 func (b *JSONLBackend) Save(key string) error {
 	return b.store.Compact(context.Background(), key)
+}
+
+// LastActivity reports when the session was last written, when the underlying
+// store tracks it. The legacy JSON SessionManager does not, so callers must
+// treat a false result as "unknown", never as "stale".
+func (b *JSONLBackend) LastActivity(key string) (time.Time, bool) {
+	reporter, ok := b.store.(interface {
+		LastActivity(context.Context, string) (time.Time, bool)
+	})
+	if !ok {
+		return time.Time{}, false
+	}
+	return reporter.LastActivity(context.Background(), key)
 }
 
 // Close releases resources held by the underlying store.

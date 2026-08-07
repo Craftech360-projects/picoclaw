@@ -1,5 +1,5 @@
 ---
-status: decided
+status: built, unverified live
 assignee: unassigned
 ---
 
@@ -7,9 +7,18 @@ assignee: unassigned
 
 > **Decided 2026-08-07: option A.** Recorded in
 > `docs/adr/0006-raw-transcript-expires-durable-memory-does-not.md`.
-> The decision is made; the implementation below is not yet built.
 >
-> Implementation notes for whoever picks this up:
+> **Built 2026-08-07, not yet run against a live session.** The window is
+> `transcriptRetention = 30 * time.Minute` (`agent_bridge.go`), reset by
+> `AgentBridge.ExpireStaleTranscript`, called from `handleTrackSubscribed`
+> once the session key is known and before STT or the greeting reads history —
+> so it also applies when the greeting is disabled or in fallback mode. Last
+> activity is read through the optional `session.LastActivityReporter`, which
+> only `JSONLBackend` implements; the legacy JSON `SessionManager` cannot report
+> it and is therefore never reset. Unit coverage:
+> `pkg/livekit/transcript_retention_test.go`.
+>
+> Original implementation notes, kept for the record:
 >
 > - The last-activity timestamp already exists as `meta.UpdatedAt` in the JSONL
 >   store (`pkg/memory/jsonl.go:42`), so no new bookkeeping is needed — but it is
@@ -222,24 +231,56 @@ pair is a separate, larger decision — note it, do not bundle it here.
 
 ## Acceptance criteria
 
-- [ ] A decision is recorded (ADR under `docs/adr/`) naming the chosen option
+- [x] A decision is recorded (ADR under `docs/adr/`) naming the chosen option
       and the retention window, whatever the choice — including E
-- [ ] If A or C: a session starting after the window replays no stored turns,
-      verified from the greeting's `messages=` count in the turn log
-- [ ] A reconnect inside the window still resumes with context intact
-- [ ] The summary and `MEMORY.md` survive in every case — this ticket must not
+- [x] If A or C: a session starting after the window replays no stored turns —
+      asserted in `TestExpireStaleTranscript` against a real JSONL store.
+      **Still to confirm from a live greeting's `messages=` count.**
+- [x] A reconnect inside the window still resumes with context intact — same
+      test, first assertion. Also unverified live.
+- [x] The summary and `MEMORY.md` survive in every case — this ticket must not
       weaken cross-visit memory, only the raw transcript
 - [ ] Greeting TTFT re-measured after the change; expect roughly -335 ms, and
-      record it rather than assuming it
+      record it rather than assuming it — **attempted 2026-08-07 and not
+      obtained.** See "Why the A/B could not be run back-to-back" below. The
+      replay arm is solid (n=24 warm, median 1,104 ms); the expired arm has only
+      4 samples, none of them under the same conditions, so no delta can be
+      claimed in either direction.
 - [ ] `MEMO: type=daily_quiz` handling unaffected — quiz/riddle verdicts still
       attribute correctly after a reset session (see the traps in the parent plan)
 - [ ] Session-summary bullets in `MEMORY.md` carry the character that produced
-      them, and Cheeko's `greeting_prompt` points at `## Session Summaries`
-      rather than the non-existent `last_session` key. Correctness fix, worth
-      landing before A, but not a blocker for it
+      them **(done — `persistSummaryToMemoryFile` now writes
+      `- <ts> [<character>] (N messages): …`; pre-existing bullets stay
+      unlabelled)**, and Cheeko's `greeting_prompt` points at
+      `## Session Summaries` rather than the non-existent `last_session` key
+      **(not done — the prompt lives in `ai_agent_template` in the database, not
+      in this repo)**
 - [ ] Verified per character, not just on one: Quizzy and Riddler resume from
       the MEMO after a reset, Nani still genders correctly from `USER.md`, and
       Cheeko still opens with a personal hook
+
+## Why the A/B could not be run back-to-back
+
+Verified live 2026-08-07: the reset fires and does what it should. Four separate
+sessions logged `Expired stale transcript messages_reset=13..15`, and each of
+those greetings went out with `messages=4` where an unreset one carries
+`messages=17`. Reconnects are equally well covered — every back-to-back session
+resumed with all 17.
+
+What could not be done is a matched latency A/B, because **the retention window
+cannot be crossed twice in a row on one device without restarting the worker.**
+When a new session starts for a device that had a recent one, the previous
+session's teardown flush lands 1–2 seconds *before* the new session's retention
+check, rewriting `updated_at` to now. Instrumented directly: the first session
+after a worker start saw `idle_sec=86407`, every subsequent one saw `idle_sec=1`,
+against a transcript backdated 24 hours each time. This is the workspace-handoff
+path doing its job, not a defect — a real device coming back the next day has no
+pending teardown — but it means each clean expired sample needs a fresh worker,
+which reintroduces cold start into exactly the number being measured.
+
+Whoever finishes this: give each expired sample its own device MAC so no handoff
+flush is pending, or drive the warm-up session on a different device. Do not use
+one MAC and a sleep; that is what was tried.
 
 ## Do not re-derive these
 

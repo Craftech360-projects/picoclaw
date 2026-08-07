@@ -565,6 +565,47 @@ func (ab *AgentBridge) RealtimeChatPersistenceEnabled() bool {
 	return ok && marker.RealtimeChatPersistenceEnabled()
 }
 
+// transcriptRetention is how long a device's stored turns survive between
+// sessions. Comfortably above the 45s reconnect hint in workspace_handoff.go: a
+// dropped connection resumes with its context intact, a visit hours later opens
+// clean. See docs/adr/0006-raw-transcript-expires-durable-memory-does-not.md.
+const transcriptRetention = 30 * time.Minute
+
+// ExpireStaleTranscript drops the stored turns when the previous session ended
+// more than transcriptRetention ago, so a greeting is not preceded by a replay
+// of last month's conversation. The summary, USER.md, MEMORY.md and the Saved
+// State MEMO are untouched — only the raw transcript expires.
+func (ab *AgentBridge) ExpireStaleTranscript(sessionKey string) {
+	if ab == nil || ab.sessions == nil {
+		return
+	}
+	reporter, ok := ab.sessions.(session.LastActivityReporter)
+	if !ok {
+		return
+	}
+	// No timestamp means a first visit or a store that does not track one.
+	// Neither is evidence of staleness, so leave the transcript alone.
+	last, known := reporter.LastActivity(sessionKey)
+	if !known {
+		return
+	}
+	idle := time.Since(last)
+	if idle <= transcriptRetention {
+		return
+	}
+	existing := len(ab.sessions.GetHistory(sessionKey))
+	if existing == 0 {
+		return
+	}
+	ab.sessions.SetHistory(sessionKey, nil)
+	logger.InfoCF("livekit", "Expired stale transcript", map[string]any{
+		"session":           sessionKey,
+		"idle_minutes":      int(idle.Minutes()),
+		"messages_reset":    existing,
+		"retention_minutes": int(transcriptRetention.Minutes()),
+	})
+}
+
 // FinalizeSessionSummary summarizes the completed voice session even when the
 // rolling context threshold was not reached during the call.
 func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey string) (string, int, error) {
@@ -704,9 +745,9 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 	llmOpts := ab.optionsForProfile(profile)
 	ensureToolCallTokenBudget(ab.modelID, llmOpts, len(toolDefs))
 	logger.InfoCF("livekit", "LLM request config", map[string]any{
-		"session":        sessionKey,
-		"character":      ab.characterName,
-		"profile":        profile,
+		"session":   sessionKey,
+		"character": ab.characterName,
+		"profile":   profile,
 		// No "provider" field: it was the model slug's leading segment, which on an
 		// OpenRouter slug is the model's AUTHOR (google/gemma-4-31b-it:deepinfra
 		// logged provider=google while every byte went to openrouter.ai). The

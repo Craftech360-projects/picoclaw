@@ -114,6 +114,20 @@ func (s *JSONLStore) readMeta(key string) (sessionMeta, error) {
 	return meta, nil
 }
 
+// LastActivity reports when the session was last written to. ok is false for a
+// session with no metadata on disk — a first visit, which is not a stale one.
+func (s *JSONLStore) LastActivity(_ context.Context, sessionKey string) (time.Time, bool) {
+	l := s.sessionLock(sessionKey)
+	l.Lock()
+	defer l.Unlock()
+
+	meta, err := s.readMeta(sessionKey)
+	if err != nil || meta.UpdatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return meta.UpdatedAt, true
+}
+
 // writeMeta atomically writes the metadata file using the project's
 // standard WriteFileAtomic (temp + fsync + rename).
 func (s *JSONLStore) writeMeta(key string, meta sessionMeta) error {
