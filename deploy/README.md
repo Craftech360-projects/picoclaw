@@ -199,8 +199,11 @@ to `k8s/livekit-deployment.yaml` for a key without one is silently ignored.
 | `disabled` | No greeting. |
 
 `fallback` costs no LLM call and reaches first audio in about 1s; `dynamic` costs one
-call per session and measured about 5s to first audio on `gemma-4-31b-it`. Check which
-one production is on before debugging "why is the greeting generic":
+call per session and measured about 2.5s to first audio on `gemma-4-31b-it` (2026-08-07,
+warm worker, latency-sorted routing). Budget roughly 6s for the first session after a
+rollout - the first request in each worker process pays a cold-start cost. The older
+"about 5s" figure here predates latency routing. Check which one production is on before
+debugging "why is the greeting generic":
 
 ```powershell
 kubectl --context $Context -n $Namespace get secret picoclaw-config `

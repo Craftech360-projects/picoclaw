@@ -288,6 +288,46 @@ weights serve the child, so it rides on the Hinglish quality A/B
 4. No MEMO/state-file behavior change: `daily_quiz.md` still written, verdicts still
    attributed (spot-check one session's DB rows + workspace state files).
 
+## Results (2026-08-07)
+
+Shipped: `52cce92` (sort=latency default), `6c33799` (model-id normalization),
+`7daa14a` (removed the k8s Crusoe,CoreWeave pin).
+
+Greeting, live Riddler sessions, versus the 2026-08-06 baseline:
+
+| Marker | Baseline | Best observed | Median of 5 |
+|---|---|---|---|
+| `llm_first_token_ms` | 14,187 | 1,144 | **2,863** |
+| `tts_first_audio_ms` | 26,342 | 2,456 | ~4,400 |
+| `turn_total_e2e_ms` | 42,475 | 12,452 | ~14,600 |
+
+**Success criterion 1 was NOT met.** Target was a median under 2,000 ms and a
+worst under 4,000 ms; actual is median 2,863 ms, worst 5,046 ms. The 5x
+improvement is real, the bar is not cleared. Criteria 2-4 (consistent routing,
+no turn-2 regression, MEMO/state behaviour unchanged) hold.
+
+**Routing is no longer the bottleneck; prompt size is.** Two findings force this:
+
+1. Isolated, the same model on the same prompt returns a first token in
+   ~1.0-1.7s median regardless of routing config. The live greeting does not,
+   and the difference is what the greeting carries.
+2. The greeting's message count grows session over session on one device MAC -
+   11, 15, then 24 across three consecutive runs - and the slowest greeting
+   (5,046 ms) is the one with 24 messages. `tools=0` throughout, so tools are
+   correctly excluded and are not a factor.
+
+This revives lead 1 from the handoff, which the routing work appeared to
+falsify. It did not: that dismissal rested on a fixed two-message probe, which
+cannot show a cost that scales with restored history. Whoever picks this up
+should measure TTFT against greeting message count directly, and look at why a
+first turn restores double-digit history at all.
+
+Provider pinning is also less trustworthy than the k8s comment implied: a
+request pinned with `order: ["Cerebras"]` and `allow_fallbacks: true` was
+served by DeepInfra. A pin names a preference, not a guarantee, so any
+conclusion attached to a provider name needs the routed-provider log line to
+back it up.
+
 ## Parked (out of scope, recorded so they don't get lost)
 
 - Turn 2's ~13 s post-LLM `turn_total_e2e_ms` gap — confirm what the marker spans
