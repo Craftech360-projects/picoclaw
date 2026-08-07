@@ -1,9 +1,28 @@
 ---
-status: open
+status: decided
 assignee: unassigned
 ---
 
 # 001 — Decide how long a device's raw transcript survives
+
+> **Decided 2026-08-07: option A.** Recorded in
+> `docs/adr/0006-raw-transcript-expires-durable-memory-does-not.md`.
+> The decision is made; the implementation below is not yet built.
+>
+> Implementation notes for whoever picks this up:
+>
+> - The last-activity timestamp already exists as `meta.UpdatedAt` in the JSONL
+>   store (`pkg/memory/jsonl.go:42`), so no new bookkeeping is needed — but it is
+>   not on the `session.SessionStore` interface, so reaching it needs either a
+>   small interface addition or a livekit-side helper. Prefer whichever touches
+>   fewer implementations; `ephemeralSessionStore` in `pkg/agent/subturn.go` is a
+>   third implementer that must not be forgotten if the interface grows.
+> - `SetHistory` reads and rewrites meta, preserving the summary, so clearing
+>   messages through it does not disturb `GetSummary`. Assert that in the test
+>   rather than trusting this note.
+> - Hook the check at session start, before the greeting is triggered — the
+>   greeting must see the already-reset history, not reset it afterwards.
+> - Threshold must stay comfortably above the 45s reconnect hint (see ADR).
 
 ## Parent
 
