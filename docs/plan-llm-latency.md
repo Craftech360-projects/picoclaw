@@ -316,11 +316,45 @@ no turn-2 regression, MEMO/state behaviour unchanged) hold.
    (5,046 ms) is the one with 24 messages. `tools=0` throughout, so tools are
    correctly excluded and are not a factor.
 
-This revives lead 1 from the handoff, which the routing work appeared to
-falsify. It did not: that dismissal rested on a fixed two-message probe, which
-cannot show a cost that scales with restored history. Whoever picks this up
-should measure TTFT against greeting message count directly, and look at why a
-first turn restores double-digit history at all.
+### History size, measured 2026-08-07 (corrects the paragraph above)
+
+The "prompt size is the leading suspect" call was made from a three-point
+correlation and is **only partly right**. Measured directly, doubling the
+greeting prompt costs far less than that correlation implied:
+
+| Greeting variant | Messages | Chars | TTFT median |
+|---|---|---|---|
+| Persona only | 2 | 20,725 | 1,214 ms |
+| Persona + summary + restored history | 16 | 41,436 | 1,549 ms |
+
+**+335 ms for 2x the prompt.** Real, worth reclaiming, but it does not explain
+the 2,863 ms live median. Roughly a second in the worker path is still
+unaccounted for by either routing or prompt size, and that is the open question.
+
+What is confirmed about history:
+
+- It **persists on disk per device**, at
+  `workspace-device-<mac>/sessions/livekit_device_<mac>.jsonl`, and is reloaded
+  into every later session. So a greeting is only a "first turn" in name.
+- On the test device it held 13 messages / 20,396 chars (~5,100 tokens),
+  roughly doubling the greeting prompt, under a session key created
+  **2026-06-29** - over a month of carry-over.
+- Summarization is working, not broken: the meta file has a summary and history
+  is compacted at the threshold of 20. The floor it compacts to is what
+  persists, and that floor is re-sent forever.
+
+Two things ruled out, so nobody re-derives them:
+
+- **`memory/MEMORY.md` is NOT injected**, despite being the largest file in the
+  workspace at 27,965 bytes. `buildStaticContext` injects AGENT.md, SOUL.md,
+  USER.md and IDENTITY.md; MEMORY.md appears only as a path the model is told
+  to write to. Trimming it would buy nothing.
+- **Tools are already excluded from the greeting** (`tools=0` in every live
+  greeting), so handoff lead 5 is closed.
+
+The question worth asking is not "how do we compress history" but **why a new
+session replays a month-old transcript at all**, when USER.md and MEMORY.md
+already exist as the durable-memory mechanism and a summary is already computed.
 
 Provider pinning is also less trustworthy than the k8s comment implied: a
 request pinned with `order: ["Cerebras"]` and `allow_fallbacks: true` was
