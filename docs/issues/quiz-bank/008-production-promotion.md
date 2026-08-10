@@ -76,7 +76,9 @@ Order is load-bearing: each step's failure mode is the next step's silent bug.
    - Verify the code shipped — the image has no `strings`, and a `strings` miss returns a
      misleading 0:
      `docker run --entrypoint sh <img> -c "grep -ac 'routed to upstream' /usr/local/bin/picoclaw-livekit"`
-   - Set `OPENROUTER_PROVIDER_ORDER` in the pod env or the provider pin is inert.
+   - Nothing to set for OpenRouter routing. `OPENROUTER_PROVIDER_ORDER` was deleted
+     outright on 2026-08-07 — the worker always asks for `sort=latency`. If an old
+     manifest or shell still exports it, it is inert and can be dropped.
    - CVE baseline: 1 CRITICAL + 3 HIGH, identical to the running image. Compare against the
      live digest's scan rather than blocking on the raw count.
 

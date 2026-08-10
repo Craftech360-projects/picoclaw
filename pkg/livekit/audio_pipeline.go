@@ -18,6 +18,7 @@ import (
 	"github.com/neurosnap/sentences"
 	"github.com/neurosnap/sentences/english"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
@@ -419,12 +420,16 @@ type turnLatencyMeta struct {
 	LLMStart  time.Time
 	LLMFirst  time.Time
 	LLMFinal  time.Time
-	TTSFirst  time.Time
-	TTSFinal  time.Time
-	Completed bool
+	// Set by the provider's dispatch probe when the request leaves the process.
+	LLMDispatch time.Time
+	TTSFirst    time.Time
+	TTSFinal    time.Time
+	Completed   bool
 
 	STTFirstPartialMS      int64
 	STTFirstFinalMS        int64
+	LLMRequestBuildMS      int64
+	LLMProviderTTFTMS      int64
 	LLMFirstTokenMS        int64
 	LLMFinalTokenMS        int64
 	TTSFirstAudioMS        int64
@@ -507,6 +512,16 @@ func (ap *AudioPipeline) attachTurnLatencyMeta(turn voiceTurn, meta *turnLatency
 		return turn
 	}
 	turn.ctx = context.WithValue(turn.ctx, turnLatencyMetaKey{}, meta)
+	// LLMStart is stamped before the prompt is assembled, so llm_first_token_ms
+	// covers context building, disk reads and the slot wait as well as the call
+	// itself. The first dispatch of the turn is the boundary between the two.
+	turn.ctx = protocoltypes.WithDispatchProbe(turn.ctx, func(at time.Time) {
+		meta.mu.Lock()
+		defer meta.mu.Unlock()
+		if meta.LLMDispatch.IsZero() {
+			meta.LLMDispatch = at
+		}
+	})
 	return turn
 }
 
@@ -534,6 +549,13 @@ func (ap *AudioPipeline) logTurnLatency(meta *turnLatencyMeta, marker string, du
 	case "llm_first_token":
 		if meta.LLMFirstTokenMS == 0 {
 			meta.LLMFirstTokenMS = duration.Milliseconds()
+			meta.mu.Lock()
+			dispatch := meta.LLMDispatch
+			meta.mu.Unlock()
+			if !dispatch.IsZero() && !meta.LLMStart.IsZero() {
+				meta.LLMRequestBuildMS = dispatch.Sub(meta.LLMStart).Milliseconds()
+				meta.LLMProviderTTFTMS = meta.LLMFirstTokenMS - meta.LLMRequestBuildMS
+			}
 		}
 	case "llm_final_token":
 		meta.LLMFinalTokenMS = duration.Milliseconds()
@@ -600,6 +622,8 @@ func (ap *AudioPipeline) finalizeTurnLatency(meta *turnLatencyMeta, reason strin
 		"finalize_reason":                reason,
 		"stt_first_partial_ms":           meta.STTFirstPartialMS,
 		"stt_first_final_ms":             meta.STTFirstFinalMS,
+		"llm_request_build_ms":           meta.LLMRequestBuildMS,
+		"llm_provider_ttft_ms":           meta.LLMProviderTTFTMS,
 		"llm_first_token_ms":             meta.LLMFirstTokenMS,
 		"llm_final_token_ms":             meta.LLMFinalTokenMS,
 		"tts_first_audio_ms":             meta.TTSFirstAudioMS,

@@ -305,7 +305,12 @@ func (rs *RoomSession) persistSummaryToMemoryFile(bridge *AgentBridge, summary s
 	}
 
 	entry := strings.TrimSpace(strings.ReplaceAll(summary, "\n", " "))
+	// The file is device-scoped and every character on the device appends to it,
+	// so an unlabelled bullet lets Cheeko personalise from Quizzy's session.
 	ts := time.Now().Format("2006-01-02 15:04:05 MST")
+	if name := strings.TrimSpace(bridge.characterName); name != "" {
+		ts += " [" + name + "]"
+	}
 	if sourceMessageCount > 0 {
 		fmt.Fprintf(&sb, "- %s (%d messages): %s\n", ts, sourceMessageCount, entry)
 	} else {

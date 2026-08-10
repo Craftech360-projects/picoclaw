@@ -51,7 +51,7 @@ spec:
               app: picoclaw-livekit
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:d68b03583f047c70045613dced2b9b93a843b435cb7b84abac5590854f64fcb3
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:aac1d721313d71b0b0ab2803aeb339a582e1c6db829d1cd13a5407422a439d1a
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -64,6 +64,10 @@ spec:
               containerPort: 8192
               protocol: TCP
           env:
+            # There is no OpenRouter upstream pin here, and no env var to set:
+            # the worker always asks OpenRouter for sort=latency. This replaced a
+            # Crusoe,CoreWeave pin, which measured ~4x slower end to end than
+            # latency sorting on 2026-08-07.
             - name: PICOCLAW_CONFIG
               value: /etc/picoclaw/config.json
             - name: PICOCLAW_HOME

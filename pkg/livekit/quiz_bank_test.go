@@ -108,6 +108,42 @@ func TestRenderQuizQuestions(t *testing.T) {
 	}
 }
 
+func TestRenderQuizQuestionsNumbersContinueTheDayCount(t *testing.T) {
+	// The 2026-08-06 bees skip: under "2 of 10 scored so far today", a
+	// remainder list renumbered from 1 invited the model to hunt for "question
+	// 3" by label and skip two unanswered questions. Numbering the remainder
+	// from answered+1 makes that positional instinct land on the first entry.
+	batch := &QuizBatch{Level: 1, Band: "6-8", AnsweredToday: 2, Questions: []QuizQuestion{
+		{ID: 3, Text: "Which planet do we live on?", Answer: "Earth"},
+		{ID: 4, Text: "Which part of your body do you use to smell?", Answer: "your nose"},
+	}}
+	got := RenderQuizQuestions("{{QUIZ_QUESTIONS}}", batch)
+	for _, want := range []string{
+		"3. (id=3) Which planet do we live on?",
+		"4. (id=4) Which part of your body do you use to smell?",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "1. (id=3)") {
+		t.Errorf("remainder list must not restart at 1 mid-day:\n%s", got)
+	}
+}
+
+func TestRenderQuizQuestionsForbidsAdvancingOnSilence(t *testing.T) {
+	// Observed live 2026-08-06: greeting asked the first listed question, the
+	// child stayed silent, and the model walked on through the list with no
+	// verdict recorded. Nothing in the block forbade it.
+	batch := &QuizBatch{Level: 1, Band: "6-8", Questions: []QuizQuestion{{ID: 1, Text: "Q?", Answer: "A"}}}
+	got := RenderQuizQuestions("{{QUIZ_QUESTIONS}}", batch)
+	for _, want := range []string{"re-ask the same question", "never move on"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestFetchQuizBatch(t *testing.T) {
 	t.Run("unwraps envelope and parses string ids", func(t *testing.T) {
 		t.Setenv("MANAGER_API_URL", "")
@@ -128,6 +164,8 @@ func TestFetchQuizBatch(t *testing.T) {
 			config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL},
 			"svc-key",
 			"00:16:3e:ac:b5:38",
+			"",
+			"",
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -164,7 +202,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb")
+		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -180,7 +218,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb")
+		batch, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -199,7 +237,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb"); err == nil {
+		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", ""); err == nil {
 			t.Fatal("want error on HTTP 500")
 		}
 	})
@@ -211,7 +249,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb"); err == nil {
+		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "aa:bb", "", ""); err == nil {
 			t.Fatal("want error on non-zero api code")
 		}
 	})
@@ -224,7 +262,7 @@ func TestFetchQuizBatch(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "  "); err == nil {
+		if _, err := FetchQuizBatch(context.Background(), config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL}, "k", "  ", "", ""); err == nil {
 			t.Fatal("want error for empty device mac")
 		}
 		if called {
@@ -253,6 +291,7 @@ func TestPostQuizAnswer(t *testing.T) {
 		"aa:bb",
 		482,
 		"correct",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -112,16 +111,34 @@ func (p *Provider) buildRequestBody(
 		"messages": common.SerializeMessages(messages),
 	}
 
-	// OpenRouter fans one model slug out across upstreams whose latency differs
-	// by orders of magnitude. Measured against this exact 25k-char prompt on
-	// google/gemma-4-31b-it: DeepInfra warm 717ms / worst 1486ms, Parasail warm
-	// 1552ms but a 52,130ms outlier in six requests. Default routing weights
-	// price, so it will hand a child that 52s wait sooner or later. Pinning the
-	// order also keeps the prefix cache warm - each upstream caches separately,
-	// so bouncing between them wastes the byte-stable prompt prefix.
-	if order := openRouterProviderOrder(p.apiBase); len(order) > 0 {
+	// OpenRouter fans one model slug out across upstreams whose latency differs by
+	// orders of magnitude, and its default routing weights PRICE, so it will hand
+	// a child a multi-second wait sooner or later. Measured 2026-08-07 against the
+	// 21k-char Riddler greeting, 5 samples each: price routing gave 1111ms TTFT /
+	// ~4.0s total on CoreWeave, against 760ms / ~0.8s for sort=latency. The
+	// ":deepinfra" style slug suffix is not an alternative - those requests were
+	// still served by CoreWeave and Parasail, the latter carrying a measured
+	// 52,130ms outlier.
+	//
+	// Sorting rather than a fixed list on purpose: the fastest upstream changes as
+	// endpoints are added and drift, a pinned name silently goes stale, and a pin
+	// is only a preference anyway - order:["Cerebras"] with fallbacks enabled was
+	// observed being served by DeepInfra.
+	// sort=latency ranks on OpenRouter's aggregate stats, which is not the same as
+	// avoiding the tail: on 2026-08-07 it served two consecutive live turns from
+	// Parasail at 21,704ms and 16,909ms first-token, the same upstream carrying the
+	// 52,130ms outlier above. preferred_max_latency alone would not have stopped
+	// either one - OpenRouter documents it as deprioritising, not excluding - so the
+	// known-bad upstream is named and the cutoff covers the ones that are not.
+	if isOpenRouterBase(p.apiBase) {
 		requestBody["provider"] = map[string]any{
-			"order": order,
+			"sort": "latency",
+			// ponytail: one name, not a policy. If a second upstream turns
+			// pathological, tighten preferred_max_latency before growing this list.
+			"ignore": []string{"parasail"},
+			// Seconds, per OpenRouter. p90=3 leaves headroom over the ~1.4-2.7s
+			// first-token measured from the healthy upstreams (DeepInfra, ModelRun).
+			"preferred_max_latency": map[string]any{"p50": 1, "p90": 3},
 			// Degrade rather than fail: a slow greeting beats no greeting.
 			"allow_fallbacks": true,
 		}
@@ -240,6 +257,7 @@ func (p *Provider) Chat(
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
+	protocoltypes.ReportDispatch(ctx)
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
@@ -290,6 +308,7 @@ func (p *Provider) ChatStream(
 	// the entire request lifecycle including body reads, which would kill long streams.
 	// Context cancellation still provides the safety net.
 	streamClient := &http.Client{Transport: p.httpClient.Transport}
+	protocoltypes.ReportDispatch(ctx)
 	resp, err := streamClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
@@ -506,26 +525,11 @@ func parseToolArgsBestEffort(raw string) (map[string]any, bool) {
 	return nil, false
 }
 
-// openRouterProviderOrder returns the pinned upstream order for OpenRouter
-// requests, or nil to leave routing alone.
-//
-// Env-driven rather than config: the right upstream changes as endpoints are
-// added and their performance drifts, and retuning it should not need a
-// rebuild and redeploy of the worker. Unset means OpenRouter's default routing,
-// so this is inert until someone opts in.
-//
-//	OPENROUTER_PROVIDER_ORDER="DeepInfra,Crusoe"
-func openRouterProviderOrder(apiBase string) []string {
-	if !strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
-		return nil
-	}
-	var out []string
-	for _, part := range strings.Split(os.Getenv("OPENROUTER_PROVIDER_ORDER"), ",") {
-		if v := strings.TrimSpace(part); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
+// isOpenRouterBase reports whether requests to this API base go through
+// OpenRouter, which is the only host that understands the "provider" routing
+// field. Sending it elsewhere risks a 400 from hosts that reject unknown fields.
+func isOpenRouterBase(apiBase string) bool {
+	return strings.Contains(strings.ToLower(apiBase), "openrouter.ai")
 }
 
 func isGeminiModelID(model string) bool {
@@ -542,14 +546,30 @@ func normalizeModel(model, apiBase string) string {
 		return model
 	}
 
-	if strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+	if isOpenRouterBase(apiBase) {
+		// An OpenRouter id is exactly author/model, where the author is the
+		// model's creator ("google/gemma-4-31b-it"), not the gateway. Config
+		// written in picoclaw's internal "openrouter/<id>" form - the form
+		// defaults.go itself uses - therefore arrives one segment too long, and
+		// OpenRouter rejects it with "not a valid model ID". Strip the gateway
+		// prefix only when what remains is still author/model, so that
+		// openrouter/auto, a real model whose author genuinely is "openrouter",
+		// keeps both of its segments.
+		if strings.EqualFold(before, "openrouter") && strings.Contains(after, "/") {
+			return after
+		}
 		return model
 	}
 
 	prefix := strings.ToLower(before)
 	switch prefix {
+	// "gemini" belongs here for the same reason as "google": Google's
+	// OpenAI-compatible endpoint wants the bare id ("gemma-4-31b-it"), and a
+	// gemini/ prefix on the way in makes it 404. Real Gemini models are still
+	// recognised downstream by isGeminiModelID's "gemini-" substring, which
+	// survives the strip, so thought signatures are unaffected.
 	case "litellm", "moonshot", "nvidia", "groq", "ollama", "deepseek", "google",
-		"openrouter", "zhipu", "mistral", "vivgrid", "minimax", "novita":
+		"gemini", "openrouter", "zhipu", "mistral", "vivgrid", "minimax", "novita":
 		return after
 	default:
 		return model

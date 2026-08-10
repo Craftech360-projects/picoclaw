@@ -1,6 +1,10 @@
 package session
 
-import "github.com/sipeed/picoclaw/pkg/providers"
+import (
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
+)
 
 // SessionStore defines the persistence operations used by the agent loop.
 // Both SessionManager (legacy JSON backend) and JSONLBackend satisfy this
@@ -36,4 +40,11 @@ type SessionStore interface {
 // duplicate end-of-session transcript uploads.
 type RealtimeChatPersistenceMarker interface {
 	RealtimeChatPersistenceEnabled() bool
+}
+
+// LastActivityReporter is implemented by stores that can say when a session was
+// last written to. Callers use it to tell a reconnect from a new visit; stores
+// that cannot answer simply do not implement it.
+type LastActivityReporter interface {
+	LastActivity(key string) (time.Time, bool)
 }

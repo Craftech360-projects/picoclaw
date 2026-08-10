@@ -1,0 +1,295 @@
+---
+status: built, unverified live
+assignee: unassigned
+---
+
+# 001 — Decide how long a device's raw transcript survives
+
+> **Decided 2026-08-07: option A.** Recorded in
+> `docs/adr/0006-raw-transcript-expires-durable-memory-does-not.md`.
+>
+> **Built 2026-08-07, not yet run against a live session.** The window is
+> `transcriptRetention = 30 * time.Minute` (`agent_bridge.go`), reset by
+> `AgentBridge.ExpireStaleTranscript`, called from `handleTrackSubscribed`
+> once the session key is known and before STT or the greeting reads history —
+> so it also applies when the greeting is disabled or in fallback mode. Last
+> activity is read through the optional `session.LastActivityReporter`, which
+> only `JSONLBackend` implements; the legacy JSON `SessionManager` cannot report
+> it and is therefore never reset. Unit coverage:
+> `pkg/livekit/transcript_retention_test.go`.
+>
+> Original implementation notes, kept for the record:
+>
+> - The last-activity timestamp already exists as `meta.UpdatedAt` in the JSONL
+>   store (`pkg/memory/jsonl.go:42`), so no new bookkeeping is needed — but it is
+>   not on the `session.SessionStore` interface, so reaching it needs either a
+>   small interface addition or a livekit-side helper. Prefer whichever touches
+>   fewer implementations; `ephemeralSessionStore` in `pkg/agent/subturn.go` is a
+>   third implementer that must not be forgotten if the interface grows.
+> - `SetHistory` reads and rewrites meta, preserving the summary, so clearing
+>   messages through it does not disturb `GetSummary`. Assert that in the test
+>   rather than trusting this note.
+> - Hook the check at session start, before the greeting is triggered — the
+>   greeting must see the already-reset history, not reset it afterwards.
+> - Threshold must stay comfortably above the 45s reconnect hint (see ADR).
+
+## Parent
+
+`docs/plan-llm-latency.md`
+
+## The problem
+
+A new voice session is not a fresh conversation. The greeting — nominally the
+first turn — replays the device's stored transcript, so the model is re-read
+the tail of previous visits before it says hello.
+
+Measured on the test device 2026-08-07:
+
+- `workspace-device-00163eacb538/sessions/livekit_device_<mac>.jsonl` held
+  **13 messages / 20,396 chars (~5,100 tokens)**, roughly doubling the greeting
+  prompt on top of the ~5,200-token persona.
+- The session key's `created_at` is **2026-06-29** — over a month of carry-over.
+
+**This is a decision ticket, not a bug report.** Nothing here is misbehaving
+against its own design; two things with different retention needs simply share
+one lifecycle. Someone has to choose what the toy should remember between
+visits.
+
+## Why it happens
+
+`cmd/picoclaw-livekit/workspace_lifecycle.go:26`:
+
+```go
+managerBacked := managerAPIBaseURL(managerAPI) != "" && managerAPI.SessionStoreEnabled
+preserveWorkspace = !managerBacked
+```
+
+This is a deliberate either/or about who owns durable session state. Manager
+store on: the manager owns it, the local workspace is scratch, delete on close.
+Manager store off: the local workspace *is* the durable store, so preserve it.
+
+`session_store_enabled` is absent from config and defaults to `false`
+(`pkg/config/defaults.go:531`), so every deployment today takes the preserve
+branch.
+
+The workspace is preserved so the toy remembers the child — `USER.md`,
+`MEMORY.md`, the persona files. That part works as intended.
+`sessions/*.jsonl` just happens to live in the same directory, so preserving
+durable memory also preserves the raw transcript. One boolean governs both.
+
+The 45-second reconnect hint (`pkg/livekit/workspace_handoff.go:59`) confirms
+the gap: there is careful lifecycle thinking for "reconnected ten seconds
+later" and none for "came back tomorrow". The system cannot distinguish a
+**resumed connection** from a **new visit**.
+
+It is bounded, not unbounded: summarization compacts at 20 messages
+(`agent_bridge.go:1764`), so the transcript settles at a floor. That floor is
+then re-sent on every greeting, indefinitely.
+
+## Size of the prize — read before prioritising
+
+Direct A/B, real persona, 5 samples each, latency-sorted routing:
+
+| Greeting variant | Messages | Chars | TTFT median |
+|---|---|---|---|
+| Persona only | 2 | 20,725 | 1,214 ms |
+| Persona + summary + restored history | 16 | 41,436 | 1,549 ms |
+
+**+335 ms.** Real, but this is not the remaining latency problem — roughly a
+second of the live 2,863 ms median is still unexplained by routing or prompt
+size, and that belongs in its own ticket. Do not size this work as if it
+recovers the gap.
+
+There is a second, possibly stronger reason to care: a month-old verbatim
+transcript of a child's conversation sitting on disk with no expiry is a data
+retention question independent of latency. Whoever decides the policy should
+weigh that, and it may outrank the 335 ms.
+
+## Options
+
+**A. Age-based reset of the transcript only (recommended).**
+On session start, if the gap since the last session exceeds a threshold
+(30-60 min), drop the stored messages and keep the summary. Reconnects inside
+the window resume untouched.
+*For:* smallest change, confined to the session-start path, leaves
+workspace-preservation and `MEMORY.md` alone, and extends the reconnect-window
+concept the code already has. *Against:* introduces a second time constant that
+must not contradict the 45s hint; picking the threshold is a judgment call.
+
+**B. Always start clean; rely on summary + `MEMORY.md`.**
+Every session begins with no replayed turns.
+*For:* simplest to reason about, best latency, strongest retention story, and
+uses the durable-memory mechanism that already exists for exactly this.
+*Against:* a genuine reconnect mid-conversation loses immediate context and the
+child has to repeat themselves — the worst failure of the set, and the reason
+option A exists.
+
+**C. Cap the replay instead of ageing it (keep last N turns).**
+*For:* trivial, bounds cost regardless of age. *Against:* treats a month-old
+turn as equal to one from a minute ago; caps the symptom, not the cause. Fine
+as a stopgap combined with A.
+
+**D. Turn on the manager-backed session store (`session_store_enabled`).**
+Takes the other branch outright: the manager owns session state and the local
+workspace becomes disposable.
+*For:* uses the design's intended path, and centralises state for multi-worker
+deployments. *Against:* much larger change with its own retention question
+merely relocated to the manager, plus whatever `workspace_sync` /
+`workspace_restore` imply. Should be its own decision, not a latency fix.
+
+**E. Accept it.** Legitimate if cross-visit continuity is judged worth 335 ms.
+If chosen, say so in an ADR so this is not re-investigated a third time.
+
+Recommendation: **A**, with the threshold written down and a comment tying it
+to the 45s reconnect hint. Revisit **D** on its own merits.
+
+## What option A actually costs, per character
+
+Checked 2026-08-07 against the live `greeting_prompt` of each character. The
+question is not "does this character value continuity" but "where is it told to
+read continuity from" — anything reading `USER.md`, `MEMORY.md` or Saved State
+is unaffected, because A resets only the transcript.
+
+| Character | Reads continuity from | Cost of A |
+|---|---|---|
+| **Quizzy** | Saved State MEMO | **None — A helps** |
+| **Riddler** | Saved State MEMO | **None — A helps** |
+| **Nani** | `USER.md` (gender, for "beti") | **None** |
+| **Cheeko** | `MEMORY.md` + prior greeting wording | **Partial, see below** |
+
+**Quizzy and Riddler are not merely unharmed — their prompts already fight the
+transcript.** Both say, verbatim:
+
+> Neither conversation summaries nor earlier turns you can see in the chat
+> history mean a quiz is in progress or finished — that history spans previous
+> [sessions]
+
+and
+
+> If there is no such MEMO, the day is NOT complete no matter what any
+> conversation summary says
+
+That defensive wording exists because stale replayed history was misleading the
+model about quiz progress. Quiz and riddle resume run off
+`memory/state/daily_quiz.md` (verified present and authoritative: `MEMO:
+type=daily_quiz | date=2026-08-07 | status=in_progress | awaiting=81`) plus the
+answer rows in the database. A removes a known hazard for these two.
+
+**Nani** only reads `USER.md`, which A does not touch.
+
+**Cheeko is the only real cost**, and only in one respect. Its personalisation
+hook is aimed at durable memory, which survives A:
+
+> Before speaking, silently check the device's current local time and the
+> child's recent USER.md and MEMORY.md, especially last_session
+
+But it also says:
+
+> Do not repeat the same memory or greeting wording on consecutive sessions
+
+Detecting a repeat needs sight of the previous greeting, which lives only in the
+transcript. Under A, after a reset, Cheeko can reopen with wording it already
+used.
+
+**Three findings that change how to handle that:**
+
+1. **`MEMORY.md` IS injected — do not build a new mechanism for this.**
+   `GetMemoryContext` (`pkg/agent/memory.go:184`) reads it via `ReadLongTerm`
+   and appends it to the **dynamic** per-request context, not the static block.
+   It carries a `## Session Summaries` section that already holds **71 dated
+   entries** on the test device, capped to the newest 10 at injection
+   (`promptSessionSummaryCap`, `memory.go:136`). Cheeko therefore already
+   receives recent session context, and that context survives option A.
+2. **What is missing is not `last_session`, it is a character label.** The
+   summaries are device-scoped and unlabelled — `- 2026-06-29 16:22:00 IST
+   (9 messages): …` — so Cheeko reads Quizzy's and Riddler's sessions as if they
+   were its own. The gap is one field on an existing writer plus a prompt that
+   points at the real section name, not a new store.
+3. **The anti-repetition rule already fails with history present.** The stored
+   transcript holds two identical consecutive greetings ("Good afternoon,
+   Rahul. Ten riddles today. Riddle one…" at messages 2 and 4). The capability
+   A would remove is not working today.
+
+So A's cost to Cheeko is smaller than first assessed: its continuity source is
+`## Session Summaries`, which A does not touch. The transcript was never its
+intended source. Labelling the summaries per character is worth doing **before**
+A on correctness grounds — Cheeko currently personalises from other characters'
+sessions — but A does not depend on it.
+
+### Cross-character contamination (applies whatever you choose)
+
+The session key is **device-scoped, not character-scoped** —
+`livekit:device:<mac>`, one transcript per device shared by every character. A
+child who plays with Cheeko and then switches to Quizzy has Cheeko's turns
+replayed into Quizzy's context, which is precisely what Quizzy's defensive
+prompt wording is fighting. Nine device workspaces exist on this machine, each
+with a single shared transcript.
+
+A reduces this but does not fix it: a character switch inside the retention
+window still cross-contaminates. Scoping the transcript per character-device
+pair is a separate, larger decision — note it, do not bundle it here.
+
+## Acceptance criteria
+
+- [x] A decision is recorded (ADR under `docs/adr/`) naming the chosen option
+      and the retention window, whatever the choice — including E
+- [x] If A or C: a session starting after the window replays no stored turns —
+      asserted in `TestExpireStaleTranscript` against a real JSONL store.
+      **Still to confirm from a live greeting's `messages=` count.**
+- [x] A reconnect inside the window still resumes with context intact — same
+      test, first assertion. Also unverified live.
+- [x] The summary and `MEMORY.md` survive in every case — this ticket must not
+      weaken cross-visit memory, only the raw transcript
+- [ ] Greeting TTFT re-measured after the change; expect roughly -335 ms, and
+      record it rather than assuming it — **attempted 2026-08-07 and not
+      obtained.** See "Why the A/B could not be run back-to-back" below. The
+      replay arm is solid (n=24 warm, median 1,104 ms); the expired arm has only
+      4 samples, none of them under the same conditions, so no delta can be
+      claimed in either direction.
+- [ ] `MEMO: type=daily_quiz` handling unaffected — quiz/riddle verdicts still
+      attribute correctly after a reset session (see the traps in the parent plan)
+- [ ] Session-summary bullets in `MEMORY.md` carry the character that produced
+      them **(done — `persistSummaryToMemoryFile` now writes
+      `- <ts> [<character>] (N messages): …`; pre-existing bullets stay
+      unlabelled)**, and Cheeko's `greeting_prompt` points at
+      `## Session Summaries` rather than the non-existent `last_session` key
+      **(not done — the prompt lives in `ai_agent_template` in the database, not
+      in this repo)**
+- [ ] Verified per character, not just on one: Quizzy and Riddler resume from
+      the MEMO after a reset, Nani still genders correctly from `USER.md`, and
+      Cheeko still opens with a personal hook
+
+## Why the A/B could not be run back-to-back
+
+Verified live 2026-08-07: the reset fires and does what it should. Four separate
+sessions logged `Expired stale transcript messages_reset=13..15`, and each of
+those greetings went out with `messages=4` where an unreset one carries
+`messages=17`. Reconnects are equally well covered — every back-to-back session
+resumed with all 17.
+
+What could not be done is a matched latency A/B, because **the retention window
+cannot be crossed twice in a row on one device without restarting the worker.**
+When a new session starts for a device that had a recent one, the previous
+session's teardown flush lands 1–2 seconds *before* the new session's retention
+check, rewriting `updated_at` to now. Instrumented directly: the first session
+after a worker start saw `idle_sec=86407`, every subsequent one saw `idle_sec=1`,
+against a transcript backdated 24 hours each time. This is the workspace-handoff
+path doing its job, not a defect — a real device coming back the next day has no
+pending teardown — but it means each clean expired sample needs a fresh worker,
+which reintroduces cold start into exactly the number being measured.
+
+Whoever finishes this: give each expired sample its own device MAC so no handoff
+flush is pending, or drive the warm-up session on a different device. Do not use
+one MAC and a sleep; that is what was tried.
+
+## Do not re-derive these
+
+Checked on 2026-08-07, all dead ends:
+
+- ~~`memory/MEMORY.md` is not injected into the prompt.~~ **This was wrong and is
+  corrected below** — it is injected. The error came from reading
+  `buildStaticContext` alone and concluding from its absence there.
+- **Tools are already excluded from the greeting** — `tools=0` in every live
+  greeting, dropped at `agent_bridge.go:685`.
+- **Summarization is not broken.** The meta file carries a real summary and
+  history compacts at the threshold. The floor it compacts to is the issue.
