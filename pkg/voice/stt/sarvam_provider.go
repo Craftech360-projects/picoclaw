@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,19 @@ func (s *sarvamStreamAdapter) Finalize() error {
 func (s *sarvamStreamAdapter) Close() error {
 	var retErr error
 	s.closeOnce.Do(func() {
+		// Closing resultChan below is what makes RunInbound exit and the session go
+		// deaf for the rest of the call, so the one thing worth knowing is who
+		// called this. Six call sites close an STT stream and the logs named none
+		// of them; runtime.Caller costs nothing on a once-per-stream path.
+		caller := "unknown"
+		if _, file, line, ok := runtime.Caller(2); ok {
+			caller = fmt.Sprintf("%s:%d", file, line)
+		}
+		logger.WarnCF("livekit", "Sarvam STT stream closing", map[string]any{
+			"provider":    "sarvam",
+			"called_from": caller,
+		})
+
 		close(s.closed)
 
 		s.mu.Lock()
@@ -221,14 +235,23 @@ func (s *sarvamStreamAdapter) readLoop() {
 
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
+			// Always logged, including when we closed first. Suppressing it on our
+			// own close hid which side ended the stream, and a stream ending is what
+			// makes the session deaf — RunInbound exits when resultChan closes.
+			fields := map[string]any{"provider": "sarvam", "error": err.Error()}
+			if ce, ok := err.(*websocket.CloseError); ok {
+				fields["ws_close_code"] = ce.Code
+				fields["ws_close_text"] = ce.Text
+				fields["closed_by"] = "sarvam"
+			} else {
+				fields["closed_by"] = "transport"
+			}
 			select {
 			case <-s.closed:
+				fields["already_closed_locally"] = true
 			default:
-				logger.WarnCF("livekit", "Sarvam STT read error", map[string]any{
-					"provider": "sarvam",
-					"error":    err.Error(),
-				})
 			}
+			logger.WarnCF("livekit", "Sarvam STT read loop ended", fields)
 			return
 		}
 
