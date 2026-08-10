@@ -92,6 +92,12 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	q.Set("sample_rate", strconv.Itoa(sampleRate))
 	q.Set("encoding", "linear16")
 	q.Set("stream_type", "balanced")
+	// endpointing=vad hands turn-taking to Sarvam's VAD, which closes an utterance
+	// after ~0.7s — measured 0.64s and 0.70s on dev — and chops a child's sentence
+	// into fragments transcribed in isolation ("National" came back "Rational").
+	// manual means the server never decides: TEN VAD marks the boundaries and we
+	// send speech_start/speech_end/flush.
+	q.Set("endpointing", "manual")
 
 	connURL := wsURL + "?" + q.Encode()
 	header := http.Header{}
@@ -139,6 +145,10 @@ type sarvamStreamAdapter struct {
 	mu         sync.Mutex
 	closeOnce  sync.Once
 	speaking   bool
+	// Write-side only, guarded by mu. Separate from speaking, which the read loop
+	// owns: sharing one flag across both goroutines races, and a transcript.final
+	// arriving mid-utterance would clear it and emit a second speech_start.
+	utteranceOpen bool
 }
 
 func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
@@ -165,6 +175,16 @@ func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Under endpointing=manual the server waits to be told an utterance began. The
+	// first audio frame after a flush is that moment; TEN VAD has already decided
+	// the child is speaking by the time RunInbound forwards audio here.
+	if !s.utteranceOpen {
+		start, _ := json.Marshal(map[string]string{"event": "speech_start"})
+		if err := s.conn.WriteMessage(websocket.TextMessage, start); err != nil {
+			return fmt.Errorf("sarvam: send speech_start: %w", err)
+		}
+		s.utteranceOpen = true
+	}
 	if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return fmt.Errorf("sarvam: send audio: %w", err)
 	}
@@ -190,10 +210,20 @@ func (s *sarvamStreamAdapter) Finalize() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// speech_end closes the utterance TEN VAD opened; flush makes the server
+	// transcribe what it has rather than waiting for more audio. Both are needed
+	// under endpointing=manual — speech_end alone leaves the buffer sitting.
+	if s.utteranceOpen {
+		end, _ := json.Marshal(map[string]string{"event": "speech_end"})
+		if err := s.conn.WriteMessage(websocket.TextMessage, end); err != nil {
+			return fmt.Errorf("sarvam: send speech_end: %w", err)
+		}
+		s.utteranceOpen = false
+	}
 	if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return fmt.Errorf("sarvam: send flush: %w", err)
 	}
-	logger.DebugCF("livekit", "Sarvam flush sent", map[string]any{"provider": "sarvam"})
+	logger.DebugCF("livekit", "Sarvam speech_end + flush sent", map[string]any{"provider": "sarvam"})
 	return nil
 }
 
