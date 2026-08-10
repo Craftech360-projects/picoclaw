@@ -53,7 +53,7 @@ The source of truth for devices, characters (agents), providers, RFID content, a
 - **Route groups** (`src/routes/index.js`, logic in `src/services/*`):
   - `/agent` — character CRUD, persona templates, `prompt/:mac`, `config/:mac`, `device/:mac/{bootstrap,workspace-files,workspace-sync,workspace-lock,sessions,memory}`, `set-character`/`cycle-character`/`current-character`, chat history, MCP tools.
   - `/device` — register, bind/unbind, assign-kid, OTA firmware CRUD, token-usage ingestion.
-  - `/api/mobile` — parent app (kids, agents, devices, imagine feed, binding).
+  - `/api/mobile` — parent app (kids, agents, devices, imagine feed, binding). Progress screens: `/progress/{summary,details,trend}` (card taps, AI interactions, usage time) and `/progress/quiz` — per-level quiz and riddle performance, see below.
   - `/admin/rfid` — RFID cards/packs/series/questions, Qdrant RAG lookup, tap logs/analytics, content downloads.
   - `/livekit`, `/models`, `/config`, `/ttsVoice` — provider config; `GET /toy/livekit/providers/active` returns active LLM/STT/TTS/moderation/image providers with API keys. `PUT /livekit/providers/active/{type}` switches them.
   - `/ota` — `POST /toy/ota/activate` device activation (MAC from `Device-Id` header).
@@ -63,6 +63,40 @@ The source of truth for devices, characters (agents), providers, RFID content, a
 - **Outbound calls**: mqtt-gateway internal (`http://127.0.0.1:8091/internal/settings/publish-update`, X-Service-Key) at `deviceSettings.service.js:602`; Qdrant, Mem0, S3/CloudFront, Firebase Admin/FCM, SMTP daily reports.
 - **Does NOT**: mint LiveKit tokens, connect to MQTT broker directly, or dispatch agents. It is pulled from, not pushing (except the settings-publish call to the gateway).
 - ⚠️ `.env` in working tree contains live DB/AWS/SMTP secrets.
+
+### Parent-app quiz analytics (`GET /toy/api/mobile/progress/quiz`)
+
+`?period=today|week|month`, Firebase auth, scoped to the parent's own devices via
+`resolveProgressScope`. Returns one entry per bank (`quiz`, `riddle`), each broken
+down **per level** rather than as one blended figure — a week can span several
+levels, and one percentage across them hides which level is struggling.
+
+What the numbers mean, because three of them are easy to misread:
+
+- **Attempts, not distinct questions.** A `wrong` answer does not clear a question,
+  so it returns on a later day and contributes a second attempt. `attempted` can
+  therefore exceed the level's question count. This is deliberate: the screen
+  reports what the period contained, not what the child currently knows.
+- **`revealed` is reported separately from `wrong`.** `quiz.service.js` treats
+  `['correct','revealed']` as Cleared, so a revealed question advances the child
+  without them answering it. Folded into either bucket, that signal disappears.
+- **`replay: true`** means every question answered at that level was already
+  cleared before the period opened — a practice pass, not first contact. Champion
+  replay starts only once *all* levels are cleared (`replay = state.allCleared`),
+  and with 3 levels per band that arrives quickly.
+
+`cleared` and `current_level` mirror `quiz.logic.js` rather than inventing a second
+progression rule. `trend` compares the period against the equal-length one before
+it, with `direction: 'new'` when there is no baseline and a ±5 point dead band so a
+single question's swing isn't reported to a parent as progress.
+
+⚠️ Two known gaps. The child's spoken answer and per-question timing are **not
+recorded anywhere** — `{quiz,riddle}_question_answer` hold only
+`(device_mac, question_id, result, answered_at)` — so a mockup showing "your
+answer: 6" or "25s" needs a schema plus MEMO change first. And this endpoint
+buckets days in the parent's timezone while the quiz day-gate uses **server-local**
+midnight (`quiz.service.js`), so a late-evening answer can fall on different days
+in the two systems.
 
 ## 2. MQTT Gateway (`mqtt-gateway`)
 
