@@ -122,11 +122,12 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	}
 
 	stream := &sarvamStreamAdapter{
-		conn:       conn,
-		resultChan: make(chan TranscriptEvent, 32),
-		closed:     make(chan struct{}),
-		language:   language,
-		sampleRate: sampleRate,
+		conn:        conn,
+		resultChan:  make(chan TranscriptEvent, 32),
+		closed:      make(chan struct{}),
+		language:    language,
+		sampleRate:  sampleRate,
+		binaryAudio: sarvamBinaryAudioFrames(),
 	}
 
 	logger.DebugCF("livekit", "Sarvam STT websocket opened", map[string]any{
@@ -150,6 +151,8 @@ type sarvamStreamAdapter struct {
 	mu         sync.Mutex
 	closeOnce  sync.Once
 	speaking   bool
+	// Raw PCM in binary frames rather than base64 inside a JSON text frame.
+	binaryAudio bool
 }
 
 func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
@@ -162,9 +165,19 @@ func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
 	default:
 	}
 
-	// linear16, matching the encoding declared on the connection. This said
-	// "audio/wav" while sending headerless PCM, so every frame contradicted its own
-	// label — the other half of the mismatch that made the old endpoint silent.
+	// encoding=linear16 on the connection says the socket carries raw
+	// little-endian PCM, so audio goes as binary frames. Wrapping it in a JSON text
+	// frame gave the server nothing it could decode as audio: it stayed open,
+	// reported no error, and transcribed nothing.
+	if s.binaryAudio {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.conn.WriteMessage(websocket.BinaryMessage, pcm); err != nil {
+			return fmt.Errorf("sarvam: send audio: %w", err)
+		}
+		return nil
+	}
+
 	msg := map[string]any{
 		"audio": map[string]any{
 			"data":        base64.StdEncoding.EncodeToString(pcm),
@@ -418,6 +431,18 @@ func sarvamStreamingURL() string {
 // supplies. The active row still says saaras:v3, and sending a non-realtime model
 // to the realtime endpoint is exactly the kind of mismatch that produced silence
 // rather than an error.
+// sarvamBinaryAudioFrames reports whether audio goes as raw binary frames.
+// Defaults on: the JSON-text framing it replaces never produced a transcript on
+// either endpoint. Set SARVAM_STT_AUDIO_FRAMES=json to go back.
+func sarvamBinaryAudioFrames() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SARVAM_STT_AUDIO_FRAMES"))) {
+	case "json", "text", "base64":
+		return false
+	default:
+		return true
+	}
+}
+
 func realtimeSarvamModel(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {

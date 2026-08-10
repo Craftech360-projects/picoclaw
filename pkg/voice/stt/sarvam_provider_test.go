@@ -2,7 +2,6 @@ package stt
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,37 +58,19 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 		}
 		defer conn.Close()
 
-		_, audioData, err := conn.ReadMessage()
+		// Audio must arrive as a raw binary frame. It used to be base64 inside a JSON
+		// text frame, which the real endpoint accepted and never transcribed — the
+		// old assertions here passed while production heard nothing.
+		audioType, audioData, err := conn.ReadMessage()
 		if err != nil {
 			errCh <- err
 			return
 		}
-		var audioMsg struct {
-			Audio struct {
-				Data       string `json:"data"`
-				SampleRate int    `json:"sample_rate"`
-				Encoding   string `json:"encoding"`
-			} `json:"audio"`
+		if audioType != websocket.BinaryMessage {
+			errCh <- fmt.Errorf("audio frame type = %d, want BinaryMessage (%d)", audioType, websocket.BinaryMessage)
 		}
-		if err := json.Unmarshal(audioData, &audioMsg); err != nil {
-			errCh <- err
-			return
-		}
-		decoded, err := base64.StdEncoding.DecodeString(audioMsg.Audio.Data)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		if string(decoded) != "pcm" {
-			errCh <- fmt.Errorf("audio payload = %q, want pcm", string(decoded))
-		}
-		if audioMsg.Audio.SampleRate != 16000 {
-			errCh <- fmt.Errorf("audio sample_rate = %d, want 16000", audioMsg.Audio.SampleRate)
-		}
-		// Must match the connection-level encoding; it used to claim audio/wav while
-		// sending headerless PCM.
-		if audioMsg.Audio.Encoding != "linear16" {
-			errCh <- fmt.Errorf("audio encoding = %q, want linear16", audioMsg.Audio.Encoding)
+		if string(audioData) != "pcm" {
+			errCh <- fmt.Errorf("audio payload = %q, want pcm", string(audioData))
 		}
 
 		_, flushData, err := conn.ReadMessage()
