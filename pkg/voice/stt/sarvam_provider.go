@@ -200,10 +200,7 @@ func (s *sarvamStreamAdapter) Close() error {
 		// deaf for the rest of the call, so the one thing worth knowing is who
 		// called this. Six call sites close an STT stream and the logs named none
 		// of them; runtime.Caller costs nothing on a once-per-stream path.
-		caller := "unknown"
-		if _, file, line, ok := runtime.Caller(2); ok {
-			caller = fmt.Sprintf("%s:%d", file, line)
-		}
+		caller := closeCallerOutsideAdapter()
 		logger.WarnCF("livekit", "Sarvam STT stream closing", map[string]any{
 			"provider":    "sarvam",
 			"called_from": caller,
@@ -289,6 +286,7 @@ func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 		SignalType   string `json:"signal_type"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
+		s.logDroppedMessage("unparseable_json", data)
 		return TranscriptEvent{}, false
 	}
 
@@ -308,6 +306,7 @@ func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 			s.speaking = false
 			return TranscriptEvent{IsFinal: true, SpeechEnd: true, Language: s.language}, true
 		default:
+			s.logDroppedMessage("unknown_signal_type", data)
 			return TranscriptEvent{}, false
 		}
 	case "data", "transcript":
@@ -316,6 +315,10 @@ func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 			text = strings.TrimSpace(msg.Transcript)
 		}
 		if text == "" {
+			// Sarvam answered, with nothing in it. Dropping this silently is why a
+			// turn can hang forever: RunInbound keeps waiting for a transcript that
+			// has already been and gone. Surfaced so an empty reply is diagnosable.
+			s.logDroppedMessage("empty_transcript", data)
 			return TranscriptEvent{}, false
 		}
 		lang := strings.TrimSpace(msg.Data.LanguageCode)
@@ -346,7 +349,44 @@ func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 		})
 		return TranscriptEvent{}, false
 	default:
+		s.logDroppedMessage("unknown_message_type", data)
 		return TranscriptEvent{}, false
+	}
+}
+
+// logDroppedMessage records a reply the parser could not turn into an event. Kept
+// at debug because both deployments run with --log-level debug, and the payloads
+// are small and infrequent.
+func (s *sarvamStreamAdapter) logDroppedMessage(reason string, data []byte) {
+	const maxRaw = 400
+	raw := string(data)
+	if len(raw) > maxRaw {
+		raw = raw[:maxRaw] + "…"
+	}
+	logger.DebugCF("livekit", "Sarvam STT message dropped", map[string]any{
+		"provider": "sarvam",
+		"reason":   reason,
+		"raw":      raw,
+	})
+}
+
+// closeCallerOutsideAdapter names the code that closed the stream. Close runs
+// inside closeOnce.Do, so a fixed skip depth lands in sync/once.go — as the first
+// version of this diagnostic did. Walk out instead.
+func closeCallerOutsideAdapter() string {
+	pcs := make([]uintptr, 12)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if frame.File != "" &&
+			!strings.Contains(frame.File, "/sync/") &&
+			!strings.HasSuffix(frame.File, "sarvam_provider.go") {
+			return fmt.Sprintf("%s:%d", frame.File, frame.Line)
+		}
+		if !more {
+			return "unknown"
+		}
 	}
 }
 
