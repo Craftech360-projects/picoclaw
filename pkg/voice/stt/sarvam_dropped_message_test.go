@@ -108,3 +108,41 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// The live server sends confidence, start_s and end_s as bare numbers while the
+// docs show them quoted. A string-typed field made Unmarshal fail and discard the
+// whole message — a valid vad.speech_start was logged as unparseable_json.
+func TestParseMessageAcceptsNumericAndQuotedFields(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"numeric confidence", `{"event":"vad.speech_start","utterance_idx":1,"confidence":0.37}`},
+		{"quoted confidence", `{"event":"vad.speech_start","utterance_idx":1,"confidence":"0.95"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &sarvamStreamAdapter{language: "en-IN"}
+			evt, ok := s.parseMessage([]byte(tt.raw))
+			if !ok {
+				t.Fatalf("parseMessage(%s) ok = false; the message was discarded", tt.raw)
+			}
+			if !evt.SpeechStart {
+				t.Fatalf("event = %+v, want SpeechStart", evt)
+			}
+		})
+	}
+}
+
+// A final must survive either spelling of its timing fields, and still report a
+// duration.
+func TestParseMessageFinalWithNumericSpan(t *testing.T) {
+	s := &sarvamStreamAdapter{language: "en-IN"}
+	evt, ok := s.parseMessage([]byte(`{"event":"transcript.final","text":"blue","language":"en-IN","start_s":0.5,"end_s":2.0,"language_confidence":0.98}`))
+	if !ok {
+		t.Fatal("parseMessage() ok = false; a final with numeric timings was discarded")
+	}
+	if evt.Duration != 1.5 {
+		t.Fatalf("Duration = %v, want 1.5", evt.Duration)
+	}
+}

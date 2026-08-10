@@ -277,18 +277,18 @@ func (s *sarvamStreamAdapter) readLoop() {
 // on every successful connection.
 func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) {
 	var msg struct {
-		Event              string `json:"event"`
-		Text               string `json:"text"`
-		Language           string `json:"language"`
-		LanguageConfidence string `json:"language_confidence"`
-		UtteranceIdx       int    `json:"utterance_idx"`
-		StartS             string `json:"start_s"`
-		EndS               string `json:"end_s"`
-		Confidence         string `json:"confidence"`
-		Code               string `json:"code"`
-		Message            string `json:"message"`
-		IsFatal            bool   `json:"is_fatal"`
-		RequestID          string `json:"request_id"`
+		Event              string    `json:"event"`
+		Text               string    `json:"text"`
+		Language           string    `json:"language"`
+		LanguageConfidence flexFloat `json:"language_confidence"`
+		UtteranceIdx       int       `json:"utterance_idx"`
+		StartS             flexFloat `json:"start_s"`
+		EndS               flexFloat `json:"end_s"`
+		Confidence         flexFloat `json:"confidence"`
+		Code               string    `json:"code"`
+		Message            string    `json:"message"`
+		IsFatal            bool      `json:"is_fatal"`
+		RequestID          string    `json:"request_id"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		s.logDroppedMessage("unparseable_json", data)
@@ -382,14 +382,38 @@ func truncateForLog(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// sarvamSpan turns the string start_s/end_s pair into a duration in seconds.
-func sarvamSpan(startS, endS string) float64 {
-	start, err1 := strconv.ParseFloat(strings.TrimSpace(startS), 64)
-	end, err2 := strconv.ParseFloat(strings.TrimSpace(endS), 64)
-	if err1 != nil || err2 != nil || end <= start {
+// flexFloat accepts a JSON number or a quoted number.
+//
+// The docs show these fields quoted ("confidence":"0.95") and the live server
+// sends them bare ("confidence":0.37). A plain string field makes Unmarshal fail
+// and the whole message get discarded — which is how a valid vad.speech_start was
+// logged as unparseable_json. Silent drops on a type mismatch are the exact
+// failure class this provider has already lost days to.
+type flexFloat float64
+
+func (f *flexFloat) UnmarshalJSON(data []byte) error {
+	trimmed := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if trimmed == "" || trimmed == "null" {
+		*f = 0
+		return nil
+	}
+	v, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil {
+		// Unreadable is not fatal: losing one confidence value must not cost the
+		// transcript that came with it.
+		*f = 0
+		return nil
+	}
+	*f = flexFloat(v)
+	return nil
+}
+
+// sarvamSpan turns the start_s/end_s pair into a duration in seconds.
+func sarvamSpan(startS, endS flexFloat) float64 {
+	if endS <= startS {
 		return 0
 	}
-	return end - start
+	return float64(endS - startS)
 }
 
 // logDroppedMessage records a reply the parser could not turn into an event. Kept
