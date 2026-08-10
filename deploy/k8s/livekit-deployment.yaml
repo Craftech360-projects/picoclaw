@@ -51,7 +51,7 @@ spec:
               app: picoclaw-livekit
       containers:
         - name: livekit
-          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:aac1d721313d71b0b0ab2803aeb339a582e1c6db829d1cd13a5407422a439d1a
+          image: 382188660865.dkr.ecr.ap-south-2.amazonaws.com/picoclaw-livekit@sha256:071e9bcd38d705bf086ac5d517bc60c01b6d6f31a7886f561eb84adf5fcb993a
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -84,8 +84,17 @@ spec:
               value: "8192"
             - name: PICOCLAW_LIVEKIT_MAX_SESSIONS
               value: "15"
+            # Lower is MORE sensitive. Held at the value the pods were actually
+            # running (config.json's 0.68) so restoring the env override below is
+            # behaviour-neutral: main() discarded these overrides until 2026-08-10,
+            # and the 0.72 that sat here for weeks was never in force.
+            #
+            # Measured before changing it: TEN VAD scores real child speech at
+            # median 0.67-0.72, p75 ~0.92, so ~50% of frames clear 0.68 and the
+            # threshold was not the reason a device seemed deaf. Re-tune only
+            # against recordings captured through the toy's own mic.
             - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD
-              value: "0.72"
+              value: "0.68"
             - name: PICOCLAW_LIVEKIT_RUNTIME_VAD_ENDPOINT_MS
               value: "700"
             - name: PICOCLAW_AGENTS_DEFAULTS_WORKSPACE

@@ -106,7 +106,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: livekit_service.server_url is required")
 		os.Exit(1)
 	}
-	applyLiveKitRuntimeEnvOverrides(&lkCfg.Runtime)
+	// Applied to cfg, not to the lkCfg copy: the manager-providers block below
+	// reassigns lkCfg from cfg, which silently discarded every env override
+	// whenever a manager API was configured — i.e. always in dev and prod.
+	// PICOCLAW_LIVEKIT_RUNTIME_VAD_THRESHOLD=0.72 was live in the EKS manifest for
+	// weeks while the pods ran the config-file 0.68.
+	applyLiveKitRuntimeEnvOverrides(&cfg.LiveKitService.Runtime)
+	lkCfg = cfg.LiveKitService
 
 	// When the manager API is configured, seed the config with its active
 	// providers (LLM/STT/TTS) before building the startup provider — otherwise
