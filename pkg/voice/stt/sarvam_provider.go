@@ -84,7 +84,12 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	q.Set("sample_rate", strconv.Itoa(sampleRate))
 	q.Set("input_audio_codec", "pcm_s16le")
 	q.Set("flush_signal", "true")
-	q.Set("vad_signals", "true")
+	// ponytail: Sarvam's own VAD closes an utterance after ~0.7s, which chops a
+	// child's sentence into one-second fragments and finalises each one. We have
+	// TEN VAD already; one VAD owns the turn boundary, and it is ours. Transcripts
+	// now come only from our flush. Flip back to "true" if flush proves to be a
+	// no-op on this endpoint — every transcript so far arrived via their VAD.
+	q.Set("vad_signals", "false")
 	if endpointMS := opts.EndpointingMS; endpointMS > 0 && endpointMS <= 700 {
 		q.Set("high_vad_sensitivity", "true")
 	}
@@ -114,12 +119,22 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 		sampleRate: sampleRate,
 	}
 
+	// ponytail: dump the whole handshake header rather than guessing which one
+	// Sarvam traces by. It is the only per-connection id available when the
+	// server then sends no frames at all.
+	handshakeHeaders := map[string]any{}
+	if resp != nil {
+		for k, v := range resp.Header {
+			handshakeHeaders[k] = strings.Join(v, ",")
+		}
+	}
 	logger.DebugCF("livekit", "Sarvam STT websocket opened", map[string]any{
-		"provider":    "sarvam",
-		"model":       model,
-		"mode":        mode,
-		"language":    language,
-		"sample_rate": sampleRate,
+		"provider":          "sarvam",
+		"model":             model,
+		"mode":              mode,
+		"language":          language,
+		"sample_rate":       sampleRate,
+		"handshake_headers": handshakeHeaders,
 	})
 
 	go stream.readLoop()
@@ -231,6 +246,18 @@ func (s *sarvamStreamAdapter) readLoop() {
 			}
 			return
 		}
+
+		// ponytail: log every frame raw rather than instrumenting each drop path.
+		// Proves whether Sarvam replied at all, and carries request_id whatever
+		// shape it arrives in. Inbound frames carry no audio, so they are small.
+		raw := string(data)
+		if len(raw) > 400 {
+			raw = raw[:400] + "…"
+		}
+		logger.DebugCF("livekit", "Sarvam STT frame received", map[string]any{
+			"provider": "sarvam",
+			"raw":      raw,
+		})
 
 		evt, ok := s.parseMessage(data)
 		if !ok {
