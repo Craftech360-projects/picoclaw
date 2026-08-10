@@ -18,7 +18,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
-const sarvamSTTWebsocketURL = "wss://api.sarvam.ai/speech-to-text/ws"
+// The realtime endpoint. /speech-to-text/ws also completes a websocket handshake
+// with 101 — verified 2026-08-10 — and then never returns a transcript, which is
+// how this went undiagnosed: the socket looked healthy because it was open.
+const sarvamSTTWebsocketURL = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
 
 // sarvamProvider implements STT using Sarvam's streaming WebSocket API.
 type sarvamProvider struct {
@@ -90,17 +93,16 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 
 	wsURL := sarvamStreamingURL()
 
+	// Parameter names the realtime endpoint documents: language_code with an
+	// underscore, and encoding rather than input_audio_codec. The previous set was
+	// accepted without complaint and silently ignored.
 	q := url.Values{}
-	q.Set("language-code", language)
-	q.Set("model", model)
+	q.Set("language_code", language)
+	q.Set("model", realtimeSarvamModel(model))
 	q.Set("mode", mode)
 	q.Set("sample_rate", strconv.Itoa(sampleRate))
-	q.Set("input_audio_codec", "pcm_s16le")
-	q.Set("flush_signal", "true")
-	q.Set("vad_signals", "true")
-	if endpointMS := opts.EndpointingMS; endpointMS > 0 && endpointMS <= 700 {
-		q.Set("high_vad_sensitivity", "true")
-	}
+	q.Set("encoding", "linear16")
+	q.Set("stream_type", "balanced")
 
 	connURL := wsURL + "?" + q.Encode()
 	header := http.Header{}
@@ -160,11 +162,14 @@ func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
 	default:
 	}
 
+	// linear16, matching the encoding declared on the connection. This said
+	// "audio/wav" while sending headerless PCM, so every frame contradicted its own
+	// label — the other half of the mismatch that made the old endpoint silent.
 	msg := map[string]any{
 		"audio": map[string]any{
 			"data":        base64.StdEncoding.EncodeToString(pcm),
 			"sample_rate": s.sampleRate,
-			"encoding":    "audio/wav",
+			"encoding":    "linear16",
 		},
 	}
 	data, err := json.Marshal(msg)
@@ -407,6 +412,21 @@ func sarvamStreamingURL() string {
 		return override
 	}
 	return sarvamSTTWebsocketURL
+}
+
+// realtimeSarvamModel keeps the realtime suffix on, whatever the manager DB
+// supplies. The active row still says saaras:v3, and sending a non-realtime model
+// to the realtime endpoint is exactly the kind of mismatch that produced silence
+// rather than an error.
+func realtimeSarvamModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "saaras:v3-realtime"
+	}
+	if strings.Contains(strings.ToLower(model), "realtime") {
+		return model
+	}
+	return model + "-realtime"
 }
 
 func normalizeSarvamSampleRate(sampleRate int) int {

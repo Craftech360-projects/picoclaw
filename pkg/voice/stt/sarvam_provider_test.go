@@ -40,14 +40,17 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 				errCh <- fmt.Errorf("query %s = %q, want %q", key, got, want)
 			}
 		}
-		assertQuery("language-code", "en-IN")
-		assertQuery("model", "saaras:v3")
+		// The realtime endpoint's names. These previously asserted language-code,
+		// input_audio_codec, flush_signal, vad_signals and high_vad_sensitivity,
+		// which Sarvam accepted and ignored — a green test over a silent socket.
+		assertQuery("language_code", "en-IN")
+		// The realtime suffix is added even though the manager DB still says
+		// saaras:v3; a non-realtime model on this endpoint is another silent mismatch.
+		assertQuery("model", "saaras:v3-realtime")
 		assertQuery("mode", "transcribe")
 		assertQuery("sample_rate", "16000")
-		assertQuery("input_audio_codec", "pcm_s16le")
-		assertQuery("flush_signal", "true")
-		assertQuery("vad_signals", "true")
-		assertQuery("high_vad_sensitivity", "true")
+		assertQuery("encoding", "linear16")
+		assertQuery("stream_type", "balanced")
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -83,8 +86,10 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 		if audioMsg.Audio.SampleRate != 16000 {
 			errCh <- fmt.Errorf("audio sample_rate = %d, want 16000", audioMsg.Audio.SampleRate)
 		}
-		if audioMsg.Audio.Encoding != "audio/wav" {
-			errCh <- fmt.Errorf("audio encoding = %q, want audio/wav", audioMsg.Audio.Encoding)
+		// Must match the connection-level encoding; it used to claim audio/wav while
+		// sending headerless PCM.
+		if audioMsg.Audio.Encoding != "linear16" {
+			errCh <- fmt.Errorf("audio encoding = %q, want linear16", audioMsg.Audio.Encoding)
 		}
 
 		_, flushData, err := conn.ReadMessage()
@@ -170,5 +175,18 @@ func nextSarvamEvent(t *testing.T, results <-chan TranscriptEvent) TranscriptEve
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for transcript event")
 		return TranscriptEvent{}
+	}
+}
+
+func TestRealtimeSarvamModel(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"", "saaras:v3-realtime"},
+		{"saaras:v3", "saaras:v3-realtime"},
+		{"saaras:v3-realtime", "saaras:v3-realtime"},
+		{"saarika:v2.5", "saarika:v2.5-realtime"},
+	} {
+		if got := realtimeSarvamModel(tt.in); got != tt.want {
+			t.Errorf("realtimeSarvamModel(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
