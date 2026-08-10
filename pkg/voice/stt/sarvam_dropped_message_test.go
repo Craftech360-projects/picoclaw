@@ -12,9 +12,12 @@ func TestParseMessageDropsAreClassified(t *testing.T) {
 		raw  string
 	}{
 		{"unparseable json", `not json at all`},
-		{"unknown signal type", `{"type":"events","data":{"signal_type":"SOMETHING_NEW"}}`},
-		{"empty transcript", `{"type":"data","data":{"transcript":"   "}}`},
-		{"unknown message type", `{"type":"heartbeat"}`},
+		{"empty partial", `{"event":"transcript.partial","text":"  "}`},
+		{"empty final", `{"event":"transcript.final","text":"   "}`},
+		{"unknown event", `{"event":"something.new"}`},
+		// The old schema. These used to be the only shapes the parser understood,
+		// which is why every real reply was discarded.
+		{"legacy type field", `{"type":"data","data":{"transcript":"blue"}}`},
 	}
 
 	for _, tt := range tests {
@@ -32,7 +35,7 @@ func TestParseMessageDropsAreClassified(t *testing.T) {
 // recognition of a real transcript.
 func TestParseMessageStillReadsATranscript(t *testing.T) {
 	s := &sarvamStreamAdapter{language: "en-IN"}
-	evt, ok := s.parseMessage([]byte(`{"type":"data","data":{"transcript":"blue","language_code":"en-IN"}}`))
+	evt, ok := s.parseMessage([]byte(`{"event":"transcript.final","text":"blue","language":"en-IN","start_s":"0.5","end_s":"2.0"}`))
 	if !ok {
 		t.Fatal("parseMessage() ok = false, want true")
 	}
@@ -41,6 +44,40 @@ func TestParseMessageStillReadsATranscript(t *testing.T) {
 	}
 	if !evt.IsFinal {
 		t.Fatal("IsFinal = false, want true")
+	}
+	if evt.Duration != 1.5 {
+		t.Fatalf("Duration = %v, want 1.5 (end_s - start_s)", evt.Duration)
+	}
+}
+
+// Interim results are what let barge-in happen mid-utterance; a partial must not
+// be reported as final or the turn ends on the first word.
+func TestParseMessageReadsAPartial(t *testing.T) {
+	s := &sarvamStreamAdapter{language: "en-IN"}
+	evt, ok := s.parseMessage([]byte(`{"event":"transcript.partial","text":"blu","language":"en-IN"}`))
+	if !ok {
+		t.Fatal("parseMessage() ok = false, want true")
+	}
+	if evt.Text != "blu" {
+		t.Fatalf("Text = %q, want %q", evt.Text, "blu")
+	}
+	if evt.IsFinal {
+		t.Fatal("IsFinal = true on a partial; the turn would end early")
+	}
+}
+
+// vad.speech_end carries no text, so it must not claim finality.
+func TestParseMessageVadSpeechEndIsNotFinal(t *testing.T) {
+	s := &sarvamStreamAdapter{language: "en-IN", speaking: true}
+	evt, ok := s.parseMessage([]byte(`{"event":"vad.speech_end","utterance_idx":0,"confidence":"0.92"}`))
+	if !ok {
+		t.Fatal("parseMessage() ok = false, want true")
+	}
+	if !evt.SpeechEnd {
+		t.Fatal("SpeechEnd = false, want true")
+	}
+	if evt.IsFinal || evt.Text != "" {
+		t.Fatalf("event = %+v, want SpeechEnd only with no text and no finality", evt)
 	}
 }
 

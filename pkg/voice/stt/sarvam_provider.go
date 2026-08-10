@@ -18,7 +18,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
-const sarvamSTTWebsocketURL = "wss://api.sarvam.ai/speech-to-text/ws"
+// The realtime endpoint. /speech-to-text/ws also completes a websocket handshake
+// with 101 — verified 2026-08-10 — and then never returns a transcript, which is
+// how this went undiagnosed: the socket looked healthy because it was open.
+const sarvamSTTWebsocketURL = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
 
 // sarvamProvider implements STT using Sarvam's streaming WebSocket API.
 type sarvamProvider struct {
@@ -76,19 +79,19 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	sampleRate := normalizeSarvamSampleRate(opts.SampleRate)
 	language := normalizeSarvamLang(opts.Language)
 	mode := normalizeSarvamMode(os.Getenv("SARVAM_STT_MODE"))
+
 	wsURL := sarvamStreamingURL()
 
+	// Parameter names the realtime endpoint documents: language_code with an
+	// underscore, and encoding rather than input_audio_codec. The previous set was
+	// accepted without complaint and silently ignored.
 	q := url.Values{}
-	q.Set("language-code", language)
-	q.Set("model", model)
+	q.Set("language_code", language)
+	q.Set("model", realtimeSarvamModel(model))
 	q.Set("mode", mode)
 	q.Set("sample_rate", strconv.Itoa(sampleRate))
-	q.Set("input_audio_codec", "pcm_s16le")
-	q.Set("flush_signal", "true")
-	q.Set("vad_signals", "true")
-	if endpointMS := opts.EndpointingMS; endpointMS > 0 && endpointMS <= 700 {
-		q.Set("high_vad_sensitivity", "true")
-	}
+	q.Set("encoding", "linear16")
+	q.Set("stream_type", "balanced")
 
 	connURL := wsURL + "?" + q.Encode()
 	header := http.Header{}
@@ -148,14 +151,14 @@ func (s *sarvamStreamAdapter) SendAudio(pcm []byte) error {
 	default:
 	}
 
-	msg := map[string]any{
-		"audio": map[string]any{
-			"data":        base64.StdEncoding.EncodeToString(pcm),
-			"sample_rate": s.sampleRate,
-			"encoding":    "audio/wav",
-		},
-	}
-	data, err := json.Marshal(msg)
+	// The documented shape: a JSON text frame with event=audio_input and the base64
+	// PCM as a plain string. This previously sent {"audio":{"data":…}} with no
+	// event field, which the server accepted, ignored, and never answered. Raw
+	// binary frames were also tried and are equally wrong — the spec is text+base64.
+	data, err := json.Marshal(map[string]string{
+		"event": "audio_input",
+		"audio": base64.StdEncoding.EncodeToString(pcm),
+	})
 	if err != nil {
 		return fmt.Errorf("sarvam: marshal audio message: %w", err)
 	}
@@ -179,7 +182,8 @@ func (s *sarvamStreamAdapter) Finalize() error {
 	default:
 	}
 
-	data, err := json.Marshal(map[string]string{"type": "flush"})
+	// event, not type. The old key meant no finalize ever reached the server.
+	data, err := json.Marshal(map[string]string{"event": "flush"})
 	if err != nil {
 		return fmt.Errorf("sarvam: marshal flush message: %w", err)
 	}
@@ -265,93 +269,127 @@ func (s *sarvamStreamAdapter) readLoop() {
 	}
 }
 
+// parseMessage maps a server frame to a TranscriptEvent.
+//
+// Dispatches on "event", which is what the realtime API sends. This used to
+// switch on "type" and look for data/transcript/events/speech_start, so not one
+// branch could ever match a real reply — including session.begin, which arrives
+// on every successful connection.
 func (s *sarvamStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) {
 	var msg struct {
-		Type string `json:"type"`
-		Data struct {
-			RequestID    string `json:"request_id"`
-			Transcript   string `json:"transcript"`
-			LanguageCode string `json:"language_code"`
-			SignalType   string `json:"signal_type"`
-			Message      string `json:"message"`
-			Metrics      struct {
-				AudioDuration     float64 `json:"audio_duration"`
-				ProcessingLatency float64 `json:"processing_latency"`
-			} `json:"metrics"`
-		} `json:"data"`
-		Transcript   string `json:"transcript"`
-		LanguageCode string `json:"language_code"`
-		Error        string `json:"error"`
-		Message      string `json:"message"`
-		SignalType   string `json:"signal_type"`
+		Event              string `json:"event"`
+		Text               string `json:"text"`
+		Language           string `json:"language"`
+		LanguageConfidence string `json:"language_confidence"`
+		UtteranceIdx       int    `json:"utterance_idx"`
+		StartS             string `json:"start_s"`
+		EndS               string `json:"end_s"`
+		Confidence         string `json:"confidence"`
+		Code               string `json:"code"`
+		Message            string `json:"message"`
+		IsFatal            bool   `json:"is_fatal"`
+		RequestID          string `json:"request_id"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		s.logDroppedMessage("unparseable_json", data)
 		return TranscriptEvent{}, false
 	}
 
-	switch strings.ToLower(strings.TrimSpace(msg.Type)) {
-	case "speech_start":
-		s.speaking = true
-		return TranscriptEvent{SpeechStart: true, Language: s.language}, true
-	case "speech_end":
-		s.speaking = false
-		return TranscriptEvent{IsFinal: true, SpeechEnd: true, Language: s.language}, true
-	case "events":
-		switch strings.ToUpper(firstNonEmpty(msg.Data.SignalType, msg.SignalType)) {
-		case "START_SPEECH":
-			s.speaking = true
-			return TranscriptEvent{SpeechStart: true, Language: s.language}, true
-		case "END_SPEECH":
-			s.speaking = false
-			return TranscriptEvent{IsFinal: true, SpeechEnd: true, Language: s.language}, true
-		default:
-			s.logDroppedMessage("unknown_signal_type", data)
-			return TranscriptEvent{}, false
-		}
-	case "data", "transcript":
-		text := strings.TrimSpace(msg.Data.Transcript)
-		if text == "" {
-			text = strings.TrimSpace(msg.Transcript)
-		}
-		if text == "" {
-			// Sarvam answered, with nothing in it. Dropping this silently is why a
-			// turn can hang forever: RunInbound keeps waiting for a transcript that
-			// has already been and gone. Surfaced so an empty reply is diagnosable.
-			s.logDroppedMessage("empty_transcript", data)
-			return TranscriptEvent{}, false
-		}
-		lang := strings.TrimSpace(msg.Data.LanguageCode)
-		if lang == "" {
-			lang = strings.TrimSpace(msg.LanguageCode)
-		}
-		if lang == "" {
-			lang = s.language
-		}
+	language := strings.TrimSpace(msg.Language)
+	if language == "" {
+		language = s.language
+	}
 
+	switch strings.ToLower(strings.TrimSpace(msg.Event)) {
+	case "session.begin":
+		// Proof the connection is really established, as opposed to merely open.
+		logger.DebugCF("livekit", "Sarvam STT session begin", map[string]any{
+			"provider": "sarvam", "request_id": msg.RequestID,
+		})
+		return TranscriptEvent{}, false
+
+	case "vad.speech_start":
+		s.speaking = true
+		return TranscriptEvent{SpeechStart: true, Language: language}, true
+
+	case "vad.speech_end":
+		// No IsFinal here: the text arrives separately in transcript.final, and
+		// claiming finality without text ends a turn with nothing in it.
+		s.speaking = false
+		return TranscriptEvent{SpeechEnd: true, Language: language}, true
+
+	case "transcript.partial":
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			s.logDroppedMessage("empty_partial", data)
+			return TranscriptEvent{}, false
+		}
+		evt := TranscriptEvent{Text: text, Language: language}
+		if !s.speaking {
+			s.speaking = true
+			evt.SpeechStart = true
+		}
+		return evt, true
+
+	case "transcript.final":
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			s.logDroppedMessage("empty_final", data)
+			return TranscriptEvent{}, false
+		}
 		evt := TranscriptEvent{
 			Text:      text,
 			IsFinal:   true,
 			SpeechEnd: true,
-			Language:  lang,
-			Duration:  msg.Data.Metrics.AudioDuration,
+			Language:  language,
+			Duration:  sarvamSpan(msg.StartS, msg.EndS),
 		}
 		if !s.speaking {
 			evt.SpeechStart = true
 		}
 		s.speaking = false
 		return evt, true
+
 	case "error":
-		logger.ErrorCF("livekit", "Sarvam STT error response", map[string]any{
+		logger.ErrorCF("livekit", "Sarvam STT error event", map[string]any{
 			"provider": "sarvam",
-			"error":    firstNonEmpty(msg.Error, msg.Message, msg.Data.Message),
-			"raw":      string(data),
+			"code":     msg.Code,
+			"is_fatal": msg.IsFatal,
+			"message":  firstNonEmpty(msg.Message, msg.Code),
+			"raw":      truncateForLog(string(data), 400),
 		})
 		return TranscriptEvent{}, false
+
+	case "session.end", "pong", "config.updated":
+		logger.DebugCF("livekit", "Sarvam STT control event", map[string]any{
+			"provider": "sarvam", "event": msg.Event,
+			"raw": truncateForLog(string(data), 200),
+		})
+		return TranscriptEvent{}, false
+
 	default:
-		s.logDroppedMessage("unknown_message_type", data)
+		s.logDroppedMessage("unknown_event", data)
 		return TranscriptEvent{}, false
 	}
+}
+
+// truncateForLog bounds a raw payload so a diagnostic cannot dump an unbounded
+// message into the log.
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// sarvamSpan turns the string start_s/end_s pair into a duration in seconds.
+func sarvamSpan(startS, endS string) float64 {
+	start, err1 := strconv.ParseFloat(strings.TrimSpace(startS), 64)
+	end, err2 := strconv.ParseFloat(strings.TrimSpace(endS), 64)
+	if err1 != nil || err2 != nil || end <= start {
+		return 0
+	}
+	return end - start
 }
 
 // logDroppedMessage records a reply the parser could not turn into an event. Kept
@@ -395,6 +433,21 @@ func sarvamStreamingURL() string {
 		return override
 	}
 	return sarvamSTTWebsocketURL
+}
+
+// realtimeSarvamModel keeps the realtime suffix on, whatever the manager DB
+// supplies. The active row still says saaras:v3, and sending a non-realtime model
+// to the realtime endpoint is exactly the kind of mismatch that produced silence
+// rather than an error.
+func realtimeSarvamModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "saaras:v3-realtime"
+	}
+	if strings.Contains(strings.ToLower(model), "realtime") {
+		return model
+	}
+	return model + "-realtime"
 }
 
 func normalizeSarvamSampleRate(sampleRate int) int {

@@ -40,14 +40,17 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 				errCh <- fmt.Errorf("query %s = %q, want %q", key, got, want)
 			}
 		}
-		assertQuery("language-code", "en-IN")
-		assertQuery("model", "saaras:v3")
+		// The realtime endpoint's names. These previously asserted language-code,
+		// input_audio_codec, flush_signal, vad_signals and high_vad_sensitivity,
+		// which Sarvam accepted and ignored — a green test over a silent socket.
+		assertQuery("language_code", "en-IN")
+		// The realtime suffix is added even though the manager DB still says
+		// saaras:v3; a non-realtime model on this endpoint is another silent mismatch.
+		assertQuery("model", "saaras:v3-realtime")
 		assertQuery("mode", "transcribe")
 		assertQuery("sample_rate", "16000")
-		assertQuery("input_audio_codec", "pcm_s16le")
-		assertQuery("flush_signal", "true")
-		assertQuery("vad_signals", "true")
-		assertQuery("high_vad_sensitivity", "true")
+		assertQuery("encoding", "linear16")
+		assertQuery("stream_type", "balanced")
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -56,35 +59,35 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 		}
 		defer conn.Close()
 
-		_, audioData, err := conn.ReadMessage()
+		// Audio must be a JSON text frame shaped {"event":"audio_input","audio":b64}.
+		// It has been {"audio":{"data":…}} and raw binary at different points; both
+		// were accepted by the real server and silently never transcribed.
+		audioType, audioData, err := conn.ReadMessage()
 		if err != nil {
 			errCh <- err
 			return
 		}
+		if audioType != websocket.TextMessage {
+			errCh <- fmt.Errorf("audio frame type = %d, want TextMessage (%d)", audioType, websocket.TextMessage)
+		}
 		var audioMsg struct {
-			Audio struct {
-				Data       string `json:"data"`
-				SampleRate int    `json:"sample_rate"`
-				Encoding   string `json:"encoding"`
-			} `json:"audio"`
+			Event string `json:"event"`
+			Audio string `json:"audio"`
 		}
 		if err := json.Unmarshal(audioData, &audioMsg); err != nil {
 			errCh <- err
 			return
 		}
-		decoded, err := base64.StdEncoding.DecodeString(audioMsg.Audio.Data)
+		if audioMsg.Event != "audio_input" {
+			errCh <- fmt.Errorf("audio event = %q, want audio_input", audioMsg.Event)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(audioMsg.Audio)
 		if err != nil {
 			errCh <- err
 			return
 		}
 		if string(decoded) != "pcm" {
 			errCh <- fmt.Errorf("audio payload = %q, want pcm", string(decoded))
-		}
-		if audioMsg.Audio.SampleRate != 16000 {
-			errCh <- fmt.Errorf("audio sample_rate = %d, want 16000", audioMsg.Audio.SampleRate)
-		}
-		if audioMsg.Audio.Encoding != "audio/wav" {
-			errCh <- fmt.Errorf("audio encoding = %q, want audio/wav", audioMsg.Audio.Encoding)
 		}
 
 		_, flushData, err := conn.ReadMessage()
@@ -97,21 +100,17 @@ func TestSarvamProviderStreamingProtocol(t *testing.T) {
 			errCh <- err
 			return
 		}
-		if got := flushMsg["type"]; got != "flush" {
-			errCh <- fmt.Errorf("flush message type = %q, want flush", got)
+		// event, not type: the old key meant the server never saw a finalize.
+		if got := flushMsg["event"]; got != "flush" {
+			errCh <- fmt.Errorf("flush message event = %q, want flush (got %v)", got, flushMsg)
 		}
 
 		if err := conn.WriteJSON(map[string]any{
-			"type": "data",
-			"data": map[string]any{
-				"request_id":    "req_123",
-				"transcript":    "hello from sarvam",
-				"language_code": "en-IN",
-				"metrics": map[string]any{
-					"audio_duration":     1.25,
-					"processing_latency": 0.2,
-				},
-			},
+			"event":    "transcript.final",
+			"text":     "hello from sarvam",
+			"language": "en-IN",
+			"start_s":  "0.25",
+			"end_s":    "1.50",
 		}); err != nil {
 			errCh <- err
 			return
@@ -170,5 +169,18 @@ func nextSarvamEvent(t *testing.T, results <-chan TranscriptEvent) TranscriptEve
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for transcript event")
 		return TranscriptEvent{}
+	}
+}
+
+func TestRealtimeSarvamModel(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"", "saaras:v3-realtime"},
+		{"saaras:v3", "saaras:v3-realtime"},
+		{"saaras:v3-realtime", "saaras:v3-realtime"},
+		{"saarika:v2.5", "saarika:v2.5-realtime"},
+	} {
+		if got := realtimeSarvamModel(tt.in); got != tt.want {
+			t.Errorf("realtimeSarvamModel(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
