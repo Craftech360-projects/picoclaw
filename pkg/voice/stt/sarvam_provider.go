@@ -76,6 +76,18 @@ func (p *sarvamProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	sampleRate := normalizeSarvamSampleRate(opts.SampleRate)
 	language := normalizeSarvamLang(opts.Language)
 	mode := normalizeSarvamMode(os.Getenv("SARVAM_STT_MODE"))
+
+	// Batch transport, chosen by env so both live in one build: the streaming
+	// socket returned nothing on real sessions while accepting audio and staying
+	// open. See sarvam_rest.go.
+	if sarvamTransportIsREST() {
+		logger.InfoCF("livekit", "Sarvam STT using REST transport", map[string]any{
+			"provider": "sarvam", "model": model, "language": language,
+			"mode": mode, "sample_rate": sampleRate,
+		})
+		return newSarvamRESTAdapter(ctx, apiKey, model, language, mode, sampleRate), nil
+	}
+
 	wsURL := sarvamStreamingURL()
 
 	q := url.Values{}
