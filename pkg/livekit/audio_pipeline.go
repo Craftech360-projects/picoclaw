@@ -375,6 +375,11 @@ func (s *sentenceSplitter) Flush() string {
 
 // AudioPipeline coordinates STT -> Agent -> TTS for one participant in a room.
 type AudioPipeline struct {
+	// Set by the room session when it subscribes the audio track. sttHolder is
+	// shared with the PCM writer so a reconnect swaps the stream for both;
+	// reopenSTT rebuilds one with the session's original StreamOptions.
+	sttHolder            *sttStreamHolder
+	reopenSTT            func() (stt.TranscriptionStream, error)
 	session              *RoomSession
 	bridge               *AgentBridge
 	tts                  tts.Provider
@@ -723,6 +728,47 @@ func (ap *AudioPipeline) maybeDrainQueuedAnnouncements() {
 			ap.handleAsyncEvent(evt, false)
 		}
 	}()
+}
+
+// reopenSTTStream replaces a dead STT stream, bounded so a provider that is
+// rejecting us (bad key, quota) fails the session instead of spinning. Attempts
+// are per-close, not per-session: a call that survives several blips is working.
+func (ap *AudioPipeline) reopenSTTStream(ctx context.Context, sessionKey string) (stt.TranscriptionStream, error) {
+	if ap == nil || ap.reopenSTT == nil {
+		return nil, fmt.Errorf("no STT reopen available for this session")
+	}
+	const attempts = 3
+	backoff := 250 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		stream, err := ap.reopenSTT()
+		if err == nil {
+			// The caller that closed the old stream already released it; swapping
+			// only rebinds the writer goroutine to the live one.
+			ap.sttHolder.Swap(stream)
+			logger.InfoCF("livekit", "STT stream reopened after close", map[string]any{
+				"session": sessionKey,
+				"attempt": attempt,
+			})
+			return stream, nil
+		}
+		lastErr = err
+		logger.WarnCF("livekit", "STT stream reopen failed", map[string]any{
+			"session": sessionKey,
+			"attempt": attempt,
+			"error":   err.Error(),
+		})
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return nil, lastErr
 }
 
 func NewAudioPipeline(session *RoomSession, bridge *AgentBridge, tts tts.Provider, vadEvent <-chan interface{}) *AudioPipeline {
@@ -1642,10 +1688,20 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 
 		case evt, ok := <-sttStream.Results():
 			if !ok {
-				logger.WarnCF("livekit", "STT stream closed, exiting RunInbound", map[string]any{
-					"session": runSessionKey,
-				})
-				return
+				// A closed result channel used to end RunInbound outright, which left
+				// the child talking to a toy that could no longer hear anything for the
+				// rest of the call. Reopen instead: a dead STT stream should cost a
+				// gap, not the conversation.
+				replacement, rerr := ap.reopenSTTStream(ctx, runSessionKey)
+				if rerr != nil {
+					logger.WarnCF("livekit", "STT stream closed and could not be reopened; exiting RunInbound", map[string]any{
+						"session": runSessionKey,
+						"error":   rerr.Error(),
+					})
+					return
+				}
+				sttStream = replacement
+				continue
 			}
 
 			if evt.Text != "" {

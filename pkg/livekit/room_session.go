@@ -664,15 +664,17 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		sttEndpointMS = envInt("PICOCLAW_VAD_ENDPOINT_MS", 1000)
 	}
 
-	// Open transcription stream with provider-specific options
-	stream, err := rs.stt.OpenStream(rs.ctx, stt.StreamOptions{
+	// Held in a variable rather than inlined so a reconnect reopens with exactly
+	// the options this session negotiated.
+	sttOptions := stt.StreamOptions{
 		SampleRate:     16000,
 		Channels:       1,
 		Language:       language,
 		Model:          model,
 		InterimResults: true,
 		EndpointingMS:  sttEndpointMS,
-	})
+	}
+	stream, err := rs.stt.OpenStream(rs.ctx, sttOptions)
 	if err != nil {
 		logger.ErrorCF("livekit", "Failed to open STT stream", map[string]any{
 			"provider": rs.stt.Name(),
@@ -709,8 +711,9 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		logger.ErrorCF("livekit", "Failed to init TEN VAD", map[string]any{"error": err.Error()})
 	}
 
+	sttHolder := newSTTStreamHolder(stream)
 	writer := &sttStreamWriter{
-		stream:       stream,
+		holder:       sttHolder,
 		vad:          vadPipe,
 		vadEvent:     vadEventChan,
 		providerName: rs.stt.Name(),
@@ -742,6 +745,10 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	}
 
 	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, vadEventInterface)
+	pipeline.sttHolder = sttHolder
+	pipeline.reopenSTT = func() (stt.TranscriptionStream, error) {
+		return rs.stt.OpenStream(rs.ctx, sttOptions)
+	}
 	rs.mu.Lock()
 	rs.activePipeline = pipeline
 	rs.mu.Unlock()
@@ -878,7 +885,8 @@ func sanitizeIdentity(value string) string {
 }
 
 type sttStreamWriter struct {
-	stream   stt.TranscriptionStream
+	// Shared with RunInbound so a reconnect swaps the stream for both.
+	holder   *sttStreamHolder
 	vad      *vad.VADPipeline
 	vadEvent chan vad.VADEvent
 
@@ -889,7 +897,7 @@ type sttStreamWriter struct {
 }
 
 func (w *sttStreamWriter) WriteSample(sample media.PCM16Sample) error {
-	if w.stream == nil {
+	if w.holder.Get() == nil {
 		return nil
 	}
 	if len(sample) == 0 {
@@ -934,7 +942,11 @@ func (w *sttStreamWriter) WriteSample(sample media.PCM16Sample) error {
 		binary.LittleEndian.PutUint16(buf[i*2:i*2+2], uint16(v))
 	}
 
-	if err := w.stream.SendAudio(buf); err != nil {
+	stream := w.holder.Get()
+	if stream == nil {
+		return nil
+	}
+	if err := stream.SendAudio(buf); err != nil {
 		w.sendErrCount++
 		if w.sendErrCount == 1 || w.sendErrCount%200 == 0 {
 			logger.WarnCF("livekit", "STT SendAudio failed", map[string]any{
@@ -954,10 +966,11 @@ func (w *sttStreamWriter) Close() error {
 	if w.vad != nil {
 		w.vad.Close()
 	}
-	if w.stream == nil {
+	stream := w.holder.Get()
+	if stream == nil {
 		return nil
 	}
-	return w.stream.Close()
+	return stream.Close()
 }
 
 func envFloat(key string, def float32) float32 {
