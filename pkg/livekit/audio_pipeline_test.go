@@ -1260,3 +1260,63 @@ func TestSentenceSplitterMemoLatchEmitsPendingSpeechImmediately(t *testing.T) {
 		t.Fatalf("memo leaked via flush: %q", rem)
 	}
 }
+
+// Partials are for barge-in, finals are for the LLM. With the realtime STT
+// protocol streaming partials, dispatching on them started a turn per fragment
+// and cancelled it on the next: three of five turns cancelled in a live session,
+// and the child's answer split across them.
+func TestRunInboundDoesNotDispatchOnPartials(t *testing.T) {
+	results := make(chan stt.TranscriptEvent, 8)
+	vadEvents := make(chan interface{}, 4)
+	stream := &fakeTranscriptionStream{results: results}
+	provider := &countingStreamingProvider{calls: make(chan string, 4)}
+	bridge := &AgentBridge{
+		provider:       provider,
+		streamProvider: provider,
+		asyncEventChan: make(chan AsyncEvent, 1),
+	}
+	pipeline := NewAudioPipeline(&RoomSession{
+		roomInfo:    &livekitproto.Room{Name: "room-partial"},
+		participant: &ParticipantState{identity: "device-p", sessionKey: "livekit:device:p"},
+	}, bridge, nil, vadEvents)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		pipeline.RunInbound(ctx, stream)
+		close(done)
+	}()
+
+	vadEvents <- vad.VADEvent{SpeechStart: true}
+	// Partials building up, then a provider speech-end carrying no text — exactly
+	// what Sarvam's vad.speech_end looks like.
+	results <- stt.TranscriptEvent{Text: "National"}
+	results <- stt.TranscriptEvent{Text: "National flag has"}
+	results <- stt.TranscriptEvent{SpeechEnd: true}
+
+	select {
+	case got := <-provider.calls:
+		t.Fatalf("dispatched on a partial: %q", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// The final is what may be sent.
+	results <- stt.TranscriptEvent{Text: "National flag has three colors", IsFinal: true, SpeechEnd: true}
+
+	select {
+	case got := <-provider.calls:
+		if got != "National flag has three colors" {
+			t.Fatalf("agent call text = %q, want the final transcript", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch on the final")
+	}
+
+	close(results)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunInbound did not exit after results channel closed")
+	}
+}

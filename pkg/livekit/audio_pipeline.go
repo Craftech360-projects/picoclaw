@@ -62,6 +62,7 @@ func leadingExpressionTag(text string) string {
 	}
 	return ""
 }
+
 var voiceReasoningLineRE = regexp.MustCompile(`(?im)^\s*(thinking|reasoning|analysis)\s*[:：].*$`)
 
 // Persona prompts use ALL-CAPS for shouting ("BLAST OFF!", "AMAZING"), but TTS
@@ -417,14 +418,14 @@ type turnLatencyMetaKey struct{}
 type turnLatencyMeta struct {
 	mu sync.Mutex
 
-	TurnID    uint64
-	Session   string
-	Path      string
-	Trigger   string
-	STTStart  time.Time
-	LLMStart  time.Time
-	LLMFirst  time.Time
-	LLMFinal  time.Time
+	TurnID   uint64
+	Session  string
+	Path     string
+	Trigger  string
+	STTStart time.Time
+	LLMStart time.Time
+	LLMFirst time.Time
+	LLMFinal time.Time
 	// Set by the provider's dispatch probe when the request leaves the process.
 	LLMDispatch time.Time
 	TTSFirst    time.Time
@@ -1373,7 +1374,16 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 	var utterance strings.Builder
 	var vadSpeechEnded bool
 	var speechActive bool
+	// latestTranscript holds whatever arrived last, partial or final, and exists
+	// only to confirm the child is really speaking so agent audio can be
+	// interrupted. latestFinalText holds final text only and is what may be sent to
+	// the LLM. Before the realtime STT protocol landed there were no partials, so
+	// one variable served both jobs; with partials streaming in, dispatching on
+	// latestTranscript started a turn on every fragment and cancelled it on the
+	// next — three of five turns cancelled in a live session, and the child's
+	// sentence split across them.
 	var latestTranscript string
+	var latestFinalText string
 	var finalizeTimer *time.Timer
 	var finalizeTimerC <-chan time.Time
 	var segmentTimer *time.Timer
@@ -1553,13 +1563,27 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 		}()
 	}
 
-	flushBufferedUtterance := func(trigger string) {
+	// allowPartialText is the safety net, not the norm: only the finalize timeout
+	// passes true, so a final that never arrives costs a delay rather than the
+	// child being ignored entirely.
+	flushBufferedUtterance := func(trigger string, allowPartialText bool) {
 		text := strings.TrimSpace(utterance.String())
 		if text == "" {
+			text = strings.TrimSpace(latestFinalText)
+		}
+		if text == "" && allowPartialText {
 			text = strings.TrimSpace(latestTranscript)
+			if text != "" {
+				logger.WarnCF("livekit", "Dispatching a partial transcript; no final arrived in time", map[string]any{
+					"session":  ap.sessionKey(),
+					"trigger":  trigger,
+					"text_len": len(text),
+				})
+			}
 		}
 		utterance.Reset()
 		latestTranscript = ""
+		latestFinalText = ""
 		vadSpeechEnded = false
 		speechActive = false
 		hardCapFinalizePending = false
@@ -1645,7 +1669,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 					sttFirstPartialAt = time.Time{}
 					sttFirstFinalAt = time.Time{}
 					if vadSpeechEnded && (utterance.Len() > 0 || strings.TrimSpace(latestTranscript) != "") {
-						flushBufferedUtterance("next_vad_start")
+						flushBufferedUtterance("next_vad_start", false)
 					}
 					if ap.session != nil && ap.session.participant != nil {
 						ap.session.participant.speaking.Store(true)
@@ -1749,6 +1773,7 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				merged := mergeFinalTranscriptChunk(utterance.String(), evt.Text)
 				utterance.Reset()
 				utterance.WriteString(merged)
+				latestFinalText = merged
 			}
 
 			if evt.SpeechEnd && hardCapFinalizePending && speechActive && !vadSpeechEnded {
@@ -1759,19 +1784,23 @@ func (ap *AudioPipeline) RunInbound(ctx context.Context, sttStream stt.Transcrip
 				continue
 			}
 
-			if evt.SpeechEnd || (vadSpeechEnded && utterance.Len() > 0) {
+			// Only final text reaches the LLM. A speech-end with nothing final yet —
+			// Sarvam's own vad.speech_end arrives without text — leaves the state
+			// alone so the finalize timer can wait for the final instead of
+			// dispatching a fragment and cancelling it on the next one.
+			if utterance.Len() > 0 && (evt.SpeechEnd || vadSpeechEnded) {
 				trigger := "stt_speech_end"
 				if vadSpeechEnded && !evt.SpeechEnd {
 					trigger = "vad_with_final_text"
 				}
-				flushBufferedUtterance(trigger)
+				flushBufferedUtterance(trigger, false)
 			}
 
 		case <-finalizeTimerC:
 			finalizeTimer = nil
 			finalizeTimerC = nil
 			if vadSpeechEnded && (utterance.Len() > 0 || strings.TrimSpace(latestTranscript) != "") {
-				flushBufferedUtterance("vad_finalize_timeout")
+				flushBufferedUtterance("vad_finalize_timeout", true)
 			} else {
 				pendingBargeIn = false
 				vadSpeechEnded = false
