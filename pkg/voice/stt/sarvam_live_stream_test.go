@@ -2,8 +2,8 @@ package stt
 
 import (
 	"context"
-	"encoding/binary"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -45,13 +45,19 @@ func TestSarvamLiveStream(t *testing.T) {
 	// Collect in the background so interim results are visible as they land rather
 	// than only after the flush.
 	done := make(chan struct{})
-	var events int
+	var mu sync.Mutex
+	var events, finals int
 	go func() {
 		defer close(done)
 		for evt := range stream.Results() {
+			mu.Lock()
 			events++
-			t.Logf("EVENT #%d text=%q final=%v speech_start=%v speech_end=%v lang=%s dur=%.2f",
-				events, evt.Text, evt.IsFinal, evt.SpeechStart, evt.SpeechEnd, evt.Language, evt.Duration)
+			if evt.IsFinal {
+				finals++
+			}
+			mu.Unlock()
+			t.Logf("EVENT text=%q final=%v speech_start=%v speech_end=%v lang=%s dur=%.2f",
+				evt.Text, evt.IsFinal, evt.SpeechStart, evt.SpeechEnd, evt.Language, evt.Duration)
 		}
 	}()
 
@@ -75,27 +81,31 @@ func TestSarvamLiveStream(t *testing.T) {
 		t.Fatalf("Finalize: %v", err)
 	}
 
-	// Wait well past any plausible processing latency before calling it silence.
-	deadline := time.After(20 * time.Second)
+	// Wait for a final, not merely for any event. An earlier version returned 3.5s
+	// after the first event, which cut off finals that arrive later — language
+	// auto-detect is slower than a pinned language — and made "auto produces no
+	// finals" look like a provider behaviour rather than a measurement artifact.
+	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			if events == 0 {
-				t.Fatal("no events in 20s after flush — the socket accepted audio and answered nothing")
+			mu.Lock()
+			e, f := events, finals
+			mu.Unlock()
+			if e == 0 {
+				t.Fatal("no events in 30s after flush — the socket accepted audio and answered nothing")
 			}
-			t.Logf("done: %d events", events)
+			t.Logf("done: %d events, %d finals (no final within 30s)", e, f)
 			return
-		case <-time.After(500 * time.Millisecond):
-			if events > 0 {
-				// Keep listening briefly for a final after an interim.
-				time.Sleep(3 * time.Second)
-				t.Logf("done: %d events", events)
+		case <-time.After(250 * time.Millisecond):
+			mu.Lock()
+			e, f := events, finals
+			mu.Unlock()
+			if f > 0 {
+				t.Logf("done: %d events, %d finals", e, f)
 				return
 			}
+			_ = e
 		}
 	}
 }
-
-// silenceGuard keeps the import of binary used if the frame loop is edited to
-// synthesise audio instead of reading a file.
-var _ = binary.LittleEndian

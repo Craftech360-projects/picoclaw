@@ -52,7 +52,7 @@ func (p *sarvamProvider) Capabilities() ProviderCapabilities {
 			"hi-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN", "mr-IN", "od-IN", "pa-IN", "ta-IN", "te-IN", "en-IN",
 			"as-IN", "ur-IN", "ne-IN", "kok-IN", "ks-IN", "sd-IN", "sa-IN", "sat-IN", "mni-IN", "brx-IN", "mai-IN", "doi-IN",
 		},
-		Models:               []string{"saaras:v3", "saarika:v2.5"},
+		Models:               []string{"saaras:v3-realtime"},
 		SupportsStreaming:    true,
 		SupportsDiarization:  false,
 		SupportsMultilingual: true,
@@ -472,7 +472,11 @@ func normalizeSarvamLang(lang string) string {
 	lang = strings.TrimSpace(strings.ToLower(lang))
 	switch lang {
 	case "", "auto", "unknown":
-		return "unknown"
+		// Never "auto": accepted by the endpoint but it then sends only partials, so
+		// turns never finalise. en-IN is the product's primary; a Hindi or other
+		// session passes its own language through the cases below and is unaffected.
+		// "unknown" is rejected outright by the realtime endpoint (close 4000).
+		return "en-IN"
 	case "english", "en":
 		return "en-IN"
 	case "hindi", "hi":
@@ -488,7 +492,9 @@ func normalizeSarvamLang(lang string) string {
 	case "marathi", "mr":
 		return "mr-IN"
 	case "odia", "or", "od":
-		return "od-IN"
+		// or-IN. The accepted list has no od-IN, so the old value would be rejected
+		// the same way "unknown" was.
+		return "or-IN"
 	case "punjabi", "pa":
 		return "pa-IN"
 	case "tamil", "ta":

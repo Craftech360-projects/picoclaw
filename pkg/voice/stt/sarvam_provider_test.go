@@ -184,3 +184,24 @@ func TestRealtimeSarvamModel(t *testing.T) {
 		}
 	}
 }
+
+// The realtime endpoint closes the connection with 4000 on an unaccepted
+// language_code, so the mapping is a hard contract rather than a preference.
+func TestNormalizeSarvamLangUsesAcceptedValues(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		// Never auto: it yields partials with no final, so the turn never completes.
+		{"", "en-IN"},
+		{"auto", "en-IN"},
+		{"unknown", "en-IN"},
+		{"english", "en-IN"},
+		{"en", "en-IN"},
+		{"hindi", "hi-IN"},
+		{"odia", "or-IN"},
+		{"or", "or-IN"},
+		{"od", "or-IN"},
+	} {
+		if got := normalizeSarvamLang(tt.in); got != tt.want {
+			t.Errorf("normalizeSarvamLang(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
