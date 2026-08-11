@@ -78,6 +78,11 @@ type ParticipantState struct {
 	sessionKey string
 	sttStream  stt.TranscriptionStream
 	pcmTrack   *lkmedia.PCMRemoteTrack
+	// turnEvents carries synthetic vad.VADEvent structs from PTT data-channel
+	// messages into the same channel RunInbound already reads real TEN VAD
+	// events from (ADR 0007 / ptt-batch-stt/003). Non-nil for every session;
+	// only acted on by handleDataMessage when the active provider is PTT-driven.
+	turnEvents chan interface{}
 	ttsCancel  context.CancelFunc
 	// ttsCancelReason records why the current TTS context was cancelled so
 	// synthesize/read errors can distinguish barge-in from provider failures.
@@ -370,6 +375,88 @@ func (rs *RoomSession) leave() {
 	}
 }
 
+// isPTTDrivenProvider reports whether the named STT provider treats the
+// device's Manual Talk tap as the session's sole Turn Boundary authority
+// (ADR 0007), meaning TEN VAD must not run and ptt_event/speech_end drive
+// the turn instead.
+func isPTTDrivenProvider(name string) bool {
+	return strings.TrimSpace(name) == "sarvam_rest"
+}
+
+// pttSpeechEndGrace absorbs audio frames still in flight on the LiveKit track
+// when the reliable speech_end data message lands, before the turn finalizes.
+// Tunable: real devices/networks may need a wider window than the default.
+func pttSpeechEndGrace() time.Duration {
+	return time.Duration(envInt("PICOCLAW_PTT_SPEECH_END_GRACE_MS", 200)) * time.Millisecond
+}
+
+// wireEmptyResultAnnouncement registers the empty-tap ("didn't hear you")
+// callback on providers that support it (issue ptt-batch-stt/002's
+// SetEmptyResultHandler extension point), discovered by type assertion so
+// this package never needs to import the concrete provider type.
+func wireEmptyResultAnnouncement(stream stt.TranscriptionStream, pipeline *AudioPipeline) {
+	emptyStream, ok := stream.(interface{ SetEmptyResultHandler(func()) })
+	if !ok || pipeline == nil {
+		return
+	}
+	// Spawned, not called inline: the provider fires this from the goroutine
+	// its Close() waits on, while session teardown calls Close() holding
+	// participant.mu — the same lock speaking needs. Returning immediately
+	// keeps that from closing into a deadlock.
+	emptyStream.SetEmptyResultHandler(func() {
+		go pipeline.speakDidntHearFallback()
+	})
+}
+
+// turnPlumbing reads the PTT-relevant fields under ps.mu, matching how every
+// other reader of sttStream in this file is synchronized. Both are populated
+// once, late in handleTrackSubscribed — a tap arriving before that returns
+// zero values rather than racing the write.
+func (ps *ParticipantState) turnPlumbing() (stt.TranscriptionStream, chan interface{}) {
+	if ps == nil {
+		return nil, nil
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.sttStream, ps.turnEvents
+}
+
+// injectTurnEvent delivers a synthetic VAD event to whatever's reading
+// ParticipantState.turnEvents (RunInbound, via the same channel real TEN VAD
+// events flow through). Non-blocking to match sttStreamWriter.WriteSample's
+// existing send — handleDataMessage must never stall on a full channel.
+func injectTurnEvent(events chan interface{}, sessionKey string, evt vad.VADEvent) {
+	if events == nil {
+		// The track hasn't finished subscribing, so there is no turn to start
+		// or end yet. Logged because a silently vanished tap is invisible.
+		logger.WarnCF("livekit", "Dropped PTT turn event: session not listening yet", map[string]any{
+			"session":      sessionKey,
+			"speech_start": evt.SpeechStart,
+			"speech_end":   evt.SpeechEnd,
+		})
+		return
+	}
+	select {
+	case events <- evt:
+	default:
+		logger.WarnCF("livekit", "Dropped PTT turn event: channel full", map[string]any{
+			"session":      sessionKey,
+			"speech_start": evt.SpeechStart,
+			"speech_end":   evt.SpeechEnd,
+		})
+	}
+}
+
+// resetPTTBuffer discards whatever audio the active sarvam_rest stream has
+// buffered — used on a fresh press (a new utterance must not inherit the
+// last one) and on Cancel Turn (discard, stay silent). A no-op for providers
+// that don't buffer per-utterance.
+func resetPTTBuffer(stream stt.TranscriptionStream) {
+	if resettable, ok := stream.(interface{ ResetBuffer() }); ok {
+		resettable.ResetBuffer()
+	}
+}
+
 // handleDataMessage processes data channel messages from the MQTT gateway.
 func (rs *RoomSession) handleDataMessage(data []byte) {
 	var msg map[string]any
@@ -410,6 +497,74 @@ func (rs *RoomSession) handleDataMessage(data []byte) {
 			"session_id": strings.TrimSpace(sessionID),
 		})
 		rs.interruptActivePipeline("mqtt_abort")
+	case "ptt_event":
+		// Firmware sends this for every Manual Talk tap regardless of which STT
+		// provider the server picked — only act on it when this session's
+		// provider actually made PTT the Turn Boundary authority (ADR 0007).
+		if rs.stt == nil || !isPTTDrivenProvider(rs.stt.Name()) {
+			return
+		}
+		action, _ := msg["action"].(string)
+		state, _ := msg["state"].(string)
+		rs.mu.Lock()
+		ps := rs.participant
+		pipeline := rs.activePipeline
+		rs.mu.Unlock()
+		if ps == nil {
+			return
+		}
+		logger.InfoCF("livekit", "Received ptt_event from gateway", map[string]any{
+			"room": rs.roomInfo.Name, "action": action, "state": strings.TrimSpace(state),
+		})
+		stream, events := ps.turnPlumbing()
+		switch action {
+		case "press":
+			pipeline.notePTTPress()
+			resetPTTBuffer(stream)
+			injectTurnEvent(events, ps.sessionKey, vad.VADEvent{SpeechStart: true})
+		case "release":
+			// The gateway maps every non-"start" listen state to "release", so
+			// check the forwarded state: only the firmware's "stop" is a real
+			// Cancel Turn. Others ("detect", sent to kick the greeting and by
+			// the client's stalled-TTS retry) must not wipe a live turn.
+			if strings.TrimSpace(state) != "stop" {
+				return
+			}
+			// Cancel Turn: discard the buffer so Finalize sees nothing and stays
+			// silent instead of transcribing and answering an utterance the
+			// child abandoned. Wiped twice around the same grace the End Turn
+			// path uses — audio frames already in flight on the track keep
+			// arriving on their own goroutine after the first reset, and
+			// transcribing that tail would answer a cancelled question.
+			pipeline.noteCancelTurn()
+			resetPTTBuffer(stream)
+			time.AfterFunc(pttSpeechEndGrace(), func() {
+				stream, events := ps.turnPlumbing()
+				resetPTTBuffer(stream)
+				injectTurnEvent(events, ps.sessionKey, vad.VADEvent{SpeechEnd: true})
+			})
+		}
+	case "speech_end":
+		// End Turn: the child tapped to hand their turn to Cheeko. Only the
+		// device's own tap ends a PTT turn — not applicable to other providers.
+		if rs.stt == nil || !isPTTDrivenProvider(rs.stt.Name()) {
+			return
+		}
+		rs.mu.Lock()
+		ps := rs.participant
+		pipeline := rs.activePipeline
+		rs.mu.Unlock()
+		if ps == nil {
+			return
+		}
+		logger.InfoCF("livekit", "Received speech_end from gateway", map[string]any{"room": rs.roomInfo.Name})
+		pipeline.noteEndTurn()
+		time.AfterFunc(pttSpeechEndGrace(), func() {
+			// Re-read at fire time: the track may have finished subscribing
+			// during the grace window.
+			_, events := ps.turnPlumbing()
+			injectTurnEvent(events, ps.sessionKey, vad.VADEvent{SpeechEnd: true})
+		})
 	case "session_language_update":
 		update, ok := parseSessionLanguageUpdate(data)
 		if !ok {
@@ -693,22 +848,30 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 
 	var vadPipe *vad.VADPipeline
 	var vadEventChan chan vad.VADEvent
-	vadThreshold := float32(rs.runtime.VADThreshold)
-	if vadThreshold <= 0 {
-		vadThreshold = envFloat("PICOCLAW_VAD_THRESHOLD", 0.7)
-	}
-	vadEndpointMS := sttEndpointMS
-	engine, err := vad.NewTenVAD(256, vadThreshold)
-	if err == nil {
-		vadPipe = vad.NewVADPipeline(engine, vadThreshold, vadEndpointMS)
-		vadEventChan = make(chan vad.VADEvent, 10)
-		logger.InfoCF("livekit", "TEN VAD initialized", map[string]any{
-			"room":        rs.roomInfo.Name,
-			"threshold":   vadThreshold,
-			"endpoint_ms": vadEndpointMS,
+	pttDriven := isPTTDrivenProvider(rs.stt.Name())
+	if pttDriven {
+		logger.InfoCF("livekit", "TEN VAD bypassed: PTT-driven provider active", map[string]any{
+			"room":     rs.roomInfo.Name,
+			"provider": rs.stt.Name(),
 		})
 	} else {
-		logger.ErrorCF("livekit", "Failed to init TEN VAD", map[string]any{"error": err.Error()})
+		vadThreshold := float32(rs.runtime.VADThreshold)
+		if vadThreshold <= 0 {
+			vadThreshold = envFloat("PICOCLAW_VAD_THRESHOLD", 0.7)
+		}
+		vadEndpointMS := sttEndpointMS
+		engine, err := vad.NewTenVAD(256, vadThreshold)
+		if err == nil {
+			vadPipe = vad.NewVADPipeline(engine, vadThreshold, vadEndpointMS)
+			vadEventChan = make(chan vad.VADEvent, 10)
+			logger.InfoCF("livekit", "TEN VAD initialized", map[string]any{
+				"room":        rs.roomInfo.Name,
+				"threshold":   vadThreshold,
+				"endpoint_ms": vadEndpointMS,
+			})
+		} else {
+			logger.ErrorCF("livekit", "Failed to init TEN VAD", map[string]any{"error": err.Error()})
+		}
 	}
 
 	sttHolder := newSTTStreamHolder(stream)
@@ -727,28 +890,31 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		return
 	}
 
+	// Always live, whether or not TEN VAD exists: PTT injection (below) writes
+	// into it directly, and real VAD events are forwarded in when present.
+	// RunInbound reads this exact shape either way, so it stays untouched.
+	turnEvents := make(chan interface{}, 10)
+	if vadEventChan != nil {
+		go func() {
+			for evt := range vadEventChan {
+				turnEvents <- evt
+			}
+			close(turnEvents)
+		}()
+	}
+
 	ps.mu.Lock()
 	ps.sttStream = stream
 	ps.pcmTrack = pcmTrack
+	ps.turnEvents = turnEvents
 	ps.mu.Unlock()
 
-	var vadEventInterface <-chan interface{}
-	if vadEventChan != nil {
-		ch := make(chan interface{}, 10)
-		go func() {
-			for evt := range vadEventChan {
-				ch <- evt
-			}
-			close(ch)
-		}()
-		vadEventInterface = ch
-	}
-
-	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, vadEventInterface)
+	pipeline := NewAudioPipeline(rs, rs.bridge, rs.tts, turnEvents)
 	pipeline.sttHolder = sttHolder
 	pipeline.reopenSTT = func() (stt.TranscriptionStream, error) {
 		return rs.stt.OpenStream(rs.ctx, sttOptions)
 	}
+	wireEmptyResultAnnouncement(stream, pipeline)
 	rs.mu.Lock()
 	rs.activePipeline = pipeline
 	rs.mu.Unlock()

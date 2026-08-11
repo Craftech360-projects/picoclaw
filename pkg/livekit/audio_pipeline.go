@@ -398,6 +398,10 @@ type AudioPipeline struct {
 	queueMu              sync.Mutex
 	queuedAnnouncements  []AsyncEvent
 	queueDraining        bool
+	// PTT turn generations; see notePTTPress. Written from the data-channel
+	// handler goroutine, read from the STT transcription goroutine.
+	pttTurnGen     atomic.Uint64
+	pttAnnounceGen atomic.Uint64
 }
 
 type voiceTurnController struct {
@@ -908,6 +912,107 @@ func (ap *AudioPipeline) speakTurnTimeoutFallback(sessionKey string, cause error
 	ap.publishState("thinking", "speaking")
 	ap.publishSpeechCreated("")
 	ap.synthesizeAndPlay(ctx, ap.retryFallbackPhrase())
+}
+
+// didntHearFallbackPhrase is the empty-tap response (ADR 0007 / ptt-batch-stt/003):
+// the child pressed the button but Manual Talk's batch STT returned no
+// transcript for real buffered audio. English-only for v1 — the plan
+// deliberately deferred translating this one phrase.
+func (ap *AudioPipeline) didntHearFallbackPhrase() string {
+	return "I didn't hear you! Press the button and try again."
+}
+
+// The empty-result callback carries no utterance identity (TranscriptEvent has
+// no id, and issue 002 deferred adding one), so these two counters decide
+// whether a late "no transcript" still deserves an announcement: a press bumps
+// pttTurnGen, End Turn marks that generation announceable, and Cancel Turn
+// marks none. A result whose generation is no longer current belongs to an
+// utterance the child has already moved past.
+//
+// ponytail: two turns finalized back-to-back (press, end, press, end inside
+// one REST round-trip) leave both awaiting a verdict against a single slot, so
+// the first one's empty result can announce as if it were the second's. Costs
+// one spurious "I didn't hear you" the child answers by pressing again. The
+// real fix is per-utterance identity through the provider callback — the same
+// missing correlation issue 002 deferred, worth doing once for both.
+func (ap *AudioPipeline) notePTTPress() {
+	if ap == nil {
+		return
+	}
+	ap.pttTurnGen.Add(1)
+	ap.pttAnnounceGen.Store(0)
+}
+
+func (ap *AudioPipeline) noteEndTurn() {
+	if ap == nil {
+		return
+	}
+	gen := ap.pttTurnGen.Load()
+	if gen == 0 {
+		// speech_end without a preceding press (e.g. the tap that opened the
+		// session): still a legitimate End Turn.
+		gen = ap.pttTurnGen.Add(1)
+	}
+	ap.pttAnnounceGen.Store(gen)
+}
+
+func (ap *AudioPipeline) noteCancelTurn() {
+	if ap == nil {
+		return
+	}
+	ap.pttAnnounceGen.Store(0)
+}
+
+// mayAnnounceEmptyResult reports whether an empty-result callback landing now
+// belongs to the turn the child is actually waiting on.
+func (ap *AudioPipeline) mayAnnounceEmptyResult() bool {
+	if ap == nil {
+		return false
+	}
+	announce := ap.pttAnnounceGen.Load()
+	return announce != 0 && announce == ap.pttTurnGen.Load()
+}
+
+// speakDidntHearFallback plays the empty-tap fallback. It is wired as the
+// sarvam_rest provider's empty-result callback, which the provider documents
+// as firing on the transcription goroutine, not RunInbound's own — so this
+// method must only touch ap.tts/ap.session/participant-locked state (exactly
+// what speakTurnTimeoutFallback already touches), never RunInbound's
+// loop-local variables.
+func (ap *AudioPipeline) speakDidntHearFallback() {
+	if ap == nil || ap.tts == nil || ap.session == nil || ap.session.localTrack == nil {
+		return
+	}
+	if !ap.mayAnnounceEmptyResult() {
+		// Either the turn was cancelled (Cancel Turn must never announce) or
+		// the child has already pressed again — this result is stale.
+		return
+	}
+	if ap.turns.CurrentID() != 0 {
+		// A real reply is already in flight — never talk over it.
+		return
+	}
+	parent := context.Background()
+	if ap.session.ctx != nil {
+		parent = ap.session.ctx
+	}
+	ctx, cancel := context.WithTimeout(parent, liveKitTimeoutFallbackMax)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	sessionKey := ap.sessionKey()
+	ap.emitRuntimeEvent("fallback_used", sessionKey, "ptt_empty_tap", "", nil)
+	logger.InfoCF("livekit", "PTT tap produced no transcript; playing didn't-hear fallback", map[string]any{
+		"session": sessionKey,
+	})
+	ap.setTTSCancel(cancel)
+	ap.publishState("thinking", "speaking")
+	ap.publishSpeechCreated("")
+	ap.synthesizeAndPlay(ctx, ap.didntHearFallbackPhrase())
 }
 
 func (ap *AudioPipeline) logTextPreview(sessionKey, text string, limit int) string {
