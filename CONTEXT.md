@@ -60,6 +60,22 @@ _Avoid_: Main prompt, system prompt, scaffold
 A custom instruction a parent sets for their own child (for example "bedtime is eight o'clock"), applied across every **Character** that child talks to. Parent Rules are subordinate to the **Governing Prompt**; where they conflict, the Governing Prompt wins.
 _Avoid_: User rule, custom prompt, override
 
+**Manual Talk**:
+The tap-talk-tap conversation mode: the child taps to open the mic, speaks, and taps again to hand the turn to Cheeko. The device — never a voice-activity detector — decides when the turn ends. Firmware calls this `kListeningModeManualStop`.
+_Avoid_: Push-to-hold, VAD mode, auto listening
+
+**Turn Boundary**:
+The signal that ends the child's utterance and starts processing. In Manual Talk the Turn Boundary is device-authored (`speech_end`); in auto modes it comes from silence detection. A session has exactly one authority for the Turn Boundary at a time.
+_Avoid_: Endpointing, silence timeout (those are mechanisms, not the concept)
+
+**End Turn**:
+The child finishing their turn and asking Cheeko to respond (`speech_end`, tap-2 in Manual Talk). The utterance is processed.
+_Avoid_: Stop, cancel, release
+
+**Cancel Turn**:
+The child abandoning their turn (`listen/stop`, double-click in Manual Talk). The utterance is discarded and never processed; Cheeko stays silent.
+_Avoid_: End turn, abort (abort interrupts Cheeko's reply, not the child's turn)
+
 **Question Bank**:
 The curated, human-authored set of quiz questions Quizzy asks. Quizzy never invents questions; it only voices, judges, and encourages. Every question belongs to exactly one **Age Band** and one **Level**.
 _Avoid_: Generated questions, trivia pool
