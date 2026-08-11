@@ -31,6 +31,14 @@ standard streaming interface but transcribes per-utterance:
 Name note: `sarvam_rest`, not `sarvam_batch` — Sarvam's "Batch API" is a different
 async product.
 
+**Prior art — start from it, don't rewrite:** branch `feat/sarvam-rest-stt` (commit
+`c99052b`, not in this branch's ancestry) carries a working REST adapter + httptest
+suite with the async-flush and close-race concurrency already correct. Bring those two
+files over and adapt: it selects via a transport env var inside the `sarvam` provider
+(replace with a standalone factory-registered provider), and lacks reset-buffer, the
+empty-result callback, the 30s cap, and the retry. It also sends a `sample_rate` form
+field not present in current API docs — issue 001 confirms or drops it.
+
 ## Acceptance criteria
 
 - [ ] Unit tests (httptest): happy path buffer→WAV→POST→one final event with language
