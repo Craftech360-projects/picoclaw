@@ -21,6 +21,57 @@ byte for byte.
 
 ---
 
+## 0. The contract: two MQTT messages per turn
+
+A Manual Talk turn is bounded by exactly **two** MQTT messages on the
+`device-server` topic — one when recording starts, one when it stops. Everything
+downstream (gateway forwarding, buffer reset, REST transcription) hangs off these.
+
+**1 — recording starts (tap-1, mic opens):**
+
+```json
+{"type": "listen", "session_id": "<session>", "state": "start", "mode": "manual"}
+```
+
+**2 — recording stops (tap-2, mic closes, "I'm done, answer me"):**
+
+```json
+{"type": "speech_end", "session_id": "<session>"}
+```
+
+The gateway turns #1 into a `ptt_event` with `action:"press"` and forwards #2
+unchanged, both over the LiveKit data channel
+(`mqtt-gateway/mqtt/virtual-connection.js:1493` and `:1675`). The agent resets the
+audio buffer on the first and finalizes the utterance on the second.
+
+`client.py` is the reference implementation of exactly this pair — `_send_ptt()`
+is called from the recording thread, once as the mic opens and once as it closes,
+so the two messages always bracket the audio:
+
+```python
+if event == "start":
+    payload = {"type": "listen", "session_id": sid, "state": "start", "mode": "manual"}
+else:
+    payload = {"type": "speech_end", "session_id": sid}
+self.mqtt_client.publish("device-server", json.dumps(payload))
+```
+
+**A third message exists but is not a turn boundary.** Cancelling sends:
+
+```json
+{"type": "listen", "session_id": "<session>", "state": "stop"}
+```
+
+This means *discard*, not *process* — the agent wipes the buffer and stays silent.
+Confusing it with `speech_end` makes Cheeko answer a question the child abandoned,
+which is why the agent checks for `state == "stop"` specifically rather than
+trusting the gateway's derived `action:"release"`.
+
+The firmware already emits all three correctly (`protocols/protocol.cc:92-114`);
+this section is the contract to preserve, not work to do.
+
+---
+
 ## 1. Cap the manual-turn duration (required)
 
 ### The problem
