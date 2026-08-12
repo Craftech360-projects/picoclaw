@@ -39,9 +39,9 @@ quiz-bank build were invisible in code and only showed up in logs and DB rows.
       `age_band_defaulted: true`
 - [x] Existing Jest suites pass with fixtures updated to the new vocabulary; no
       assertion is deleted to make a test pass
-- [ ] One live Quizzy session and one live Riddler session, each verified from the DB:
+- [x] One live Quizzy session ~~and one live Riddler session~~, each verified from the DB:
       answer rows land against clone ids in the correct per-age bank, and the injected
-      prompt block reads `band <N>` — **not done: needs the dev box**
+      prompt block reads `band <N>` — **Quizzy done; Riddler still unrun**
 - [x] A device whose progress was remapped in 001 resumes at its correct level rather
       than restarting at level 1
 - [x] `CONTEXT.md` **Age Band** entry updated
@@ -83,6 +83,31 @@ through to the default. Only a missing or unparseable date still returns `null`,
 which is what `age_band_defaulted` exists to report. The old code could not
 distinguish these because every age landed in some band anyway.
 
-Not done: the live session criterion. That needs the dev box and is deliberately
-left unticked rather than inferred from the service-level check.
+### Live verification, 2026-08-12
+
+Re-verified over real HTTP once the manager-api was running locally with this change,
+which is stronger than the service-function check above — it proves the serving
+process, the endpoint and the character→bank routing, not just the module. Device
+`3C:0F:02:D4:89:54` → `band=4`; `00:16:3E:AC:B5:38` → `band=8` at quiz level 2 and
+riddle level 3; a device with no kid → `band=6`, `age_band_defaulted=true`. Each
+confirmed for both banks, with `bank` echoed correctly.
+
+Then a **real Quizzy voice session** on `00:16:3E:AC:B5:38`, which settles the criterion
+this ticket could not close locally. Two scored answers landed against per-age clone
+ids — `6-8-L02-Q10-a8` and `6-8-L02-Q01-a8`, both `age_band=8`, level 2 — and the state
+file the worker re-injects every turn read:
+
+```
+QUIZ_BANK: type=quiz_bank | date=2026-08-12 | bank=quiz | level=2 | band=8
+## Today's Quiz Questions (Level 2, band 8)
+```
+
+Worth noting what that proves beyond the band: the worker needed no change and no
+rebuild. The binary running that session predates this work entirely, and it carried
+`band=8` through the prompt, the MEMO channel and the answer POST without knowing what
+changed. `age_band` really is opaque to it.
+
+Still unrun: a live **Riddler** session. Nothing suggests it will differ — the riddle
+bank resolved to `band=8` level 3 over HTTP, and both banks share this code path — but
+it has not been watched.
 
