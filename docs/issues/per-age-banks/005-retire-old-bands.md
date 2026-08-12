@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 assignee: claude
 ---
 
@@ -53,17 +53,83 @@ constraint through.
 
 ## Acceptance criteria
 
-- [ ] No `3-5`/`6-8`/`9+` row is `active` in either bank
-- [ ] The CHECK constraint rejects an insert with `age_band = '6-8'`
-- [ ] No row was deleted from either question table
-- [ ] Superseded old-band answer rows are gone; rows with no per-age twin survive
-- [ ] The admin `Correct` column matches the number of questions the child actually
+- [x] No `3-5`/`6-8`/`9+` row is `active` in either bank
+- [x] The CHECK constraint rejects an insert with `age_band = '6-8'`
+- [x] No row was deleted from either question table
+- [x] Superseded old-band answer rows are gone; rows with no per-age twin survive
+- [x] The admin `Correct` column matches the number of questions the child actually
       answered — 11 and 31 for `00:16:3E:AC:B5:38`, not 22 and 52
-- [ ] `GET /quiz/progress` for a device with pre-migration history still returns its
+- [x] `GET /quiz/progress` for a device with pre-migration history still returns its
       lifetime counts
-- [ ] A live session in each bank still serves a full ten-question level
-- [ ] Log evidence that no session resolved an old band value during the soak
+- [ ] A live session in each bank still serves a full ten-question level — **not run
+      after the contract**
+- [x] Log evidence that no session resolved an old band value during the soak
 
 ## Blocked by
 
 - `docs/issues/per-age-banks/002-children-derive-per-age-bank.md`, plus a soak period
+
+## Resolution
+
+Shipped as `prisma/migrations/20260812010000_per_age_banks_contract/migration.sql`.
+Preflight found zero old-band answers in the previous 24 hours, so nothing was still
+resolving the retired vocabulary.
+
+Applied locally: 90 rows retired per bank, quiz answers 24 → 13, riddle 52 → 31.
+Re-applying changed nothing. The verifier passes all four checks on both banks, and
+inserting an active `age_band='6-8'` row is now rejected by the constraint.
+
+**The soak was about an hour, not the days this ticket asked for.** Rahul chose to
+proceed; recorded here because the ticket's own reasoning argued otherwise.
+
+### The eight-value CHECK was impossible, and this is where it was found
+
+The design's step 3 and this ticket both specified tightening the constraint to the
+eight ages. That can never hold: a CHECK covers **every** row in the table, and step 2
+deliberately keeps the retired rows rather than deleting them — the answer log's FK is
+RESTRICT, and ten dormant riddle answers still point at old-band questions. The first
+apply failed on exactly that and rolled the whole transaction back, which is the one
+piece of luck here: the delete and the retirement were in the same transaction, so
+nothing landed half-done.
+
+The constraint now states the invariant that is actually true — anything **servable**
+carries a per-age band, and a retired row may keep the name it was authored under:
+
+```sql
+CHECK (age_band IN ('3','4','5','6','7','8','9','10')
+       OR (NOT active AND age_band IN ('3-5','6-8','9+')))
+```
+
+`000-design.md` §3 is corrected to match. A plain eight-value CHECK would have failed
+the same way on production, mid-window.
+
+### Duplicate answers
+
+The double-counting 004 turned up is gone: 11 superseded quiz copies and 21 riddle
+copies deleted, matched on the `-a%` code suffix rather than on the device's current
+age — so a child whose birthday moved them between banks since the remap still has
+their copy found. The ten dormant riddle answers have no twin and survived, as
+intended.
+
+Lifetime `correct` now reads 13 for quiz — 11 real answers plus the two scored in the
+2026-08-12 live session — and 31 for riddle. The admin page confirms it: the Riddles
+tab `Correct` column reads 31, down from 52.
+
+### Verifier
+
+`verify-per-age-banks.js` now asserts the finished state rather than the post-001 one.
+Two adjustments were needed, both of which were checks that had quietly become wrong
+rather than checks that failed honestly:
+
+- "old band rows still active" is inverted to "retired but still present". Between 001
+  and 005 it fails on purpose; that window is what it exists to police.
+- The remap check's `mappable > 0` vacuity guard had to go. Post-005 there are
+  legitimately no copies left to compare, and requiring some failed the finished state.
+  The pre-migration vacuous pass it once guarded is caught more loudly by the first
+  check, which finds no per-age content at all.
+
+A new check asserts no superseded copies survive.
+
+Not run: a live voice session after the contract. The service returns quiz level 2 with
+8 questions remaining and riddle level 3 with 9, both `band=8`, so the batch path is
+intact — but nobody has spoken to it since the old bands went inactive.

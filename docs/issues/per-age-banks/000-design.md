@@ -88,15 +88,37 @@ ON CONFLICT (code) DO NOTHING;   -- re-runnable
 now read the per-age banks; the old rows are still active but nothing queries `'6-8'`
 any more. Rollback is reverting the deploy — the data supports both vocabularies.
 
-**Step 3 — contract (issue 005), after a soak.** History stays; the FK is RESTRICT and
-nothing is ever deleted.
+**Step 3 — contract (issue 005), after a soak.** No question is deleted; the FK is
+RESTRICT and the answer log must keep resolving. The superseded answer *copies* the
+remap left behind do go — see below.
 
 ```sql
+-- the copies the remap made, only where a per-age twin exists
+DELETE FROM quiz_question_answer a WHERE EXISTS (
+  SELECT 1 FROM quiz_question old
+  JOIN quiz_question clone ON clone.code LIKE old.code || '-a%'
+  JOIN quiz_question_answer twin ON twin.device_mac = a.device_mac
+    AND twin.question_id = clone.id AND twin.answered_at = a.answered_at
+    AND twin.result = a.result
+  WHERE old.id = a.question_id AND old.age_band IN ('3-5','6-8','9+'));
+
 UPDATE quiz_question SET active = false WHERE age_band IN ('3-5','6-8','9+');
+
+-- NOT a plain eight-value CHECK: a constraint covers every row, and the retired
+-- rows above are deliberately kept, so that constraint could never be satisfied.
+-- (Tried on 2026-08-12; it failed and rolled the whole step back.) The invariant
+-- that matters is narrower — anything SERVABLE carries a per-age band.
 ALTER TABLE quiz_question DROP CONSTRAINT quiz_question_age_band_check;
 ALTER TABLE quiz_question ADD CONSTRAINT quiz_question_age_band_check
-  CHECK (age_band IN ('3','4','5','6','7','8','9','10'));
+  CHECK (age_band IN ('3','4','5','6','7','8','9','10')
+         OR (NOT active AND age_band IN ('3-5','6-8','9+')));
 ```
+
+The delete matters because the remap **copied** rows rather than moving them — copying
+is what makes step 2 revertable — while the lifetime tallies behind the admin `Correct`
+column and the parent analytics are deliberately not band-scoped. Every copied answer
+was therefore counted twice from step 1 until this delete. Rows with no twin are real
+history, not copies, and survive.
 
 Each step repeats verbatim for `riddle_question` (constraint names differ).
 
