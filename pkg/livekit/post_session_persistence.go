@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -523,6 +524,63 @@ func resolveDeviceMAC(roomName, metadata string) string {
 		return mac
 	}
 	return extractMACFromRoomName(roomName)
+}
+
+// ResolveKidID returns the child this device is paired to, or "" when the
+// gateway sent none. The manager sends the PAIRING, never the child-profile
+// fallback: an unpaired device's profile resolves to the owner's most recently
+// created child, which is a fine name to greet but the wrong owner for state.
+//
+// The result becomes a directory component, so it is reduced to digits. A kid id
+// is a bigint; anything else is metadata we did not write and is discarded
+// rather than sanitised into something plausible.
+func ResolveKidID(metadata string) string {
+	md := parseMetadataMap(metadata)
+	keys := map[string]struct{}{
+		"kid_id": {},
+		"kidid":  {},
+	}
+	raw := findFirstScalar(md, keys)
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return raw
+}
+
+// findFirstScalar is findFirstString that also accepts JSON numbers, because an
+// id is as likely to arrive unquoted as quoted and a silent miss here would send
+// every session back to the MAC-named workspace without any error.
+func findFirstScalar(node any, keys map[string]struct{}) string {
+	switch v := node.(type) {
+	case map[string]any:
+		for key, value := range v {
+			lowerKey := strings.ToLower(strings.TrimSpace(key))
+			if _, ok := keys[lowerKey]; ok {
+				switch typed := value.(type) {
+				case string:
+					if s := strings.TrimSpace(typed); s != "" {
+						return s
+					}
+				case float64:
+					if typed == math.Trunc(typed) && typed > 0 {
+						return strconv.FormatInt(int64(typed), 10)
+					}
+				}
+			}
+			if nested := findFirstScalar(value, keys); nested != "" {
+				return nested
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if nested := findFirstScalar(item, keys); nested != "" {
+				return nested
+			}
+		}
+	}
+	return ""
 }
 
 func resolveAgentID(metadata string) string {
