@@ -69,7 +69,15 @@ rows actually dated today, as above.
 Test device `3C:0F:02:D4:89:54` was chosen because it had zero answer history; the run
 refused to proceed otherwise, and deleted exactly the 50 rows it created, restoring it.
 
-Not done: clicking the page in a browser. The Vue layer is a thin renderer over the
-payloads above and the dev server plus admin auth is disproportionate for a slice with
-no diff — but it does mean nobody has looked at it. Worth a glance when the dev box
-comes up for 002's live session.
+Seen in the browser at `localhost:8001/#/quiz-progress` after the fact (2026-08-12, the
+manager-web and manager-api both running locally). Both the Quiz and Riddles tabs render
+`Band 8` for `00:16:3E:AC:B5:38` with no retired label anywhere, level `2 / 3` and
+`3 / 3` respectively, and `Today 0 / 10`. Nothing about the layout suffers from the
+shorter value.
+
+The browser pass did find something the payload checks had not: the `Correct` column
+read **22** for a device with 11 real quiz answers, and **52** for 31 riddle answers —
+the 001 remap copied rows rather than moving them, and the lifetime tallies are not
+band-scoped. Not an admin-page defect, so it is not fixed here; written up with its
+remedy in [005](005-retire-old-bands.md), which is the step that makes deleting the
+copies safe.
