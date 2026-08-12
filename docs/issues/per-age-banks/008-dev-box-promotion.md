@@ -87,6 +87,53 @@ Steps 1 and 3 cannot be reordered. Step 7 ends the easy rollback.
 - `docs/issues/per-age-banks/005-retire-old-bands.md` — the full sequence is proven
   locally, which is what makes running it here a repeat rather than an experiment
 
+## Resolution — done 2026-08-12, but the soak was skipped by a restart
+
+Steps 1–5 ran; step 6 (soak) never happened and step 7 applied itself.
+
+`server.js` calls `runPrismaMigrations()` on boot. The branch checkout put **both**
+migration files in the tree, so `pm2 restart manager-api` applied expand at
+`10:04:37.611` and the contract at `10:04:37.875` — the one-way door opened by a
+restart rather than by a decision, about fifteen minutes after step 1.
+
+The planning mistake was mine: I designed a sequence with a deliberate gap between
+steps 3 and 7, then shipped both migrations in one commit to a box that auto-applies
+them. Shipping only the expand file, and adding the contract file after the soak,
+would have made the gap real. `007` now carries this as a trap to check before prod.
+
+End state is nevertheless correct — all ten verifier checks pass on both banks, HTTP
+resolution returns single-age bands, and the authored content imported cleanly:
+
+| | |
+|---|---|
+| Both banks | 24 (age, language, level) groups of exactly 10 active |
+| Old bands | 90/90 retired per bank, none deleted |
+| Remap | 64/64 quiz and 10/10 riddle, **zero dormant** |
+| Superseded copies | 0 remaining |
+| Content | ages 3/4/5 serve the authored questions, 90 rows per bank, 0 skipped |
+
+Rollback is degraded rather than impossible: no question row was deleted, so the old
+bands can be re-activated with an `UPDATE`, but the superseded answer copies are gone —
+reverting the code would leave every device's progress in per-age banks the old code
+cannot see, and they would restart at level 1.
+
+### The bug the dev box caught
+
+`LEAST`/`GREATEST` **ignore NULL arguments** in Postgres, so `least(10, null)` is 10 and
+the `COALESCE(..., 6)` around the age clamp never fired. Every device without a
+`birth_date` resolved to age 10 and looked for a `-a10` clone of `6-8` content, which
+does not exist — 40 of 74 answers silently stayed behind on the first run. Invisible
+locally, where the only device with progress had a real birth date, and it would have
+reached production unnoticed. Fixed in `4f7bc0ee`; re-running the remap picked up
+exactly the missing rows.
+
+### Credential exposure
+
+Sourcing the server `.env` into the deploy shell printed the DB1 connection string,
+password included, into the session transcript. **That password needs rotating.** The
+`.env` line should also be quoted so it cannot be executed, and deploy commands should
+read env vars inside a script rather than sourcing them into an interactive shell.
+
 ## Notes
 
 - Deploy boundary: dev box only. Production (`139.59.7.72`, EKS `picoclaw-dev`) is

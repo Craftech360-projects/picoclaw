@@ -36,6 +36,14 @@ Traps that have bitten this codebase before, all still live:
   datasource host before concluding anything from a query.
 - Plain `node` scripts do not load `.env`; `set -a && . ./.env && set +a` first.
 - If quiz-bank `008-production-promotion.md` is still open, ride the same prod window.
+- **`server.js` runs `runPrismaMigrations()` on boot.** On the dev box this applied the
+  expand *and* the contract migration 0.26s apart during a routine
+  `pm2 restart manager-api`, because the branch checkout had put both files in the tree.
+  The soak between them never happened. Before deploying here, establish whether prod's
+  manager-api does the same — the memory's "production never used prisma migrate" claim
+  is about prod and predates this, so verify rather than trust it. If it does migrate on
+  boot, the two migrations must not be in the tree together: deploy with only the expand
+  file present, soak, then add the contract file and restart.
 
 ## Acceptance criteria
 
