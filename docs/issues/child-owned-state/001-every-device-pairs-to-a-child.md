@@ -1,6 +1,6 @@
 ---
-status: open
-assignee:
+status: closed
+assignee: claude
 ---
 
 # 001 — Every device pairs to a child
@@ -19,10 +19,11 @@ parents skipping a step.
 
 Three changes, one slice:
 
-**Auto-pair on bind.** If the owner has exactly one `kid_profile`, set `kid_id` to
-it in the same write. If they have zero or two or more, leave it null and let the
-app's existing kid picker resolve it. The survey says this alone takes pairing from
-6 of 24 devices to 23 of 24.
+**Pair on bind.** The bind endpoint accepts an optional `kidId`, so the app can
+name the child in the same call it already makes. When it sends none: if the owner
+has exactly one `kid_profile`, pair to it; if they have zero or several, leave it
+null and let the app's existing kid picker resolve it. The survey says the
+sole-child fallback alone takes pairing from 6 of 24 devices to 23 of 24.
 
 **Delete the 409.** `assignKidByMac` and `assignKidToDevice` throw *"Device already
 has a child assigned"* whenever `kid_id` is set and differs from the incoming one,
@@ -45,20 +46,62 @@ have changed hands so far, which is exactly why adding it now is cheap.
 
 ## Acceptance criteria
 
-- [ ] Binding a device whose owner has exactly one kid sets `kid_id` in the same
+- [x] Bind accepts an optional `kidId` and pairs to it, on both the web and mobile
+      bind routes, rejecting a child the binding user does not own
+- [x] Binding a device whose owner has exactly one kid sets `kid_id` in the same
       transaction; binding when the owner has zero or several leaves it null
-- [ ] Re-pairing a device to a different child succeeds instead of returning 409,
+- [x] Re-pairing a device to a different child succeeds instead of returning 409,
       and the mobile picker can correct a device paired to the wrong sibling
-- [ ] `assignKidByMac` refuses to pair a child to a device the caller does not own,
+- [x] `assignKidByMac` refuses to pair a child to a device the caller does not own,
       from the web route as well as the mobile one
-- [ ] `device_kid_assignment` gains a row on pair, on repair and on unpair, with the
+- [x] `device_kid_assignment` gains a row on pair, on repair and on unpair, with the
       previous row's end timestamp closed out
-- [ ] Unbinding still clears `ai_device.kid_id` and leaves every one of that child's
+- [x] Unbinding still clears `ai_device.kid_id` and leaves every one of that child's
       rows untouched
 - [ ] Run against DB1: paired device count moves from 6 to 23 of 24, and the
-      remaining one is the device whose owner has 2+ kids
-- [ ] No existing Jest assertion deleted to make a test pass
+      remaining one is the device whose owner has 2+ kids — **deferred, no dev-box
+      deploy until asked**
+- [x] No existing Jest assertion deleted to make a test pass
 
 ## Blocked by
 
 None — can start immediately.
+
+## Resolution
+
+Shipped in `0b14534e` (cheeko-backend, `feat/child-owned-state`).
+
+Scope grew by one thing during the build: bind takes an **explicit `kidId`**, so a
+parent with several children gets paired at setup instead of never. The sole-child
+fallback stays for the case where the app sends nothing, which is every current
+release. Both bind routes accept it; the web one documents it in Swagger.
+
+Two helpers carry all of it. `resolveKidForBinding` resolves explicit kid → sole
+child → null. `recordKidAssignment` closes whichever assignment is open for a MAC
+and opens a new one, no-opping when the same child is re-saved, so it is safe to
+call on every write — bind, both assign paths, the admin assign, and unbind.
+Everything that changes `kid_id` now goes through a transaction with it.
+
+The 409 removal deleted a test that asserted it. Rewritten rather than deleted: the
+boundary it actually protected — the incoming child must belong to the caller — is
+kept as its own case, and the re-pair path now asserts success. 22 unit tests across
+the two device suites, written first and seen to fail (6 red) before implementing.
+
+`assignKidByMac`'s `userId` went from optional to required. The web route was the
+only caller passing nothing, and it is fixed in the same commit; the mobile route
+already passed it. Verified no other caller exists in any of the three repos.
+
+Full suite: 1342 passed, 2 failed. Neither is this change — `imagine.test.js` fails
+identically with the branch stashed, and `rate-limit-logging` passes alone (2.8s)
+but trips the pre-existing open-handle leak under parallel load.
+
+**Not verified:** the DB1 criterion. Nothing has been deployed to the dev box and
+nothing will be until asked, so "6 of 24 becomes 23 of 24" is a prediction from the
+survey, not a measurement. It belongs to
+`docs/issues/child-owned-state/010-dev-box-promotion.md`.
+
+Known ceiling, recorded in the commit: one open assignment per MAC is enforced in
+the service rather than by a partial unique index, because expressing that index in
+`schema.prisma` is not possible and a DB-only index would drift against
+`prisma generate`. A concurrent double-assign writes one extra audit row that
+nothing reads yet.
