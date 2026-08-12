@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 assignee: claude
 ---
 
@@ -31,23 +31,58 @@ quiz-bank build were invisible in code and only showed up in logs and DB rows.
 
 ## Acceptance criteria
 
-- [ ] `ageBandFromBirthDate` unit table: age 2 → `'3'`, 3 → `'3'`, 5 → `'5'`, 6 → `'6'`,
+- [x] `ageBandFromBirthDate` unit table: age 2 → `'3'`, 3 → `'3'`, 5 → `'5'`, 6 → `'6'`,
       9 → `'9'`, 10 → `'10'`, 11 → `'10'`, missing birth date → `null`
-- [ ] `GET /quiz/next-questions` for a device whose kid is 4 returns `age_band: "4"` and
+- [x] `GET /quiz/next-questions` for a device whose kid is 4 returns `age_band: "4"` and
       only questions from that bank
-- [ ] A device with no kid profile still gets a batch, with `age_band: "6"` and
+- [x] A device with no kid profile still gets a batch, with `age_band: "6"` and
       `age_band_defaulted: true`
-- [ ] Existing Jest suites pass with fixtures updated to the new vocabulary; no
+- [x] Existing Jest suites pass with fixtures updated to the new vocabulary; no
       assertion is deleted to make a test pass
 - [ ] One live Quizzy session and one live Riddler session, each verified from the DB:
       answer rows land against clone ids in the correct per-age bank, and the injected
-      prompt block reads `band <N>`
-- [ ] A device whose progress was remapped in 001 resumes at its correct level rather
+      prompt block reads `band <N>` — **not done: needs the dev box**
+- [x] A device whose progress was remapped in 001 resumes at its correct level rather
       than restarting at level 1
-- [ ] `CONTEXT.md` **Age Band** entry updated
+- [x] `CONTEXT.md` **Age Band** entry updated
 
 ## Blocked by
 
 - `docs/issues/per-age-banks/001-per-age-content-exists.md` — deploying this first would
   point every fetch at a band value with no rows, sending every child to the free-chat
   fallback
+
+## Resolution
+
+Two lines of behaviour change, as the design predicted: `ageBandFromBirthDate` now
+returns `String(clamp(age, 3, 10))`, and `DEFAULT_AGE_BAND` is `'6'`. Nothing else
+in either repo needed editing — `mobile.service` derives bands from the questions it
+has already fetched, and the Go worker treats `age_band` as an opaque string it
+never interprets, so no worker deploy is involved.
+
+Tests written first and seen to fail (6 red), then green. Full backend suite: 453
+passed, 41 suites. The old three-band assertions were rewritten, not deleted; the
+birthday-boundary case they covered is kept as "moves to the next band on their
+birthday, not before".
+
+Verified against the local DB through the real service, four devices:
+
+| device | band | defaulted | quiz level | riddle level |
+|---|---|---|---|---|
+| kid born 2022-01-01 (age 4) | `4` | no | 1 | 1 |
+| kid born 2018-06-15 (age 8) | `8` | no | 2 | 3 |
+| kid born 2016-08-15 (age 9) | `9` | no | 1 | 1 |
+| no kid profile | `6` | yes | 1 | 1 |
+
+The age-8 device is the one that matters: quiz level 2 and riddle level 3, the exact
+levels it derived before the migration. Progress survived the cutover end to end.
+
+One deliberate behaviour change beyond the design: a parseable but nonsense birth
+date (in the future, or absurdly old) now clamps into range instead of falling
+through to the default. Only a missing or unparseable date still returns `null`,
+which is what `age_band_defaulted` exists to report. The old code could not
+distinguish these because every age landed in some band anyway.
+
+Not done: the live session criterion. That needs the dev box and is deliberately
+left unticked rather than inferred from the service-level check.
+

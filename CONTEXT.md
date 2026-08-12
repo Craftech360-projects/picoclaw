@@ -81,8 +81,8 @@ The curated, human-authored set of quiz questions Quizzy asks. Quizzy never inve
 _Avoid_: Generated questions, trivia pool
 
 **Age Band**:
-One of three fixed audience groups for Question Bank content: 3–5, 6–8, 9+. A child is in exactly one Age Band, determined by profile age.
-_Avoid_: Level, difficulty, age range
+A one-year audience cohort for Question Bank content, named by the age itself: 3, 4, 5, 6, 7, 8, 9, 10. A child is in exactly one Age Band, determined by profile age and clamped at both ends — under-3s play the 3 bank, 10-and-over play the 10 bank. The band changes on the child's birthday, which starts them at Level 1 of the new bank; their progress in the previous one remains in the answer log but dormant.
+_Avoid_: Level, difficulty, age range, the retired 3–5 / 6–8 / 9+ bands
 
 **Level**:
 An authored set of ten questions within one Age Band. A child plays one Level at a time and unlocks the next by clearing all ten. Levels replace daily category rotation for Quizzy; category variety is mixed within each Level at authoring time.
