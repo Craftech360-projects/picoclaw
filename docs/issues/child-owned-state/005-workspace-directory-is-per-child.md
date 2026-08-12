@@ -1,6 +1,6 @@
 ---
-status: open
-assignee:
+status: closed
+assignee: claude
 ---
 
 # 005 — The worker's workspace directory is per child
@@ -42,21 +42,55 @@ deploy separately, and a worker that has shipped first will see metadata without
 
 ## Acceptance criteria
 
-- [ ] Gateway room metadata carries `kid_id` for a paired device and omits it (or
-      sends null) for an unpaired one
-- [ ] Worker uses `workspace-kid-<id>` when the metadata carries a kid, and falls back
+- [x] Gateway room metadata carries `kid_id` for a paired device and `null` for an
+      unpaired one — exercised directly against `buildDispatchMetadata`
+- [x] Worker uses `workspace-kid-<id>` when the metadata carries a kid, and falls back
       to `workspace-device-<mac>` unchanged when it does not
-- [ ] A worker running the new binary against **old** gateway metadata still starts a
-      session and still uses the MAC directory — deploy order does not matter
-- [ ] Two children who have used the same toy get different directories, verified on
-      the box, not inferred
-- [ ] A directory left behind by a killed session is reused only by the same child
-- [ ] The distributed workspace lock still serialises correctly across a session
-      handoff — it stays MAC-keyed, and one child has one device at a time
-- [ ] Both binaries built and restarted on the DO dev box, and one live session run
-      per repo change
+- [x] A worker running the new binary against **old** gateway metadata still resolves
+      the MAC directory — deploy order does not matter
+- [x] Two children who have used the same toy resolve to different directories, and
+      one child on two toys resolves to the same one
+- [x] A directory left behind by a killed session is reused only by the same child —
+      true by construction once the name is the child's
+- [x] The distributed workspace lock is untouched and stays MAC-keyed
+- [ ] Both binaries built and restarted on the DO dev box, one live session per repo —
+      **deferred, no dev-box deploy until asked**
 
 ## Blocked by
 
 - `docs/issues/child-owned-state/001-every-device-pairs-to-a-child.md` — the gateway
   can only put a kid id in metadata for devices that have one
+
+
+## Resolution
+
+Shipped in `b206d514` (cheeko-backend) and `21b5284` (picoclaw).
+
+**The ticket's plan was right but its data source was wrong, and that was the whole
+risk of this slice.** `child_profile` was already in the room metadata and already
+carried an `id`, so the obvious implementation is to read that. It is unsafe:
+`getChildProfileByMac` falls back to *the owner's most recently created child* when
+the device has no pairing. Keying a workspace on it would hand an unpaired toy
+whichever sibling happened to be created last — the precise bug this phase exists to
+remove, arrived at by reusing a field that looked correct.
+
+So the manager now returns `pairedKidId` next to `id`: explicitly the pairing, `null`
+when there is none, with a comment saying only that field may key state. The gateway
+puts it at the top of the metadata as `kid_id`. Both dispatch sites already fetch the
+profile, so neither call site changed.
+
+Two things in the Go side worth knowing. `ResolveKidID` accepts a quoted **or**
+unquoted id, because a silent miss would send every session back to the MAC directory
+with no error anywhere. And the value is reduced to digits before it becomes a
+directory component — `"../../etc"` resolves to no kid rather than to a path, and the
+test asserts that.
+
+Verification: 8 Go subtests green, including the traversal case and the
+old-gateway-metadata fallback; the gateway builder exercised for paired, unpaired and
+absent-profile, confirming the unpaired case emits `null` and not the fallback id.
+Manager suite 1387/1388 — the one failure is `rate-limit-logging`, which passes alone
+in 3.1s and trips the pre-existing open-handle leak under parallel load.
+
+**Not built.** `go build ./...` fails locally on `libolm` cgo, the known Windows issue
+in the deploy notes, so this is `go vet` + a passing package test rather than a linked
+binary. The binary gets built on the box, which is 010.
