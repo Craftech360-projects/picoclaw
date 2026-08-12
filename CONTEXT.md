@@ -48,9 +48,21 @@ _Avoid_: Persona, template character
 An RFID card (`card_type = 'ai'`) that, when scanned, resolves through Manager API to a Character and a language for the current Device session. The card carries a uid only; Manager owns the uid → Character + language mapping.
 _Avoid_: Content pack, Q&A pack, character card
 
+**Child**:
+The person the toy talks to, and the owner of everything they build up: conversation history, durable memory, Question Bank progress, and the images they imagined. A Child exists before any Device does — a parent creates one during onboarding. A Device is paired to exactly one Child at a time, but over its life it may serve several in succession — a younger sibling inherits the toy, or a Child moves to a new one. The Child is the durable side of every such pairing: nothing they accumulate is ever visible to a sibling, and replacing the toy loses none of it.
+_Avoid_: User, account, device owner, parent (the parent owns the account, the Child owns the learning)
+
+**Handover**:
+The moment a Device stops being paired to one Child and becomes paired to the next. A deliberate, occasional act a parent performs — not something that happens per session. A Handover must leave the incoming Child with nothing of the outgoing Child's: not their memory, not their rolling summary, not the recordings cached on the toy itself. The outgoing Child keeps everything, intact, ready if they are ever paired to a Device again.
+_Avoid_: Switch, reassign, unbind (unbind removes the parent account; a Handover changes only the Child)
+
 **Device**:
-A physical toy identified by MAC address. A Device selects its current Character through Manager API. Workspace state (USER.md, MEMORY.md) is scoped per-Device and shared across Character switches; only AGENT.md swaps when the Character changes.
+A physical toy identified by MAC address. A Device selects its current Character through Manager API, and owns only what is genuinely about the hardware — settings, battery and runtime state, firmware, and the entitlement to run sessions at all. It owns none of the Child's history; when it is unbound, nothing of the Child's goes with it.
 _Avoid_: User, child
+
+**Unlinked Device**:
+A bound Device that has no Child yet, because its parent has no children on file or more than one and has not picked. It still works and still accumulates history; that history is provisional and belongs to whichever Child is linked next. Linking transfers it. A Device that has already been unbound from a Child never adopts that Child's history again by accident.
+_Avoid_: Unbound device, orphan device (unbound means no parent account; unlinked means no Child)
 
 **Governing Prompt**:
 The fixed set of overall Cheeko rules (child-safety, runtime, voice-output) that apply to every session and override any persona or parent instruction. Authored by Cheeko, never by a parent or admin; a session can never run without it.
