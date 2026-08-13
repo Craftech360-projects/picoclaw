@@ -103,8 +103,13 @@ child's transcript.
       Two more characters still wanted for the full check
 - [ ] Per-character `sessions/*.jsonl` files confirmed in the workspace — same
       blocker; the dev box currently holds one workspace and zero transcripts
-- [ ] Toy-swap test passes in both directions (same child follows, new child sees
-      nothing) — **needs two devices and a real pairing change**
+- [x] Toy-swap **inverse** direction (new child sees nothing of the previous one) —
+      `00:16:3E:7A:11:C4` has carried **two** children, kid 15 (2 sessions) and
+      kid 16 (1), and the sessions separate cleanly by `kid_id` with no overlap.
+      Asserted at the data boundary the endpoint filters on; the endpoint itself
+      is Firebase-authed and was not called
+- [ ] Toy-swap **forward** direction (same child, second toy) — still needs one
+      child paired to two devices
 - [ ] Parent-app screens rendered against real data, not fixtures — needs the app,
       which has not been built against the new endpoints yet
 - [x] Result written into the resolution of each of 001–003, including anything
@@ -222,6 +227,30 @@ Two unrelated things surfaced in the same run:
   `docs/issues/child-owned-state/011-memory-doc-keeps-a-legacy-unique.md`. It
   matters here because it silently disables the shared-summary continuity that
   `000`'s point 4 depends on.
+
+### 2026-08-13, second device — attribution beats the device default
+
+`00:16:3E:7A:11:C4`, paired to kid 15, **device default character `Cheeko`**:
+
+```
+15:05  session_character=NANI    kid=15  msgs=5   ← after the deploy
+11:05  session_character=Cheeko  kid=16  msgs=3   ← before the deploy
+```
+
+This is the decisive one. The 15:05 session is filed as **NANI while the device's
+`ai_device.agent_id` still points at Cheeko** — the exact substitution that
+produced the 1635-message all-Cheeko baseline, now not happening. Nothing before
+today could have produced that row.
+
+Two further facts from the same device:
+
+- Its `summary` document has `owner_key: kid:15`, **updated 15:06** — one minute
+  after the session. So the `011` constraint failure is not universal: a device
+  whose owner key still matches its pairing consolidates fine. That is the
+  positive control for `011`'s diagnosis, and it narrows the blast radius to
+  re-paired devices only.
+- The toy has carried **two children** (kid 15 and kid 16) with cleanly disjoint
+  sessions, which is the inverse toy-swap case holding at the data boundary.
 
 One operational gotcha worth keeping: the dev box's `SERVICE_SECRET_KEY` line
 carries quoting/whitespace that makes an invalid HTTP header value. Node rejects

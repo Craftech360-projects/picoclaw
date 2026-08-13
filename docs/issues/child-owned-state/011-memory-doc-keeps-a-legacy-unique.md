@@ -91,3 +91,14 @@ the file must not be in the tree until you intend it applied (see
 
 `docs/issues/chat-history-attribution/004-backfill-and-live-verification.md` —
 surfaced by a live Nani session, not by any test.
+
+## Positive control — the blast radius is re-paired devices only
+
+`00:16:3E:7A:11:C4` (kid 15) wrote its `summary` document successfully at 15:06 on
+2026-08-13, minutes after the failure on `00:16:3E:AC:B5:38`. Its only summary row
+carries `owner_key: kid:15`, matching the device's current pairing, so the upsert
+finds its row and updates in place — no create, no collision.
+
+The failure therefore needs a device whose pairing changed **after** a document was
+written under the old owner. The 89 mismatched rows are the population at risk;
+devices in agreement with their pairing are unaffected.
