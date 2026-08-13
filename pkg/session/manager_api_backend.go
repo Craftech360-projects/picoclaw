@@ -227,6 +227,11 @@ func (b *ManagerAPIBackend) fetchBootstrap(ctx context.Context) (managerBootstra
 		url.PathEscape(strings.TrimSpace(b.cfg.MACAddress)),
 		b.cfg.RecentLimit,
 	)
+	// Name the character we are actually running; without it the manager hydrates
+	// us from the device's default agent, which is a different character's history.
+	if agentID := strings.TrimSpace(b.cfg.AgentID); agentID != "" {
+		endpoint += "&agentId=" + url.QueryEscape(agentID)
+	}
 	body, err := b.doJSON(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return out, err
