@@ -1,6 +1,6 @@
 ---
-status: proposed
-assignee: unassigned
+status: closed
+assignee: claude
 ---
 
 # 002 — Reads scope by child and character
@@ -69,19 +69,72 @@ account-wide views, and after `001` they are at last per character.
 
 ## Acceptance criteria
 
-- [ ] Bootstrap returns the recent messages of the character named in the request,
+- [x] Bootstrap returns the recent messages of the character named in the request,
       and the device default when none is named — one test per branch
-- [ ] The worker sends its character on the bootstrap call
-- [ ] A child with sessions across three characters lists exactly three entries
+- [x] The worker sends its character on the bootstrap call
+- [x] A child with sessions across three characters lists exactly three entries
       from `/kids/:kidId/characters`, with correct counts
-- [ ] Two siblings on one parent account, both having talked to Quizzy, each see
-      only their own sessions
-- [ ] A child whose sessions span two MAC addresses sees all of them in one list
-- [ ] A parent requesting another family's `kidId` is refused
-- [ ] Message reads reach the child through the session join; no `kid_id` column is
+- [x] Two siblings on one parent account, both having talked to Quizzy, each see
+      only their own sessions — asserted on the where clause, which is where the
+      separation lives; no DB in the unit suite
+- [x] A child whose sessions span two MAC addresses sees all of them in one list —
+      same boundary: the query names `kid_id` and no `mac_address` at all
+- [x] A parent requesting another family's `kidId` is refused
+- [x] Message reads reach the child through the session join; no `kid_id` column is
       added to `voice_session_messages`
-- [ ] The existing `/agents/:agentId/sessions` response shape is unchanged
+- [x] The existing `/agents/:agentId/sessions` response shape is unchanged — the
+      code is untouched and the integration sweep that calls it still passes
+- [ ] Verified against a real app or device — **not run, no device and no deploy
+      from this session**; joins 001's live criteria in `004`
 
 ## Blocked by
 
 - `001-history-carries-the-speaking-character.md`
+
+## Resolution
+
+Shipped in `f2c6667` (picoclaw) and `637e936c` (manager-api). Full jest suite
+**1495 passed, 76 suites**; `pkg/session` green. `pkg/livekit`'s
+`TestSynthesizeAndPlayLogsTTSProviderType` fails on this branch with these files
+stashed too — pre-existing, not from here, same one `001` recorded.
+
+**The bootstrap's summary read did not need the exemption the ticket offered.**
+The ticket said to give summaries "the same treatment *if* it turns out to be
+device-scoped rather than session-scoped". It is session-scoped — `006` already
+moved it — but it *also* filtered `agent_id: device.agent_id`, so it carried the
+identical bug through a different clause. `recentSessions` did too, and the ticket
+does not mention it at all. All three now read one resolved `agentId`, which is
+`options.agentId || device.agent_id`; leaving one of them on the device default
+would have made the three halves of one bootstrap disagree about who was talking.
+Note that this makes summaries per character in the bootstrap, which `000` point 4
+wants shared — that sharing lives in `MEMORY.md` and is `003`'s to keep, untouched
+here.
+
+**What did not change: the `agent` block.** The bootstrap still resolves the
+persona (system prompt, voice, models) from `device.agent_id`, so a Quizzy
+bootstrap gets Quizzy's history beside Cheeko's prompt. The worker takes its
+persona from room metadata, not from here, and widening this would have changed
+the response's `agent`/`device.agentId` for every existing caller. Named, not
+fixed.
+
+**The ownership guard grew one option rather than gaining a twin.**
+`resolveProgressScope` checked a named *toy* against the caller's account; it now
+checks a named *child* the same way, and returns that child as the scope. The
+alternative — asserting the kid appears in `scope.kidIds`, which is derived from
+devices — refuses a child who is not currently paired to a toy, which is exactly
+the child this whole design is for. Existing callers pass no `kidId` and are
+unaffected; a caller that passes one to a progress endpoint would now be scoped
+by it instead of having it ignored.
+
+**Three routes, all Firebase-authed, keyed on the child**, filtering
+`voice_sessions.kid_id` with no `mac_address` anywhere in them. Messages reach the
+child through the session relation — no column added, per `000`'s invariant — so
+another child's `sessionId` reads as an empty transcript rather than a leak.
+
+**Not verified live.** Every criterion above is proven at the query boundary with
+prisma mocked, in this repo's existing style. Nothing here has met a device or the
+real app; that verification is `004`'s.
+
+One process note: this repo's working tree was shared with the agent doing `003`
+at the time. Both commits were scoped to explicit paths; `003`'s files are
+untouched and still uncommitted.

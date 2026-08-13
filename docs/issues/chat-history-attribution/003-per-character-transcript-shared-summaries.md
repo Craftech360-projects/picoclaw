@@ -122,7 +122,7 @@ not a blocker.
 
 ## Resolution
 
-Shipped in `COMMIT_SHA`. Section A and C.1 as written; section B untouched, as
+Shipped in `94be8eb`. Section A and C.1 as written; section B untouched, as
 instructed. Section D's premise turned out to be stale — see below.
 
 ### What shipped
