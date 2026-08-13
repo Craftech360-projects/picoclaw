@@ -47,6 +47,10 @@ type managerWorkspaceLockAcquireResult struct {
 	Acquired bool                       `json:"acquired"`
 	Lock     *managerWorkspaceLockState `json:"lock"`
 	Current  *managerWorkspaceLockState `json:"current"`
+	// Whose workspace this device's state belongs to, as the Manager resolved it
+	// from the pairing: "kid:<id>" or "mac:<address>". Empty against a Manager
+	// that predates this field, which is why the caller keeps its own fallback.
+	OwnerKey string `json:"ownerKey"`
 }
 
 type managerWorkspaceLockLease struct {
@@ -55,6 +59,7 @@ type managerWorkspaceLockLease struct {
 	holderID     string
 	fencingToken int64
 	leaseTTL     int
+	ownerKey     string
 	stopCh       chan struct{}
 	doneCh       chan struct{}
 	once         sync.Once
@@ -238,6 +243,7 @@ func acquireManagerWorkspaceLockWithRetry(
 			holderID:     holderID,
 			fencingToken: result.Lock.FencingToken,
 			leaseTTL:     leaseTTLSeconds,
+			ownerKey:     strings.TrimSpace(result.OwnerKey),
 			stopCh:       make(chan struct{}),
 			doneCh:       make(chan struct{}),
 		}

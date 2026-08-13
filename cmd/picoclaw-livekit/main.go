@@ -537,7 +537,26 @@ func main() {
 					return nil
 				}
 				managerLockLease = lease
+				// The Manager has just told us who owns this device's stored
+				// workspace. Renaming the directory to match has to happen HERE:
+				// after the acquire (which needs only the MAC) and before the
+				// per-device lock below, which is the first thing to touch the
+				// path. Room metadata only got us this far.
 				if lease != nil {
+					if identity := workspaceIdentityFromOwnerKey(lease.ownerKey); identity != "" && identity != workspaceIdentity {
+						logger.InfoCF("livekit", "Workspace identity resolved from manager owner key", map[string]any{
+							"room":               roomName,
+							"device_mac":         deviceMAC,
+							"owner_key":          lease.ownerKey,
+							"previous_identity":  workspaceIdentity,
+							"workspace_identity": identity,
+							"previous_workspace": workspace,
+						})
+						workspaceIdentity = identity
+						agentCfg.ID = identity
+						agentCfg.Name = "LiveKit-" + identity
+						workspace = filepath.Join(baseWorkspace, "..", "workspace-"+routing.NormalizeAgentID(identity))
+					}
 					logger.InfoCF("livekit", "Acquired manager distributed workspace lock", map[string]any{
 						"room":             roomName,
 						"device_mac":       deviceMAC,
