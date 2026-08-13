@@ -1814,6 +1814,13 @@ func (e *livekitCronExecutor) ProcessDirectWithChannel(ctx context.Context, cont
 
 func livekitCronSessionKey(deviceMAC, agentID, roomName string) string {
 	if mac := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(deviceMAC), ":", "")); mac != "" {
+		// Same (child × character) rule as sessionKeyForParticipant, or a
+		// scheduled task writes to a different file than the voice session it
+		// belongs to. NormalizeAgentID leaves an ai_agent UUID untouched, which
+		// is what the gateway's character_id always is.
+		if aid := strings.TrimSpace(agentID); aid != "" {
+			return "livekit:device:" + mac + ":agent:" + routing.NormalizeAgentID(aid)
+		}
 		return "livekit:device:" + mac
 	}
 	if aid := strings.TrimSpace(agentID); aid != "" {

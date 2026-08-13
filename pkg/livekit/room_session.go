@@ -24,6 +24,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/voice/stt"
 	"github.com/sipeed/picoclaw/pkg/voice/tts"
 	"github.com/sipeed/picoclaw/pkg/voice/vad"
@@ -796,6 +797,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	// Before anything reads the history: the greeting must see the already-reset
 	// transcript, not reset it afterwards.
 	rs.bridge.ExpireStaleTranscript(ps.sessionKey)
+	rs.discardLegacyTranscript(ps.sessionKey)
 
 	if rs.stt == nil {
 		logger.WarnC("livekit", "STT provider not configured")
@@ -1035,12 +1037,47 @@ func (rs *RoomSession) sessionKeyForParticipant(identity string) string {
 		return ""
 	}
 	if rs.deviceMAC != "" {
-		return "livekit:device:" + strings.ReplaceAll(rs.deviceMAC, ":", "")
+		// Per (child × character): the workspace directory already names the
+		// child, so the suffix only has to carry the character. Without it every
+		// character on the device replays the others' turns.
+		key := rs.deviceSessionKey()
+		if rs.agentID != "" {
+			key += ":agent:" + sanitizeIdentity(rs.agentID)
+		}
+		return key
 	}
 	if rs.agentID != "" {
 		return "livekit:agent:" + sanitizeIdentity(rs.agentID)
 	}
 	return fmt.Sprintf("livekit:%s:%s", rs.roomName(), identity)
+}
+
+// deviceSessionKey is the device-wide key, which is both the base of the
+// per-character key and, pre-003, the whole of it.
+func (rs *RoomSession) deviceSessionKey() string {
+	if rs == nil || rs.deviceMAC == "" {
+		return ""
+	}
+	return "livekit:device:" + strings.ReplaceAll(rs.deviceMAC, ":", "")
+}
+
+// discardLegacyTranscript retires the pre-003 device-wide transcript once the
+// key carries a character. Nobody reads it any more, and left on disk it rides
+// along in every workspace sync. Continuity survives in MEMORY.md's shared
+// summaries, which are deliberately not per character.
+func (rs *RoomSession) discardLegacyTranscript(current string) {
+	if rs == nil || rs.bridge == nil || rs.bridge.sessions == nil {
+		return
+	}
+	legacy := rs.deviceSessionKey()
+	if legacy == "" || legacy == current {
+		return
+	}
+	deleter, ok := rs.bridge.sessions.(session.SessionDeleter)
+	if !ok {
+		return
+	}
+	deleter.Delete(legacy)
 }
 
 func sanitizeIdentity(value string) string {
