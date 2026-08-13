@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: closed
 assignee: claude
 ---
 
@@ -155,15 +155,18 @@ after this one. Nothing here is deferred to "later" — it is the next ticket.
 
 ## Acceptance criteria
 
-- [ ] `resolvePersistenceFields` returns the character id from metadata carrying
+- [x] `resolvePersistenceFields` returns the character id from metadata carrying
       only `character_id` — unit test alongside `TestResolvePersistenceFieldsFromMetadata`
       (`pkg/livekit/post_session_persistence_test.go:46`), plus one asserting
       `agent_id` still wins when both are present
 - [ ] A live session with a non-default character writes that character's id to
-      `voice_session_messages.agent_id` and `voice_sessions.agent_id`
+      `voice_session_messages.agent_id` and `voice_sessions.agent_id` — **needs a
+      device, deferred to 004**
 - [ ] Two back-to-back sessions on one device with different characters produce
-      two different `agent_id` values
-- [ ] The summary `PUT` for that session carries the same `agentId`
+      two different `agent_id` values — **deferred to 004**
+- [ ] The summary `PUT` for that session carries the same `agentId` — **deferred to
+      004**; the payload builds it from the same `rs.agentID`, so it follows by
+      construction but is unverified live
 - [ ] Backfill decision recorded: existing rows are unrecoverable per-message
       (the character is not stored anywhere else on the row), but
       `voice_sessions` can be partially reconstructed from
@@ -191,3 +194,37 @@ Quizzy's, not the device's default.
 Note the trap from `greeting-latency/001`: a previous session's teardown flush can
 land seconds into the next session. Read rows by `session_id`, never by "the most
 recent N".
+
+## Resolution
+
+Shipped in `05f0dce`. Code change is what the ticket predicted, with one
+correction found by writing the test first.
+
+**The merged key set would have been a race.** The planned fix added
+`character_id` to the same map `agent_id` lives in. `findFirstString` iterates a
+Go map, and map iteration is randomised — on metadata carrying both spellings the
+winner would have been chosen at random, per call. The shipped version tries the
+two spellings **in order** instead, and the test loops 50 times so a regression to
+the merged form fails rather than flakes.
+
+Three tests: `character_id` alone resolves, `agent_id` wins over `character_id`,
+neither key resolves to empty. `pkg/livekit` and `cmd/picoclaw-livekit` need the
+cgo path (`sh scripts/test-livekit.sh`, or MinGW + the TEN VAD dir on PATH) — the
+default `make test` runs `CGO_ENABLED=0` and reports them as `[setup failed]`.
+
+**One pre-existing failure, not from this change:**
+`TestSynthesizeAndPlayLogsTTSProviderType` fails identically with these two files
+stashed. Untouched, unrelated to attribution.
+
+Blast radius re-checked at all three other readers of `agentID`
+(`sessionKeyForParticipant`, `resolveLiveKitWorkspaceLifecycle`,
+`livekitCronSessionKey`): every one is behind a `deviceMAC`/`kidID`-empty guard
+that a real session never reaches, so nothing but the persistence payloads
+changes. Review found no defects.
+
+**Not verified live** — no device from this session. The three live criteria move
+to `004`. Until they run, this is "the worker now sends the id the gateway has
+always been sending", proven at the unit boundary only.
+
+`002` is now unblocked, and should ship before this reaches a device: on its own
+this change makes device bootstrap fetch the wrong character's recent messages.
