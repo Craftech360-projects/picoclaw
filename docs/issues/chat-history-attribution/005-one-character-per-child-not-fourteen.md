@@ -74,17 +74,75 @@ rather than moving it.
 Sequence: (1) stops the bleeding, (2) makes the app correct immediately, (3)
 cleans up. (2) can ship without (3).
 
-## Open question for whoever takes this
+## Both open questions, answered 2026-08-13
 
-**Why is the app creating a new agent at all?** User 6's newest Cheeko was created
-at 15:02, two minutes before a session on a device bound at 10:00 the same day.
-Something in the bind/select flow POSTs an agent per action. Fixing only the
-symptom leaves that loop running, so find the caller before closing.
+### Why the app creates an agent: one per toy activation, by design
 
-Also unexplained: kid 15's 71 sessions belong to `83b7a273`, which is **not in
-user 6's agent list at all** — that history is attributed to an agent under a
-different account. Worth understanding before merging rows, since a naive merge
-keyed on `user_id` will not gather it.
+`CheekoAI-Parent-App/lib/controllers/toy_activation_controller.dart:582-599`:
+
+```dart
+final existingAgents = await _agentService!.getUserAgents();
+final agentName = _generateUniqueAgentName(existingAgents);   // "Cheeko", "Cheeko 2", …
+newAgentId = await _agentService!.createAgent(agentName: agentName);
+final bindResult = await _agentService!.bindDevice(agentId: newAgentId, deviceCode: _deviceCode);
+```
+
+The app models **a toy as an agent**, so every activation creates one. Two things
+turn that into duplicates:
+
+1. **The server erases the app's uniqueness scheme.** `_generateUniqueAgentName`
+   (`:809`) produces `Cheeko 2`, `Cheeko 3`; `normalizeCharacterName` strips the
+   suffix and stores them all as `Cheeko`. The app then reads them back, sees
+   three agents all called `Cheeko` rather than the numbered names it wrote, and
+   its counter generates `Cheeko 2` again. The two sides disagree about what an
+   agent is called, and neither is wrong on its own.
+2. **A failed bind leaves the agent behind.** The live sequence:
+
+   ```
+   15:01:40  POST /api/mobile/agents                200
+   15:01:40  POST /api/mobile/agents/d09d1139…/bind/959539   500
+   15:01:52  POST /api/mobile/agents                200
+   15:01:52  POST /api/mobile/agents/ec1324f4…/bind/959539   500
+   15:02:24  POST /api/mobile/agents                200
+   15:02:24  POST /api/mobile/agents/0cce451a…/bind/949539   200
+   ```
+
+   A mistyped device code, retried twice. The controller comments say the agent is
+   cleaned up in the catch block; two orphaned rows say otherwise. A bad code also
+   returns **500** where it should be a 4xx, which is worth fixing on its own —
+   the app branches on error type.
+
+**This is why fix (1) is the right one.** Making `createAgent` idempotent per
+`(user_id, normalised name)` neutralises both the retry loop and the app's broken
+counter **without shipping an app release**. Sharing one `Cheeko` row across two
+toys is correct under `000`: an agent is a character, a device is a toy, and
+history separates by `kid_id` and session, not by agent row.
+
+### The 71 sessions: a toy that changed accounts and kept its old default
+
+| fact | value |
+|---|---|
+| agent `83b7a273` | `Cheeko`, **user 5**, created 2026-07-23 |
+| Kishore, kid 15 | **user 6** |
+| all 71 sessions | MAC `00:16:3E:AC:B5:38`, 2026-07-23 → 2026-08-07 |
+
+That toy was activated under **user 5** — creating user 5's `Cheeko` as its
+default — and later paired to a child of **user 6**. `ai_device.agent_id` was
+never re-pointed, so every session recorded `kid_id` from the device's *current*
+pairing and `agent_id` from its *stale* default. One row, two accounts.
+
+It is the same "the device default is a stale pointer" family that `001` fixed for
+characters, and it has a direct consequence for step (3):
+
+> **Merge by the child, not by the agent's account.** For each session, the
+> correct survivor is the canonical agent of that name belonging to **the account
+> that owns the session's `kid_id`**. A merge keyed on `ai_agent.user_id` leaves
+> these 71 pointing at user 5 forever, and a careless one would move user 5's own
+> history.
+
+Related and worth its own decision: unbinding a toy should clear or re-point
+`ai_device.agent_id`, or the next family inherits the previous owner's character
+row.
 
 ## Acceptance criteria
 
@@ -103,3 +161,12 @@ keyed on `user_id` will not gather it.
 ## Found by
 
 Observed in the admin console 2026-08-13 while verifying `004`.
+
+## Extra acceptance criteria from those findings
+
+- [ ] Binding with a wrong or expired device code returns a 4xx, not a 500
+- [ ] A failed bind leaves no orphan agent — verified by retrying a bad code twice
+      and counting rows before and after
+- [ ] The merge repoints by the session's `kid_id` owner, not by `ai_agent.user_id`;
+      the 71 sessions on `00:16:3E:AC:B5:38` are the test case
+- [ ] Decided (either way, in writing) whether unbind clears `ai_device.agent_id`
