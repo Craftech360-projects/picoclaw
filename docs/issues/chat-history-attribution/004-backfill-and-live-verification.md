@@ -1,6 +1,6 @@
 ---
-status: proposed
-assignee: unassigned
+status: in-progress
+assignee: claude
 ---
 
 # 004 — Backfill and live verification
@@ -94,18 +94,100 @@ child's transcript.
 
 ## Acceptance criteria
 
-- [ ] Backfill option chosen, executed or explicitly declined, and recorded
-- [ ] Cutover timestamp recorded somewhere the app can read or the docs can cite
-- [ ] Three-character live run passes the SQL check above
-- [ ] Per-character `sessions/*.jsonl` files confirmed in the workspace
+- [x] Backfill option chosen, executed or explicitly declined, and recorded —
+      **option A**, decided 2026-08-13
+- [x] Cutover timestamp recorded somewhere the app can read or the docs can cite —
+      **2026-08-13 13:46 IST, dev box only** (see below)
+- [ ] Three-character live run passes the SQL check above — **needs a toy; the
+      simulator has no file-audio input, so no agent can drive it**
+- [ ] Per-character `sessions/*.jsonl` files confirmed in the workspace — same
+      blocker; the dev box currently holds one workspace and zero transcripts
 - [ ] Toy-swap test passes in both directions (same child follows, new child sees
-      nothing)
-- [ ] Parent-app screens rendered against real data, not fixtures
-- [ ] Result written into the resolution of each of 001–003, including anything
-      that did not behave as the ticket predicted
+      nothing) — **needs two devices and a real pairing change**
+- [ ] Parent-app screens rendered against real data, not fixtures — needs the app,
+      which has not been built against the new endpoints yet
+- [x] Result written into the resolution of each of 001–003, including anything
+      that did not behave as the ticket predicted — one defect found, see below
 
 ## Blocked by
 
 - `001-history-carries-the-speaking-character.md`
 - `002-reads-scope-by-child-and-character.md`
 - `003-per-character-transcript-shared-summaries.md`
+
+## Progress 2026-08-13 — deployed to dev, one defect found, live run still owed
+
+### Backfill: option A, and the baseline that justified it
+
+Measured on DB1 before deploying:
+
+```
+BEFORE (30 days, by character): [{"agent_name":"Cheeko","messages":1635}]
+sessions: 650 total, 306 with kid_id, 626 with agent_id
+```
+
+**1635 messages, one character, zero others.** Six characters are in daily use —
+the gateway log shows `tara`, `masti`, `quizzy` dispatched on the test device the
+same afternoon — and not one of them appears. Every device row's `agent_id` points
+at a `Cheeko` row. Nothing to repair per message: option A stands, cutover is
+**2026-08-13 13:46 IST on the dev box**. Production is untouched, so prod history
+has no cutover yet.
+
+### A defect the unit tests could not have found
+
+`character_id` is **two different namespaces sharing one key name**:
+
+```
+[MQTT-IN][DEVICE] payload={"type":"hello",...,"character_id":"tara",...}
+🎭 [CHARACTER] hello.character_id="tara" → set-character (session-scoped)
+```
+
+The firmware sends a **slug**; room metadata sends the `ai_agent` **UUID**. Both
+are called `character_id`, and `findFirstString` recurses into nested objects, so
+the two can meet. `voice_session_messages.agent_id` is `@db.Uuid` with an FK — a
+slug reaching it fails the insert and loses the **entire transcript**, which is
+strictly worse than the mis-attribution 001 exists to fix.
+
+Fixed in `12cb296`: `character_id` is only believed when it matches a UUID;
+anything else falls back to empty, which is the old, safe behaviour. `agent_id`
+keeps its permissive handling — nothing has ever sent it, and other picoclaw
+deployments may not use UUIDs. Two tests cover it, including the three real slugs
+seen in the logs.
+
+Both the code review and I had reasoned this was safe from the source alone. It
+was reading the *logs* that showed the slug in live traffic.
+
+### What is proven, and how
+
+Deployed: picoclaw `12cb296` built on the box with cgo, `manager-api` `637e936c`,
+both restarted and healthy, worker re-registered as `cheeko-agent`. No Prisma
+migration in either pull (checked before restarting, since `server.js` applies
+every unapplied migration on boot).
+
+The persistence contract was then driven directly against
+`POST /toy/agent/chat-history/session` — the exact endpoint the worker calls —
+on real devices, and the rows read back:
+
+| Case | Sent | `voice_sessions` | message rows | kid |
+|---|---|---|---|---|
+| A | `agentId` = riddler | riddler | riddler ×2 | – |
+| B | `agentId` omitted | **Cheeko** | **Cheeko** | – |
+| C | omitted, paired device | Cheeko | Cheeko | **3** |
+
+A proves a named character is honoured end to end. **B reproduces the bug's exact
+mechanism on live infrastructure** — omit the field and the Manager silently
+substitutes the device default. C confirms `kid_id` still lands, which is what
+makes a toy swap survivable. All three test sessions were deleted afterwards
+(`CLEANED_UP=3`, `MESSAGES_LEFT=0` — the cascade works).
+
+### What is still owed, and why an agent cannot do it
+
+The three-character conversation, the per-character `.jsonl` files, and the
+toy-swap test all need a child speaking into a toy. `client.py` takes audio from a
+live microphone and has no file-input flag, so no agent can drive it. The runbook
+below is ready for whoever has the device.
+
+One operational gotcha worth keeping: the dev box's `SERVICE_SECRET_KEY` line
+carries quoting/whitespace that makes an invalid HTTP header value. Node rejects
+the request at the parse layer with a bodiless `400 Bad Request` that looks
+nothing like a validation error. Strip it: `tr -d "\"'" | tr -d '[:space:]'`.
