@@ -446,6 +446,20 @@ func main() {
 		workspaceIdentity := lifecycle.WorkspaceIdentity
 		preserveWorkspace := lifecycle.PreserveWorkspace
 
+		// An unpaired toy has no child to attribute anything to, so this session's
+		// chat history lands with kid_id NULL and its workspace is named after the
+		// device instead of the child. That is legitimate — a toy out of the box has
+		// no child yet — but it is indistinguishable from a bug when reading the
+		// database later, so say it once per session rather than leaving the null to
+		// be explained from first principles.
+		if strings.TrimSpace(lifecycle.KidID) == "" {
+			logger.WarnCF("livekit", "Device is not paired to a child; history will carry no kid_id", map[string]any{
+				"device_mac": deviceMAC,
+				"workspace":  workspaceIdentity,
+				"room":       roomName,
+			})
+		}
+
 		agentCfg := &config.AgentConfig{
 			ID:     workspaceIdentity,
 			Name:   "LiveKit-" + workspaceIdentity,
@@ -656,10 +670,21 @@ func main() {
 				deviceMAC, characterID, characterName,
 			)
 			if err != nil {
-				logger.DebugCF("livekit", "Speculative quiz batch fetch did not complete", map[string]any{
-					"device_mac": deviceMAC,
-					"error":      err.Error(),
-				})
+				// A cancel here is this session deciding it has no scored quiz and
+				// aborting the speculative GET (see quizFetchCancel below) — the
+				// optimisation working, not a failure. Logging both the same way sent
+				// someone reading a Nani session hunting for a broken quiz endpoint.
+				if errors.Is(err, context.Canceled) {
+					logger.DebugCF("livekit", "Speculative quiz batch fetch cancelled; this character runs no scored quiz", map[string]any{
+						"device_mac": deviceMAC,
+						"character":  characterName,
+					})
+				} else {
+					logger.DebugCF("livekit", "Speculative quiz batch fetch did not complete", map[string]any{
+						"device_mac": deviceMAC,
+						"error":      err.Error(),
+					})
+				}
 				quizFetchCh <- nil
 				return
 			}
