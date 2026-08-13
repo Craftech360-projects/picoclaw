@@ -136,5 +136,8 @@ prisma mocked, in this repo's existing style. Nothing here has met a device or t
 real app; that verification is `004`'s.
 
 One process note: this repo's working tree was shared with the agent doing `003`
-at the time. Both commits were scoped to explicit paths; `003`'s files are
-untouched and still uncommitted.
+while both were in flight. Every commit here was scoped to explicit paths, and
+`003`'s code is untouched by them — but the two runs did interleave: `003`'s
+`94be8eb` landed between this ticket's code and doc commits, and one line of
+`003`'s own resolution rode along in the doc commit below. Nothing was lost;
+worth knowing before reading the history as a sequence.
