@@ -583,13 +583,27 @@ func findFirstScalar(node any, keys map[string]struct{}) string {
 	return ""
 }
 
+// resolveAgentID returns the id of the character that is speaking this session.
+//
+// The gateway spells it character_id and has never sent agent_id — both name the
+// same ai_agent.id. Without the second spelling the worker sent no id at all and
+// the Manager filled the hole with ai_device.agent_id, the device's DEFAULT
+// character, so every character's chat history was filed under that one.
+//
+// The two spellings are tried in order rather than merged into one key set: map
+// iteration is randomised, so a merged lookup would pick a winner at random on
+// the metadata that carries both.
 func resolveAgentID(metadata string) string {
 	md := parseMetadataMap(metadata)
-	keys := map[string]struct{}{
-		"agent_id": {},
-		"agentid":  {},
+	for _, keys := range []map[string]struct{}{
+		{"agent_id": {}, "agentid": {}},
+		{"character_id": {}, "characterid": {}},
+	} {
+		if id := strings.TrimSpace(findFirstString(md, keys)); id != "" {
+			return id
+		}
 	}
-	return strings.TrimSpace(findFirstString(md, keys))
+	return ""
 }
 
 func parseMetadataMap(metadata string) map[string]any {
