@@ -146,17 +146,18 @@ row.
 
 ## Acceptance criteria
 
-- [ ] Creating a character that already exists for the account returns the
+- [x] Creating a character that already exists for the account returns the
       existing agent; no second row
-- [ ] `"Cheeko 2"` still normalises to `Cheeko` and still resolves the template
+- [x] `"Cheeko 2"` still normalises to `Cheeko` and still resolves the template
       persona — the TTS bug does not come back
-- [ ] `/kids/:kidId/characters` shows each character exactly once, with session
-      counts summed across duplicate rows
-- [ ] Merge script repoints sessions, messages and devices **before** deleting,
+- [x] `/kids/:kidId/characters` shows each character exactly once, with session
+      counts summed across duplicate rows — unit-proven; not yet called over HTTP
+      with a Firebase token
+- [x] Merge script repoints sessions, messages and devices **before** deleting,
       and a dry run reports what it would move
-- [ ] After merge, no `(user_id, agent_name)` has copies, and no history row has a
-      NULL `agent_id` that had one before
-- [ ] The caller creating spurious agents is identified and named here
+- [x] After merge, no `(user_id, agent_name)` has copies, and no history row has a
+      NULL `agent_id` that had one before — nulls unchanged at 24 / 145
+- [x] The caller creating spurious agents is identified and named here
 
 ## Found by
 
@@ -164,11 +165,14 @@ Observed in the admin console 2026-08-13 while verifying `004`.
 
 ## Extra acceptance criteria from those findings
 
-- [ ] Binding with a wrong or expired device code returns a 4xx, not a 500
-- [ ] A failed bind leaves no orphan agent — verified by retrying a bad code twice
-      and counting rows before and after
+- [x] Binding with a wrong or expired device code returns a 4xx, not a 500 —
+      400/404/409 by case; not yet exercised from the app
+- [ ] A failed bind leaves no orphan agent — **needs the app's own retry path**,
+      which is the only place the create-then-bind loop runs
 - [ ] The merge repoints by the session's `kid_id` owner, not by `ai_agent.user_id`;
-      the 71 sessions on `00:16:3E:AC:B5:38` are the test case
+      the 71 sessions on `00:16:3E:AC:B5:38` are the test case — **not done, and
+      deliberately**: the read already presents them correctly, and moving them
+      decides who owns a child's past
 - [ ] Decided (either way, in writing) whether unbind clears `ai_device.agent_id`
 
 ## Progress 2026-08-13 — code shipped, merge is staged and waiting
@@ -288,3 +292,37 @@ correctly and the device's default character still resolves — the merge repoin
 The **cross-account history** is reported and left alone. Moving those 71 sessions
 decides who owns a child's past, and the read already presents them correctly.
 That needs its own decision, with `004`'s cutover note as precedent.
+
+## Resolution — merge applied to DB1 2026-08-13
+
+**22 agent rows removed, 3299 references moved, nothing stranded.**
+
+| | before | after |
+|---|---|---|
+| `ai_agent` | 56 | **34** |
+| `voice_sessions` | 656 | 656 |
+| `voice_session_messages` | 3131 | 3131 |
+| sessions with NULL agent | 24 | **24** |
+| messages with NULL agent | 145 | **145** |
+| accounts with duplicate rows | 4 | **0** |
+| devices naming a missing agent | — | **0** |
+
+The two NULL counts are the ones that matter: had the script deleted before
+repointing, the `onDelete: SetNull` FKs would have converted moved history into
+orphans, and those numbers would have jumped by 3299. They did not move. Per-child
+session totals are identical across all eight children.
+
+Kishore's history now reads `Cheeko 73, NANI 1, quizzy 1` where it read three
+separate Cheekos. Note the 73 still spans **two** agent ids — user 6's survivor and
+user 5's stray from the toy that changed hands — merged by the read, not by the
+script. That is the intended split of responsibility.
+
+Audit of every loser→survivor move is at
+`manager-api-node/scripts/merge-duplicate-agents.audit.json` on the dev box.
+Deleting an agent row cannot be undone from the database alone; that file is the
+record.
+
+**Not done, and each for a stated reason:** the app's own retry path (step 4 of
+the test plan — needs the app), the live per-character run (step 6 — needs a toy),
+moving cross-account history (a decision, not a cleanup), and whether unbind should
+clear `ai_device.agent_id`.
