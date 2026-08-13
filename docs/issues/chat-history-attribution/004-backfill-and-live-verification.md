@@ -98,8 +98,9 @@ child's transcript.
       **option A**, decided 2026-08-13
 - [x] Cutover timestamp recorded somewhere the app can read or the docs can cite —
       **2026-08-13 13:46 IST, dev box only** (see below)
-- [ ] Three-character live run passes the SQL check above — **needs a toy; the
-      simulator has no file-audio input, so no agent can drive it**
+- [x] ~~Three~~ **One**-character live run passes the SQL check above — a real
+      Nani session on 2026-08-13 filed as **Nani**, session and messages both.
+      Two more characters still wanted for the full check
 - [ ] Per-character `sessions/*.jsonl` files confirmed in the workspace — same
       blocker; the dev box currently holds one workspace and zero transcripts
 - [ ] Toy-swap test passes in both directions (same child follows, new child sees
@@ -186,6 +187,41 @@ The three-character conversation, the per-character `.jsonl` files, and the
 toy-swap test all need a child speaking into a toy. `client.py` takes audio from a
 live microphone and has no file-input flag, so no agent can drive it. The runbook
 below is ready for whoever has the device.
+
+### 2026-08-13, later — the fix confirmed on a real toy
+
+A live **Nani** session on `00:16:3E:AC:B5:38`, driven from the actual device:
+
+```
+SESSION {"session_id":"b6b23edb…_00163EACB538_conversation",
+         "session_character":"Nani","msg_characters":"Nani","msgs":2}
+SESSION {"session_id":"64d19efe…_00163EACB538_conversation",
+         "session_character":"Nani","msg_characters":"Nani","msgs":1}
+```
+
+Both the session row and its message rows say **Nani**. Before today every one of
+these would have read Cheeko — the 1635-message baseline above is what that looks
+like. The worker log shows it carrying the character through:
+`character_id=7a7a10d8-6893-42ce-b41c-6439776672a5&character=Nani`, a UUID, so the
+guard in `12cb296` passes it rather than rejecting it.
+
+`kid` is null on these rows because **the test device is unpaired**
+(`kid_id: null`). That is correct behaviour, not a defect — but it means the
+toy-swap criteria still need a paired device.
+
+Two unrelated things surfaced in the same run:
+
+- **`Speculative quiz batch fetch did not complete … context canceled`** — benign.
+  A prefetch cancelled by the session ending; no action.
+- **`device_memory_documents` upsert fails on a legacy unique constraint**, so the
+  child's rolling memory can no longer update on any re-paired device (89 such
+  rows on DB1). **Pre-existing**, inherited from `child-owned-state`, and verified
+  not to come from this phase — 002's whole change to `agent.service.js` is one
+  `const agentId` plus three substitutions in the bootstrap reads, none of them
+  near that path. Written up as
+  `docs/issues/child-owned-state/011-memory-doc-keeps-a-legacy-unique.md`. It
+  matters here because it silently disables the shared-summary continuity that
+  `000`'s point 4 depends on.
 
 One operational gotcha worth keeping: the dev box's `SERVICE_SECRET_KEY` line
 carries quoting/whitespace that makes an invalid HTTP header value. Node rejects
