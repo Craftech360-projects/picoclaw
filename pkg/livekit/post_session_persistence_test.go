@@ -81,6 +81,30 @@ func TestResolveAgentIDPrefersAgentIDOverCharacterID(t *testing.T) {
 	}
 }
 
+func TestResolveAgentIDRejectsNonUUIDCharacterID(t *testing.T) {
+	// The firmware's hello payload carries character_id as a SLUG ("tara",
+	// "masti", "quizzy") — a different namespace that happens to share the key
+	// name with room metadata's ai_agent.id. findFirstString recurses into
+	// nested objects, so a slug reaching us is not hypothetical. Manager's
+	// agent_id column is @db.Uuid with an FK: a slug would fail the insert and
+	// lose the whole transcript, which is worse than the mis-attribution this
+	// resolution exists to fix. Falling back to empty restores the old, safe
+	// behaviour — the Manager fills in the device default.
+	for _, slug := range []string{"tara", "masti", "quizzy", ""} {
+		metadata := `{"device_mac":"AA11BB22CC33","character_id":"` + slug + `"}`
+		if got := resolveAgentID(metadata); got != "" {
+			t.Fatalf("resolveAgentID(character_id=%q) = %q, want empty", slug, got)
+		}
+	}
+}
+
+func TestResolveAgentIDAcceptsUppercaseUUIDCharacterID(t *testing.T) {
+	metadata := `{"character_id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"}`
+	if got := resolveAgentID(metadata); got != "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" {
+		t.Fatalf("resolveAgentID() = %q, want the uppercase UUID unchanged", got)
+	}
+}
+
 func TestResolveAgentIDEmptyWithoutEitherKey(t *testing.T) {
 	if got := resolveAgentID(`{"device_mac":"AA11BB22CC33"}`); got != "" {
 		t.Fatalf("resolveAgentID() = %q, want empty", got)

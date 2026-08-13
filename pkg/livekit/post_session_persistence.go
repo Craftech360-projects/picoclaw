@@ -22,6 +22,9 @@ const defaultManagerAPIURL = "http://localhost:8002/toy"
 
 var mac12HexPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
+// ai_agent.id is a Postgres uuid; see resolveAgentID for why this is enforced.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 	if rs == nil || bridge == nil {
 		return
@@ -593,15 +596,22 @@ func findFirstScalar(node any, keys map[string]struct{}) string {
 // The two spellings are tried in order rather than merged into one key set: map
 // iteration is randomised, so a merged lookup would pick a winner at random on
 // the metadata that carries both.
+//
+// character_id must look like a UUID before we believe it. The firmware's hello
+// payload uses the SAME key name for a character SLUG ("tara", "masti"), and
+// findFirstString recurses into nested objects, so the two namespaces can meet.
+// The Manager's agent_id column is @db.Uuid with a foreign key: a slug would
+// fail the insert and lose the entire transcript — worse than the
+// mis-attribution this resolution exists to fix. agent_id keeps its historical
+// permissive behaviour; only the newly-trusted key is checked.
 func resolveAgentID(metadata string) string {
 	md := parseMetadataMap(metadata)
-	for _, keys := range []map[string]struct{}{
-		{"agent_id": {}, "agentid": {}},
-		{"character_id": {}, "characterid": {}},
-	} {
-		if id := strings.TrimSpace(findFirstString(md, keys)); id != "" {
-			return id
-		}
+	if id := strings.TrimSpace(findFirstString(md, map[string]struct{}{"agent_id": {}, "agentid": {}})); id != "" {
+		return id
+	}
+	id := strings.TrimSpace(findFirstString(md, map[string]struct{}{"character_id": {}, "characterid": {}}))
+	if uuidPattern.MatchString(id) {
+		return id
 	}
 	return ""
 }
