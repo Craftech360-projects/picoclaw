@@ -51,3 +51,6 @@ those are the lines to rewrite.
 - 004 — Attempt log
 - 005 — Freeze the parent-app wire contract
 - 006 — Riddler `clearOnReveal` flag
+- **Re-read the prompt on DB1 first.** 001 read it from local only. Dump DB1's
+  `quiz_master` and diff against the local copy before editing any prompt — the lines
+  this ticket rewrites may differ there. See [000-index.md](000-index.md).

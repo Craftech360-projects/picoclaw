@@ -46,3 +46,6 @@ serialising, whatever value it now carries.
 
 - 003 — ADR-0009
 - 007 — `teach_text` in the importer
+- **Re-read the prompt on DB1 first.** 001 read it from local only. §5's age bands are
+  rewritten here; confirm DB1's copy matches before editing.
+  See [000-index.md](000-index.md).

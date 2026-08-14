@@ -50,3 +50,6 @@ update them to point at `buildMessages` and record that the assumption held.
 ## Blocked by
 
 - 009 — Server computes `ask_mode` / Door per question
+- **Re-read the prompt on DB1 first.** 001 read it from local only. §3's ask/hint/reveal
+  loop is rewritten here; confirm DB1's copy matches before editing.
+  See [000-index.md](000-index.md).

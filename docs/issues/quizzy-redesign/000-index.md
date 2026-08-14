@@ -60,6 +60,45 @@ the rest of these tickets say.
 real playtest data. A ticket written now would have no verifiable acceptance criteria.
 Ticket them after `/playtest-report` on real child sessions.
 
+## Environment order — test local first
+
+**Everything is built and verified against the local dev database first. Only then dev
+(DB1), and only then prod.** No ticket here is done when it works locally; local is the
+gate to *start* promoting it, not the finish line.
+
+| Env | Supabase project | Used by |
+|---|---|---|
+| **local** | `shlrfpbqkfnxqcmuatvs`:6543 | local `manager-api-node` (`.env`) — **start here** |
+| **dev (DB1)** | `tsiocygczplmnjpqmutc`:5432 | DO dev box `64.227.170.31`, pm2 `manager-api` |
+| **prod** | separate | EKS — never touched from a dev session |
+
+Schema and seed changes must be applied to **both** local and DB1; they are different
+projects and drift silently.
+
+### Open, do not lose: re-read the prompt on DB1 before any prompt `UPDATE`
+
+Issue 001 read `quiz_master` from **local only**. Every finding in it — the collapsed
+`WITH_HINT`, the corrected verdict mapping in 005, the §5 age bands in 013, the
+never-see-a-repeat line in 008 — is only as live as that one database. The prompt could
+differ on DB1.
+
+`ai_agent_template` also had **no `riddler` row** locally, which 006 assumes exists.
+DB1 is where that gets settled.
+
+Re-run the same dump against DB1 before 008, 010 or 013 issues a prompt `UPDATE`, and
+diff it against the local copy:
+
+```bash
+node scripts/dump-agent-prompt.js ./prompt-backup-db1
+```
+
+`manager-api-node/scripts/dump-agent-prompt.js` (uncommitted as of 2026-08-14). Reads
+`DATABASE_URL`, writes one file per prompt field, exits non-zero on zero rows or an
+empty `system_prompt` — the two silent failures ticket 006 hit. One run with a different
+connection string; no new code.
+
+**Blocks:** 008, 010, 013 (all three edit the prompt). Does not block 002–007.
+
 ## Standing constraints
 
 - **Never rewrite the answer log.** Grandfather clauses are read-side predicates.
