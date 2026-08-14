@@ -21,7 +21,7 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [004](004-attempt-log.md) | Attempt log: table, write path, read-back | AFK | ⚠ 7/8 — end-to-end left |
+| [004](004-attempt-log.md) | Attempt log: table, write path, read-back | AFK | ✅ closed |
 | [005](005-freeze-parent-app-contract.md) | Freeze the parent-app wire contract | AFK | ✅ closed |
 | [006](006-riddler-clear-on-reveal-flag.md) | Riddler `clearOnReveal` flag | AFK | ✅ closed |
 | [007](007-importer-teach-text.md) | `teach_text` in the importer | AFK | ✅ closed |
@@ -54,6 +54,12 @@ the rest of these tickets say.
 |---|---|---|---|
 | [015](015-wonder-question.md) | M4 Wonder Question, shipped alone | AFK | 004 |
 
+**Found in testing.**
+
+| # | Title | Type | Blocked by |
+|---|---|---|---|
+| [016](016-report-unclear-turns.md) | The model must report UNCLEAR turns | AFK | — |
+
 ## The one gate in front of everything else
 
 **Nothing left can be finished without a real voice session.** Four items are waiting on
@@ -61,7 +67,6 @@ one:
 
 | Ticket | Waiting for |
 |---|---|
-| 004 | the end-to-end run itself — worker and API together, a child missing a question |
 | 008 | the prompt line (needs a human to run the `UPDATE`) |
 | 010 | cache hit ratio, and watching escalation reach Door 3 |
 | 011 | real Door 3 transcripts — which also need 014's authored `teach_text` |

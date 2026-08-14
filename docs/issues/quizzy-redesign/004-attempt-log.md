@@ -103,11 +103,34 @@ character emitting no quiz MEMO at all. `go vet` clean, package tests pass.
 **One pre-existing failure in the suite**, unrelated: `TestSynthesizeAndPlayLogsTTSProviderType`
 fails identically with these changes stashed.
 
-### Remaining
+### Closed 2026-08-14 — verified in real sessions
 
-- **End-to-end against a real session** — the last acceptance criterion, and not satisfied
-  by the unit-level runs above. Needs the worker and the API running together against
-  local, with a child (or a tester) missing a question on purpose.
+Device `68:EE:8F:60:BC:00`, local. 14 attempt rows across 6 questions, both paths proven.
+
+**Path A — the question resolves.** Attempts travel with the verdict.
+
+| q | tries | outcome |
+|---|---|---|
+| 229 | "water" → "sugar" → "jaggery" | `revealed` after two misses |
+| 232 | "Can you repeat the question?" → "It is 12." | `correct` |
+| 217, 220, 223 | one try each | `correct` first time |
+
+**Path B — the session ends mid-question.** Q226 was abandoned after five tries: all five
+rows written in one flush at teardown, **no answer row**. Before the fix this produced
+nothing at all. The question stayed unmastered, was re-offered next session, and was
+answered correctly — the mastery loop end to end.
+
+Three bugs were found by these sessions and fixed, none of which unit tests had caught:
+
+1. **The Door directive suppressed the prompt's own escalation.** It said "do not hint yet"
+   every turn on a question with no authored ladder, so a child looped eight times with no
+   hint, no answer and no score.
+2. **The model was never told which try it was on.** `answered`/`first_try`/`missed` are day
+   totals; the per-question count lived only in chat history, which is summarised away
+   mid-question. The worker had the count exactly and now hands it back.
+3. **A clarification request counted as a wrong answer.** "Can you repeat the question?"
+   became a miss, and two misses trip the reveal. Stopgap filter shipped; proper fix is
+   [016](016-report-unclear-turns.md).
 
 ### Two things found, neither in scope here
 
@@ -131,7 +154,7 @@ fails identically with these changes stashed.
 - [x] An attempt-write failure does not fail the answer submission or block the child's turn — proven with a forced database error, not by inspection
 - [x] Read-back proven: a query returns the attempt sequence for a single question in order
 - [x] Nothing added under `memory/state/`
-- [ ] **Verified end-to-end against a real session, not only unit tests** — outstanding
+- [x] **Verified end-to-end against a real session** — 2026-08-14, device `68:EE:8F:60:BC:00`. Both paths, real transcripts. See below
 
 ## Blocked by
 
