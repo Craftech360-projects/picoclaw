@@ -58,7 +58,7 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [016](016-report-unclear-turns.md) | The model must report UNCLEAR turns | AFK | — |
+| [016](016-report-unclear-turns.md) | The model must report UNCLEAR turns | AFK | ⚠ built — needs one session check |
 
 ## The one gate in front of everything else
 
