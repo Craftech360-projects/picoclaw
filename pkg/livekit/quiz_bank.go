@@ -105,6 +105,9 @@ type QuizBatch struct {
 	// bank the questions came from. The worker never decides this and never
 	// needs to know what the value means.
 	Bank string `json:"bank"`
+	// WonderQuestion is the open, unscored question the LAST session left this
+	// child with (M4). Empty for a child who has never been left one.
+	WonderQuestion string `json:"wonder_question"`
 }
 
 // managerQuizBaseURL resolves the Manager API base the same way the persona pull
@@ -372,6 +375,52 @@ func NewQuizAttemptReporter(
 	}
 }
 
+// PostWonderQuestion saves the open question a session ended on (M4). Unscored:
+// it writes no answer row and gates nothing.
+func PostWonderQuestion(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+	question string,
+) error {
+	deviceMac = strings.TrimSpace(deviceMac)
+	if deviceMac == "" {
+		return fmt.Errorf("device mac is empty")
+	}
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return nil
+	}
+
+	payload, err := json.Marshal(map[string]any{"device_mac": deviceMac, "question": question})
+	if err != nil {
+		return err
+	}
+	return postQuizJSON(ctx, cfg, serviceKey, "/quiz/wonder", payload, "wonder question")
+}
+
+// NewWonderQuestionReporter returns the teardown save handed to the bridge. One
+// try, no retry: a lost wonder question costs one warm opening line next time,
+// which is not worth holding a closing session open for.
+func NewWonderQuestionReporter(
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+) func(question string) {
+	return func(question string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := PostWonderQuestion(ctx, cfg, serviceKey, deviceMac, question); err != nil {
+			// The question itself is not logged: it is the child's, and a log
+			// line is a second place it would have to be protected.
+			logger.WarnCF("livekit", "Wonder question not saved", map[string]any{"error": err.Error()})
+			return
+		}
+		logger.InfoCF("livekit", "Wonder question saved", map[string]any{"chars": len(question)})
+	}
+}
+
 // NewQuizAnswerReporter returns the per-session verdict reporter handed to the
 // bridge. One retry, then log-and-drop: a lost log row costs a repeated question
 // tomorrow, which is cheaper than blocking the conversation.
@@ -444,6 +493,15 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 	}
 
 	var b strings.Builder
+	// The Wonder Question the child was left with last time (M4). Placed before
+	// the questions because it is the opening beat, not part of the scored run.
+	if wonder := strings.TrimSpace(batch.WonderQuestion); wonder != "" {
+		b.WriteString("## Last Time You Wondered\n")
+		b.WriteString(fmt.Sprintf(
+			"Before the quiz, warmly remind the child of the question you left them with: %q. ", wonder))
+		b.WriteString("Ask if they thought any more about it, listen, and be delighted by whatever they say. ")
+		b.WriteString("There is no right answer and it is NOT scored. One short exchange, then start the quiz.\n\n")
+	}
 	b.WriteString("## Today's Quiz Questions")
 	var scope []string
 	if batch.Level > 0 {

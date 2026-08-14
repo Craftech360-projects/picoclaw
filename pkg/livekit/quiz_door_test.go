@@ -252,3 +252,71 @@ func TestFlushDoesNothingWithoutPendingTries(t *testing.T) {
 		t.Fatal("flushed with nothing pending")
 	}
 }
+
+// The Wonder Question (M4): one open, unscored question the child is left with,
+// remembered into the next session. Unscored means it must touch nothing else.
+func TestWonderQuestionCaptureAndFlush(t *testing.T) {
+	var saved string
+	ab := &AgentBridge{
+		quizBatch:              &QuizBatch{Questions: []QuizQuestion{{ID: 1, IDString: "1"}}},
+		reportedQuizIDs:        map[int64]bool{},
+		wonderQuestionReporter: func(q string) { saved = q },
+	}
+
+	// Captured from the MEMO, on a turn that scores nothing.
+	ab.reportQuizVerdict("[happy] Bye for now!\nMEMO: type=daily_quiz | status=completed | wonder=Why does the moon follow you?")
+	ab.flushWonderQuestion()
+	if saved != "Why does the moon follow you?" {
+		t.Fatalf("wonder question not captured: %q", saved)
+	}
+
+	// Idempotent: teardown paths overlap, and saving twice would duplicate it.
+	saved = ""
+	ab.flushWonderQuestion()
+	if saved != "" {
+		t.Fatalf("second flush must be a no-op, got %q", saved)
+	}
+
+	// The latest one wins if the model emits more than one.
+	ab.reportQuizVerdict("a\nMEMO: type=daily_quiz | wonder=First")
+	ab.reportQuizVerdict("b\nMEMO: type=daily_quiz | wonder=Second")
+	ab.flushWonderQuestion()
+	if saved != "Second" {
+		t.Fatalf("expected the latest wonder question, got %q", saved)
+	}
+}
+
+func TestNoWonderQuestionSavesNothing(t *testing.T) {
+	called := false
+	ab := &AgentBridge{
+		quizBatch:              &QuizBatch{},
+		reportedQuizIDs:        map[int64]bool{},
+		wonderQuestionReporter: func(string) { called = true },
+	}
+	// A session where the model never emitted one, and a blank field.
+	ab.reportQuizVerdict("c\nMEMO: type=daily_quiz | status=in_progress | awaiting=5")
+	ab.reportQuizVerdict("d\nMEMO: type=daily_quiz | wonder=   ")
+	ab.flushWonderQuestion()
+	if called {
+		t.Fatal("saved a wonder question that was never asked")
+	}
+}
+
+func TestWonderQuestionAppearsInTheBlock(t *testing.T) {
+	batch := &QuizBatch{
+		Level: 1, Questions: []QuizQuestion{{ID: 1, IDString: "1", Text: "Q?", Answer: "A"}},
+		WonderQuestion: "Where does the wind start?",
+	}
+	block := quizQuestionsBlock(batch)
+	if !strings.Contains(block, "Where does the wind start?") {
+		t.Fatalf("the previous wonder question must reach the prompt: %q", block)
+	}
+	if !strings.Contains(block, "NOT scored") {
+		t.Errorf("the block must say it is unscored: %q", block)
+	}
+	// A child who has never been left one gets no such section.
+	bare := quizQuestionsBlock(&QuizBatch{Level: 1, Questions: batch.Questions})
+	if strings.Contains(bare, "Last Time You Wondered") {
+		t.Errorf("no wonder question means no section: %q", bare)
+	}
+}

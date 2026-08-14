@@ -174,6 +174,10 @@ type AgentBridge struct {
 	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
 	// quizAttemptReporter flushes tries for a question that never resolved.
 	quizAttemptReporter func(questionID int64, attempts []QuizAttempt)
+	// wonderQuestionReporter saves the open question the session ended on (M4),
+	// and pendingWonderQuestion is the latest one the model emitted.
+	wonderQuestionReporter func(question string)
+	pendingWonderQuestion  string
 	// reportedQuizIDs de-duplicates verdicts within the session: the model
 	// re-emits its cumulative MEMO every turn. Guarded because proactive and
 	// async-tool turns can land concurrently with a conversation turn.
@@ -250,6 +254,8 @@ type AgentBridgeConfig struct {
 	// QuizAttemptReporter logs tries for a question the session ended on, which
 	// produce no verdict and would otherwise leave no trace at all.
 	QuizAttemptReporter func(questionID int64, attempts []QuizAttempt)
+	// WonderQuestionReporter saves the Wonder Question (M4) at teardown.
+	WonderQuestionReporter func(question string)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -306,6 +312,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		quizBatch:                 cfg.QuizBatch,
 		quizAnswerReporter:        cfg.QuizAnswerReporter,
 		quizAttemptReporter:       cfg.QuizAttemptReporter,
+		wonderQuestionReporter:    cfg.WonderQuestionReporter,
 		reportedQuizIDs:           map[int64]bool{},
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
@@ -329,6 +336,7 @@ func (ab *AgentBridge) Close() {
 	// lost. That is the child who tried six times and gave up — the one most
 	// worth seeing, and until this the only one leaving no trace at all.
 	ab.flushPendingQuizAttempts()
+	ab.flushWonderQuestion()
 
 	ab.closeMu.Lock()
 	if ab.closed {
@@ -945,13 +953,27 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 // its own goroutine (the reporter retries and blocks) so the voice turn never
 // waits on the Manager API.
 func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
-	if ab.quizAnswerReporter == nil {
-		return
-	}
 	memo := extractQuizMemoLine(assistantContent)
 	if memo == "" {
 		return
 	}
+	// The Wonder Question rides the MEMO like everything else. Captured on every
+	// turn that carries one, so a session ending abruptly still keeps the last.
+	//
+	// Read BEFORE the verdict guard below: it is unscored and has nothing to do
+	// with the answer log, so gating it on the verdict reporter existing would
+	// couple two unrelated things and lose the question whenever the quiz path
+	// happened to be inactive.
+	if wonder := strings.TrimSpace(memoField(memo, "wonder")); wonder != "" {
+		ab.reportedQuizMu.Lock()
+		ab.pendingWonderQuestion = wonder
+		ab.reportedQuizMu.Unlock()
+	}
+
+	if ab.quizAnswerReporter == nil {
+		return
+	}
+
 	ab.reportedQuizMu.Lock()
 	questionID, result, ok := parseQuizVerdict(memo, ab.quizBatch, ab.reportedQuizIDs)
 	if ok {
@@ -996,6 +1018,24 @@ func (ab *AgentBridge) flushPendingQuizAttempts() {
 	// Synchronous on purpose. A goroutine here would race teardown and usually
 	// lose, which is how the rows went missing in the first place.
 	ab.quizAttemptReporter(questionID, attempts)
+}
+
+// flushWonderQuestion saves the open question the session ended on (M4). Like
+// the attempt flush: synchronous, and idempotent because the buffer is cleared
+// under the lock.
+func (ab *AgentBridge) flushWonderQuestion() {
+	if ab == nil || ab.wonderQuestionReporter == nil {
+		return
+	}
+	ab.reportedQuizMu.Lock()
+	question := ab.pendingWonderQuestion
+	ab.pendingWonderQuestion = ""
+	ab.reportedQuizMu.Unlock()
+
+	if strings.TrimSpace(question) == "" {
+		return
+	}
+	ab.wonderQuestionReporter(question)
 }
 
 // doorForPendingLocked is the Door the pending question was on before this

@@ -1079,6 +1079,13 @@ func main() {
 				deviceMAC,
 				quizBatchBank(quizBatchForSession),
 			),
+			// Unscored and bank-agnostic: the Wonder Question belongs to the
+			// child, not to a question bank.
+			WonderQuestionReporter: livekit.NewWonderQuestionReporter(
+				lkCfg.ManagerAPI,
+				managerAPIServiceKey(),
+				deviceMAC,
+			),
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
 			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
