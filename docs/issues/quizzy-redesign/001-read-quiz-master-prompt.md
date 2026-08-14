@@ -59,10 +59,11 @@ Read from the **local dev** Supabase project (`shlrfpbqkfnxqcmuatvs`:6543), the 
 `manager-api-node/.env` points at. `system_prompt` 12,439 chars, `greeting_prompt`
 2,428 chars, both backed up and non-empty. Read-only; no `UPDATE` run.
 
-> **Local only — not yet verified on DB1.** Everything below is true of the local dev
-> database. DB1 (`tsiocygczplmnjpqmutc`) may carry a different prompt, and prod is a
-> third copy. Re-run this dump against DB1 and diff before any ticket edits the prompt.
-> Tracked in [000-index.md](000-index.md); blocks 008, 010 and 013.
+> **Verified on DB1 — 2026-08-14.** Dumped `quiz_master` from DB1
+> (`tsiocygczplmnjpqmutc`) and diffed against the local copy: `system_prompt` and
+> `greeting_prompt` are **byte-identical**, same 12,439 / 2,428 chars. `riddler` is
+> absent on DB1 too, so that finding holds on both. Every finding below applies to DB1
+> unchanged. **Prod is still a third copy and has not been read.**
 
 **The `quiz_master` trap is real and now confirmed from both sides:** `agent_code` is
 `quiz_master` while `agent_name` is `quizzy`. Anyone querying by the name they hear in

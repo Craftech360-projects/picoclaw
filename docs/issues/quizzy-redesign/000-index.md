@@ -75,18 +75,11 @@ gate to *start* promoting it, not the finish line.
 Schema and seed changes must be applied to **both** local and DB1; they are different
 projects and drift silently.
 
-### Open, do not lose: re-read the prompt on DB1 before any prompt `UPDATE`
+### ✅ Closed 2026-08-14: DB1 prompt verified identical to local
 
-Issue 001 read `quiz_master` from **local only**. Every finding in it — the collapsed
-`WITH_HINT`, the corrected verdict mapping in 005, the §5 age bands in 013, the
-never-see-a-repeat line in 008 — is only as live as that one database. The prompt could
-differ on DB1.
-
-`ai_agent_template` also had **no `riddler` row** locally, which 006 assumes exists.
-DB1 is where that gets settled.
-
-Re-run the same dump against DB1 before 008, 010 or 013 issues a prompt `UPDATE`, and
-diff it against the local copy:
+`quiz_master` on DB1 is **byte-identical** to local — 12,439 / 2,428 chars, both fields.
+Every 001 finding applies to DB1 unchanged, and `riddler` is missing from both. **Prod
+has not been read**, so re-run the dump there before a prod prompt `UPDATE`:
 
 ```bash
 node scripts/dump-agent-prompt.js ./prompt-backup-db1
@@ -97,19 +90,28 @@ node scripts/dump-agent-prompt.js ./prompt-backup-db1
 empty `system_prompt` — the two silent failures ticket 006 hit. One run with a different
 connection string; no new code.
 
-**Blocks:** 008, 010, 013 (all three edit the prompt). Does not block 003–007.
+### Still open: 002's measurement needs **prod**, not DB1
 
-### Also open: 002's measurement needs DB1
+DB1's bank and answer log have been copied into local
+(`scripts/copy-quiz-tables.js`), so local now mirrors dev. It did not help: across local
+and DB1 combined there are **55 answer rows and zero `revealed`, zero `wrong`**. No child
+has failed a question twice on either database, so the blast radius measures zero for want
+of data, not for want of risk.
 
-The local database holds 27 quiz answers, all `correct` — no `revealed` row has ever been
-written there, so the blast radius measures as zero for want of data, not for want of
-risk. The script is committed and safe; only the run is outstanding.
-
-```bash
-node scripts/quiz-revealed-blast-radius.js
-```
+Only prod can close it. The measurement is read-only.
 
 **Blocks:** 003 (ADR-0009 records the grandfather decision) and 008 (implements it).
+
+### Refreshing local from DB1
+
+```bash
+SRC_DATABASE_URL="<db1-url>" node scripts/copy-quiz-tables.js --yes
+```
+
+Replaces `quiz_question`, `quiz_question_answer`, `riddle_question`,
+`riddle_question_answer` only. Users, devices, kids and `ai_agent_template` are **not**
+touched, so a data refresh cannot clobber local credentials. Refuses to run if source and
+destination are the same database, and resets the id sequences afterwards.
 
 ## Standing constraints
 
