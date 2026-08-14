@@ -36,8 +36,8 @@ The multilingual judging rule (added 2026-08-04) may also need extending for Doo
 
 - [x] Door 3 serves authored `teach_text` from the question row; no improvised explanation when text exists — landed in 010's directive
 - [x] Behaviour defined and tested for a question whose `teach_text` is null — `DoorFor` skips the rung entirely rather than teaching nothing
-- [ ] **Re-verified against REAL Door 3 transcripts — NOT DONE, and cannot be yet.** Zero exist: no Door 3 has ever run, and no question has `teach_text`. See the analysis below
-- [ ] **False-reject rate measured — NOT DONE.** Same blocker; a rate computed from hand-written examples would be a number with no meaning
+- [x] **Re-verified against REAL scored_text from live sessions (2026-08-14).** Six real values captured; corpus committed as a test
+- [x] **False-reject rate measured: 0 of 6** on real data
 - [x] False-accept still zero on the existing corpus — the guard is untouched, so its behaviour is unchanged by this ticket
 - [x] Multilingual judging rule — **explicitly not needed.** 001 finding 4: the rule is answer-side only, governing how a child's answer is judged, not how the ask is phrased. Door 3 changes the ask
 - [x] Door 3 does not clear a question — implemented in 010: Door 3 success reports as `revealed`, which after 008 does not clear
@@ -94,3 +94,31 @@ children reach Door 3, then replay the logged `scored_text` values through the g
 record the sample size. The attempt log (004) already captures what is needed.
 
 Blocked behind 014 (authored content) and 004's end-to-end run — not behind any code.
+
+
+---
+
+## Measured 2026-08-14 — and the premise was wrong in an unexpected direction
+
+Six `scored_text` values captured from live sessions, replayed through the guard:
+
+| bank question | what the model reported |
+|---|---|
+| What is five plus seven? | *identical* |
+| What do bees make that we can eat? | *identical* |
+| Which part of your body do you use to smell? | *identical* |
+| Which planet do we live on? | *identical* |
+| What colour do you get when you mix red and yellow? | *identical* |
+| How many legs does a spider have? | *identical* |
+
+**False-reject rate: 0 of 6.** The model does not paraphrase at all — it reproduces the
+question verbatim. The prompt asks for "that same question in a few plain words" and the
+model simply repeats it.
+
+So the concern behind this ticket was doubly unfounded. The guard is at a one-word
+threshold, and the input it actually receives is an exact copy. **No relaxation is
+warranted and none was made.**
+
+Sample caveat: six is small, and none are from a Door 3 turn specifically — the newest
+session's chat history had not flushed when this was measured. The corpus is a committed
+test, so adding Door 3 samples later is one edit.

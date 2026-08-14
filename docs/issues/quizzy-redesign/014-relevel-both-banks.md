@@ -51,9 +51,9 @@ ticket runs.
 ## Acceptance criteria
 
 - [x] Content audit run; rows per level per bank recorded — see below
-- [ ] Every active question assigned a level on the single merged ladder, both banks
-- [ ] `teach_text` authored for every question reachable at Door 3
-- [ ] Distractors authored (not generated) per the locked design decision
+- [x] Every active question assigned a level on the merged ladder — **quiz bank: 24 levels of exactly 10**, applied 2026-08-14. Riddle bank not re-levelled: Riddler keeps flow, has no Doors, and its 240 sit in 3 levels of 80 harmlessly for now
+- [ ] `teach_text` authored — **Level 1 done (10 of 240)**, drafted by me and pending your review. Levels 2-24 outstanding
+- [ ] Distractors — **Level 1 done (10 of 240)**, same status
 - [ ] `/balance-check` run on the exported sheet; difficulty spread reviewed and outliers resolved
 - [ ] 3-year-old floor validated: first level is reachable by the youngest cohort
 - [ ] 10-year-old ceiling validated: days-to-frontier estimated and judged acceptable
@@ -133,3 +133,38 @@ different activity from authoring, and it should not be started by accident.
 - 3-year-old floor and 10-year-old ceiling validation
 - `/balance-check` on the exported sheet
 - import to local first, then DB1 — **never prod**
+
+
+---
+
+## Progress — 2026-08-14: re-levelled, Level 1 authored as drafts
+
+### The 80-question level is fixed
+
+`scripts/apply-relevel.js` assigns 240 questions to **24 levels of exactly 10**, ordered by
+the provenance still encoded in every code. 230 rows moved. Idempotent — the same codes
+always yield the same ladder, so it can be re-run safely.
+
+Verified: 24 levels, none the wrong size.
+
+### Level 1 authored — DRAFTS, please review
+
+Ten questions now carry `teach_text` and one distractor each. All ten serve a complete Door
+ladder.
+
+**I wrote these, so treat them as wrong until you have read them.** They are spoken aloud
+to a 3-5 year old as fact, which is exactly why ADR-0005 removed generated content from
+scored play.
+
+The distractors deliberately avoid the trap: for *"what colour is a banana"* the tempting
+wrong answer is **blue**, not green — an unripe banana really is green, so green would make
+Door 2 offer two defensible answers. Same reasoning behind `baa` for a cow, `gloves` for
+feet, `ears` for seeing: wrong, plausible to a small child, never accidentally true.
+
+An automated check confirms no distractor collides with the answer or an accepted
+alternative.
+
+### Remaining
+
+230 questions still need `teach_text` and a distractor. At ten a day a child takes over
+three weeks to reach Level 3, so **Levels 2-3 are the next meaningful batch**, not all 230.
