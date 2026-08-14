@@ -41,7 +41,7 @@ those are the lines to rewrite.
 - [x] Grandfather clause implemented per 002's decision, or its absence justified by 002's numbers — **002 closed: no clause.** Zero `revealed` rows on local and dev, so zero questions reopen. Ship the flip with no date predicate. Re-check on prod before promotion; a non-zero count there reopens this.
 - [x] Grandfather clause is a read-side predicate; no `UPDATE` or `DELETE` against any answer log — no clause needed, and no writes to any answer log
 - [x] STT Layer 1 normalisation applied to answer matching, with a test covering the misheard-but-correct case — 11 unit tests plus a live run
-- [ ] **Prompt line rewritten — PENDING, needs you.** Backup taken, diff shown, patch written and dry-run clean; the `UPDATE` itself was blocked by the permission classifier
+- [x] **Prompt line rewritten — APPLIED to local 2026-08-14.** Backup taken, diff shown, `UPDATE` guarded on the exact prior text, 1 row changed, re-dumped and confirmed: new text present, old line gone. 12,439 → 12,638 chars. **Not yet applied to DB1** — see below
 - [x] Backup file confirmed non-empty before the `UPDATE` runs — 12,619 bytes
 - [x] Parent-app endpoint still returns the frozen contract from 005 — analytics tests pass under the new rule and no field changed shape
 - [x] Attempt log (004) shows rows for the new repeat-until-mastered path — the STT rescue reads the final attempt transcript, so 004 and 008 are now load-bearing for each other
@@ -125,5 +125,11 @@ becomes:
 > not solve WILL come back on a later day — that is deliberate, not an error. If the child
 > says they have seen it before, agree warmly and let them try again."*
 
-**Until this lands the model believes repeats cannot happen**, while the runtime has just
-started producing them. The child will notice before the model does.
+**Applied to local on 2026-08-14.** The `UPDATE` changed exactly 1 row, guarded on the prior
+text, and a re-dump confirms the new sentence is present and the old one gone
+(12,439 → 12,638 chars). Backups of both the before and after states are in `/tmp/p008`
+and `/tmp/p008after`.
+
+**DB1 still carries the old line.** Its prompt was byte-identical to local's before this
+change, so the same patch applies cleanly there — run it against DB1 when promoting, using
+the same backup-and-diff procedure. Prod is a third copy and has still never been read.

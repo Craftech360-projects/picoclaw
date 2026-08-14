@@ -89,6 +89,22 @@ gate to *start* promoting it, not the finish line.
 Schema and seed changes must be applied to **both** local and DB1; they are different
 projects and drift silently.
 
+### State as of 2026-08-14
+
+| | local | DB1 | prod |
+|---|---|---|---|
+| `question_attempt` table | ✅ | ✅ | ✗ |
+| `teach_text` / `distractors`, both banks | ✅ | ✅ | ✗ |
+| 008 prompt line (repeats are deliberate) | ✅ | ✗ old line | ✗ never read |
+| bank content authored for Doors 2 / 3 | ✗ | ✗ | ✗ |
+
+Both migrations were applied to DB1 with `db execute` rather than `migrate deploy`, because
+six migrations recorded in the database are missing from the tree and block `deploy`
+outright. Both files are `IF NOT EXISTS`, so a later working `deploy` re-runs them harmlessly.
+
+The DO box runs older code against DB1. The new columns are additive and Prisma selects
+explicit column lists, so the running service is unaffected until it is redeployed.
+
 ### ✅ Closed 2026-08-14: DB1 prompt verified identical to local
 
 `quiz_master` on DB1 is **byte-identical** to local — 12,439 / 2,428 chars, both fields.
