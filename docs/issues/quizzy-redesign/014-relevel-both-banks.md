@@ -38,6 +38,16 @@ Run `/balance-check` on the exported sheet to check the difficulty spread before
 per bank — a level is the unit a child experiences, and a half-re-levelled level is not
 shippable.
 
+## Urgent, added by 013
+
+**Level 1 currently holds 80 questions.** The eight former per-age bands each had ten at
+level 1 and they now share one ladder. A child needs eight days to clear Level 1, and the
+importer flags every level as over-full. The system is correct and unplayable until this
+ticket runs.
+
+`age_band` is also **gone from the schema** — the re-levelling sheet needs `code`, `level`,
+`question_text`, `answer_text` and may carry `age_band` only as an ignored column.
+
 ## Acceptance criteria
 
 - [ ] `/content-audit` run first; rows per level per bank recorded before any re-levelling

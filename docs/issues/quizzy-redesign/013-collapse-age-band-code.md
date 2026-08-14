@@ -50,3 +50,57 @@ serialising, whatever value it now carries.
 - **Re-read the prompt on DB1 first.** 001 read it from local only. §5's age bands are
   rewritten here; confirm DB1's copy matches before editing.
   See [000-index.md](000-index.md).
+
+
+---
+
+## Findings — 2026-08-14: done, and the column is gone entirely
+
+`manager-api-node` `24c4c788`. 599 unit tests pass; verified against local.
+
+### Scope changed mid-ticket, deliberately
+
+The ticket (and ADR-0009) said retire the *value*, keep the column: retiring a value is
+reversible, dropping a column is a migration. That reasoning held while the value still
+meant something.
+
+It stopped meaning anything. Every active row carried the identical string, the CHECK
+constraint guarded a constant, and the `(age_band, language, level)` index led with a
+column that never varied. **A column that can only hold one value is not a reversibility
+hedge — it is a field every future reader has to stop and ask about.** So it was dropped,
+on the user's call. Reversing it is a nullable column plus a backfill, which is no harder
+than the collapse would have been.
+
+Scope is the **quiz and riddle banks only**. Nothing else in the schema had an `age_band`.
+
+### The published contract did not move
+
+`age_band` and `age_band_defaulted` are still served — now the constant `'all'` and a plain
+"no child profile" flag. This is exactly what 005 froze the wire for: an internal change
+this large reached no app developer. Verified on `next-questions` and `progress`, both banks.
+
+`ageBandFromBirthDate` is deleted rather than left returning a constant. The index is now
+`(language, level)`, which is what selection actually filters and orders on. The importer
+still accepts an `age_band` column and discards it, so sheets written before this load
+unchanged.
+
+### The CHECK constraint nobody knew about
+
+`quiz_question_age_band_check` enforced "active rows must be one of `'3'..'10'`" — the
+database guarding the *previous* migration. It is not in `schema.prisma`, because Prisma
+does not model CHECK constraints, so it only surfaced by rejecting the collapse. Dropped
+with the column.
+
+**Worth knowing generally: there may be other CHECK constraints this schema file does not
+show.** Anything that changes a column's allowed values should expect one.
+
+### ⚠ Level 1 is now an 80-question level
+
+The eight former bands each held ten questions at level 1, so the collapse makes Level 1
+eighty questions. The Daily Ten still caps at ten a day, so nothing breaks — but a child
+now needs **eight days to clear Level 1**, and the importer's ten-per-level rule flags
+every level as over-full.
+
+This is the content half, and it is 014's whole job. **013 makes the system correct;
+014 makes it playable.** Until then the ladder is technically working and practically
+wrong, which is worth knowing before anyone demos it.

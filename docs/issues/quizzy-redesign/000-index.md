@@ -45,8 +45,8 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [013](013-collapse-age-band-code.md) | Collapse `age_band` to `'all'` (code side) | AFK | 003, 007 |
-| [014](014-relevel-both-banks.md) | Re-level both banks onto one ladder (content) | HITL | 013 |
+| [013](013-collapse-age-band-code.md) | Drop `age_band` (code side) | AFK | ✅ closed |
+| [014](014-relevel-both-banks.md) | Re-level both banks onto one ladder (content) | HITL | ⚠ **now urgent** — Level 1 holds 80 questions |
 
 **Phase F — engagement.**
 
