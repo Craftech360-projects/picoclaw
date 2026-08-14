@@ -52,7 +52,7 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [015](015-wonder-question.md) | M4 Wonder Question, shipped alone | AFK | 004 |
+| [015](015-wonder-question.md) | M4 Wonder Question, shipped alone | AFK | ⚠ built — needs the prompt to emit `wonder=` |
 
 **Found in testing.**
 

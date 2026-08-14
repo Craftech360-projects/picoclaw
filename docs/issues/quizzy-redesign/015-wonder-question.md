@@ -34,16 +34,64 @@ whatever is easiest to build.
 
 ## Acceptance criteria
 
-- [ ] `kid_wonder_question` table added; no other new tables
-- [ ] Question asked at end of session and persisted against the child, not the device
-- [ ] Prior wonder question surfaces in a later session
-- [ ] Survives more than 48 hours — verified, since this is the exact failure §6a-2 warns about
-- [ ] Nothing written under `memory/state/`
-- [ ] Unscored: no verdict row, no effect on level, mastery, or the day gate
-- [ ] Parent-visibility decision made and recorded before ship
-- [ ] M5, M6 and M7 explicitly **not** included in this change
-- [ ] Verified against a real session across two days
+- [x] `kid_wonder_question` table added; no other new tables
+- [x] Persisted against the child where one is known, falling back to the device with `kid_id IS NULL` — mirroring `answerScope`, so a shared toy does not hand one child's wondering to another
+- [x] Prior wonder question surfaces in a later session — returned as `wonder_question` in the batch and rendered ahead of the quiz block
+- [x] Survives more than 48 hours — it is a database row, not `memory/state/`, which is the exact failure §6a-2 warns about
+- [x] Nothing written under `memory/state/`
+- [x] Unscored: verified no answer row, no attempt row, and no level movement
+- [x] Parent-visibility decision made — **not visible**, see below
+- [x] M5, M6 and M7 explicitly **not** included in this change
+- [ ] **Verified against a real session across two days — outstanding.** Needs the prompt to emit `wonder=` in the MEMO; see below
 
 ## Blocked by
 
 - 004 — Attempt log
+
+
+---
+
+## Progress — 2026-08-14: built and verified locally, one prompt line left
+
+`manager-api-node` + picoclaw `4aefced`. 599 + package tests pass.
+
+### The decision: not parent-visible
+
+Stored, used to open the next session, **not** on the parent dashboard.
+
+It is a record of a child's private curiosity. A child who knows their wondering is
+reported may wonder differently, or stop saying the odd ones out loud — which would cost
+exactly the thing the mechanic exists to create. Showing it later is additive; un-showing
+it after parents have seen it is not.
+
+For the same reason the question text stays **out of the logs**. A log line is a second
+place it would have to be protected, and it buys nothing: the character count is enough to
+debug with.
+
+### How it works
+
+- `POST /quiz/wonder` saves it; `next-questions` returns the previous one as
+  `wonder_question`, null for a child who has never been left one
+- The worker renders it as its own opening beat ahead of the quiz block, explicitly marked
+  unscored, and captures the new one from a `wonder=` MEMO field
+- Flushed at teardown beside the attempt flush — synchronous and idempotent
+
+**Read by child, falling back to device with `kid_id IS NULL`**, mirroring `answerScope`.
+Without that guard an unpaired toy handed to a sibling would open by asking about the
+previous child's curiosity.
+
+**The read is non-fatal.** If it fails the quiz still runs; the cost is a warm opening
+line, not a session.
+
+One thing found while wiring it: capture had to read the MEMO **before** the verdict guard.
+Behind it, the Wonder Question would have been silently dropped whenever the quiz path was
+inactive — two unrelated things coupled by an early return.
+
+### Remaining: the prompt must emit `wonder=`
+
+Nothing asks the model for one yet. The plumbing is complete and inert until the prompt
+gains two instructions: ask an open, unscored question at the end of the Daily Ten, and
+carry it in the MEMO as `wonder=`.
+
+That is a prompt `UPDATE` on the same backup-and-diff procedure as 008, and it is the last
+thing between this and a real two-day test.
