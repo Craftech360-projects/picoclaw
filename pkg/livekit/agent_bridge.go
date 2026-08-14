@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -170,12 +171,20 @@ type AgentBridge struct {
 	// quizBatch is this session's curated question set (nil = no scored quiz);
 	// quizAnswerReporter logs one verdict against the bank.
 	quizBatch          *QuizBatch
-	quizAnswerReporter func(questionID int64, result string)
+	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
 	// reportedQuizIDs de-duplicates verdicts within the session: the model
 	// re-emits its cumulative MEMO every turn. Guarded because proactive and
 	// async-tool turns can land concurrently with a conversation turn.
 	reportedQuizMu  sync.Mutex
 	reportedQuizIDs map[int64]bool
+	// The attempt log (ADR-0009) is assembled here rather than asked of the
+	// model: the prompt deliberately stays silent on turns that did not finish
+	// judging, but `awaiting=` staying on one id across turns already says the
+	// child tried and missed. pendingQuizID is the question those attempts
+	// belong to; lastUserText is the utterance that produced the current reply.
+	pendingQuizID       int64
+	pendingQuizAttempts []QuizAttempt
+	lastUserText        string
 
 	closeMu sync.Mutex
 	closed  bool
@@ -233,8 +242,9 @@ type AgentBridgeConfig struct {
 	// QuizBatch is the curated question set pulled for this session; nil means
 	// the bank was unreachable or unused, and no scored quiz runs.
 	QuizBatch *QuizBatch
-	// QuizAnswerReporter logs one scored verdict against the bank.
-	QuizAnswerReporter func(questionID int64, result string)
+	// QuizAnswerReporter logs one scored verdict against the bank, with the
+	// tries that led to it (empty when the child got it first time).
+	QuizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -673,6 +683,11 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 	messages := ab.buildMessages(history, summary, text, sessionKey)
 	if strings.TrimSpace(text) != "" {
 		ab.recordTranscript(chatTypeUser, text)
+		// Held for the attempt log: when this turn's reply shows the same
+		// question still awaiting, this is what the child said and missed with.
+		ab.reportedQuizMu.Lock()
+		ab.lastUserText = text
+		ab.reportedQuizMu.Unlock()
 	}
 	if ab.sessions != nil && strings.TrimSpace(text) != "" {
 		ab.sessions.AddMessage(sessionKey, "user", text)
@@ -930,11 +945,68 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 	if ok {
 		ab.reportedQuizIDs[questionID] = true
 	}
+	attempts := ab.trackQuizAttemptLocked(memo, questionID, result, ok)
 	ab.reportedQuizMu.Unlock()
 	if !ok {
 		return
 	}
-	go ab.quizAnswerReporter(questionID, result)
+	go ab.quizAnswerReporter(questionID, result, attempts)
+}
+
+// maxTrackedAttempts caps one question's attempt list. Three Doors means three
+// tries by design; the ceiling is only here so a session that loops cannot grow
+// this slice without bound.
+// ponytail: fixed cap, revisit if a mechanic ever needs more than a handful.
+const maxTrackedAttempts = 10
+
+// trackQuizAttemptLocked folds one finished reply into the pending question's
+// attempt list and returns the completed list when that question was just
+// judged. Caller holds reportedQuizMu.
+//
+// The signal is `awaiting=`: it names the question being asked NOW. If it has
+// not changed since the previous reply, the child answered in between and the
+// question survived, which is exactly a failed try. Nothing is asked of the
+// model that it does not already emit.
+func (ab *AgentBridge) trackQuizAttemptLocked(memo string, questionID int64, result string, judged bool) []QuizAttempt {
+	said := strings.TrimSpace(ab.lastUserText)
+	ab.lastUserText = ""
+
+	awaiting, _ := strconv.ParseInt(memoField(memo, "awaiting"), 10, 64)
+
+	if judged {
+		// This utterance is what settled the question, whatever the verdict.
+		attempts := ab.pendingQuizAttempts
+		if ab.pendingQuizID != questionID {
+			// The judged question is not the one being tracked — a corrected id,
+			// or a verdict arriving for a question whose earlier tries were never
+			// seen. Report the final try alone rather than another question's.
+			attempts = nil
+		}
+		if len(attempts) < maxTrackedAttempts {
+			attempts = append(attempts, QuizAttempt{Verdict: result, Transcript: said})
+		}
+		// Whatever is being asked now starts with a clean list.
+		ab.pendingQuizID = awaiting
+		ab.pendingQuizAttempts = nil
+		return attempts
+	}
+
+	if awaiting == 0 {
+		return nil
+	}
+	if ab.pendingQuizID != awaiting {
+		// First time this question is asked: no try has happened yet.
+		ab.pendingQuizID = awaiting
+		ab.pendingQuizAttempts = nil
+		return nil
+	}
+	// Same question still awaiting, and the child said something: a missed try.
+	// Silence is not an attempt — the prompt says so, and a row for it would
+	// make a quiet child look like a struggling one.
+	if said != "" && len(ab.pendingQuizAttempts) < maxTrackedAttempts {
+		ab.pendingQuizAttempts = append(ab.pendingQuizAttempts, QuizAttempt{Verdict: "wrong", Transcript: said})
+	}
+	return nil
 }
 
 func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text, sessionKey string) []providers.Message {

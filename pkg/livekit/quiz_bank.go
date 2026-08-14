@@ -174,6 +174,13 @@ func FetchQuizBatch(
 	return &batch, nil
 }
 
+// QuizAttempt is one try at a question, including the wrong ones that never
+// become an answer row. Transcript is what STT heard, empty for silence.
+type QuizAttempt struct {
+	Verdict    string `json:"verdict"`
+	Transcript string `json:"transcript,omitempty"`
+}
+
 // PostQuizAnswer logs one verdict against the bank. question_id goes out as a
 // string, matching the id form the selection endpoint serves.
 func PostQuizAnswer(
@@ -184,13 +191,14 @@ func PostQuizAnswer(
 	questionID int64,
 	result string,
 	bank string,
+	attempts []QuizAttempt,
 ) error {
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" {
 		return fmt.Errorf("device mac is empty")
 	}
 
-	fields := map[string]string{
+	fields := map[string]any{
 		"device_mac":  deviceMac,
 		"question_id": strconv.FormatInt(questionID, 10),
 		"result":      result,
@@ -200,6 +208,11 @@ func PostQuizAnswer(
 	// every caller before this change sent.
 	if bank = strings.TrimSpace(bank); bank != "" {
 		fields["bank"] = bank
+	}
+	// Also omitted when empty: the field is optional on the API, and sending []
+	// would only add bytes to every turn of a quiz that never needed a retry.
+	if len(attempts) > 0 {
+		fields["attempts"] = attempts
 	}
 
 	payload, err := json.Marshal(fields)
@@ -243,17 +256,18 @@ func NewQuizAnswerReporter(
 	serviceKey string,
 	deviceMac string,
 	bank string,
-) func(questionID int64, result string) {
-	return func(questionID int64, result string) {
+) func(questionID int64, result string, attempts []QuizAttempt) {
+	return func(questionID int64, result string, attempts []QuizAttempt) {
 		for attempt := 1; attempt <= 2; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err := PostQuizAnswer(ctx, cfg, serviceKey, deviceMac, questionID, result, bank)
+			err := PostQuizAnswer(ctx, cfg, serviceKey, deviceMac, questionID, result, bank, attempts)
 			cancel()
 			if err == nil {
 				logger.DebugCF("livekit", "Quiz answer reported", map[string]any{
 					"question_id": questionID,
 					"result":      result,
 					"bank":        bank,
+					"attempts":    len(attempts),
 				})
 				return
 			}
@@ -262,6 +276,7 @@ func NewQuizAnswerReporter(
 					"question_id": questionID,
 					"result":      result,
 					"bank":        bank,
+					"attempts":    len(attempts),
 					"error":       err.Error(),
 				})
 				return

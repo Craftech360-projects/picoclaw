@@ -120,7 +120,7 @@ func TestPostQuizAnswerSendsBank(t *testing.T) {
 	err := PostQuizAnswer(
 		context.Background(),
 		config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL},
-		"key", "AA:BB:CC:DD:EE:FF", 7, "correct", "riddle",
+		"key", "AA:BB:CC:DD:EE:FF", 7, "correct", "riddle", nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestPostQuizAnswerOmitsEmptyBank(t *testing.T) {
 	if err := PostQuizAnswer(
 		context.Background(),
 		config.LiveKitServiceManagerAPIConfig{BaseURL: srv.URL},
-		"key", "AA:BB:CC:DD:EE:FF", 7, "correct", "",
+		"key", "AA:BB:CC:DD:EE:FF", 7, "correct", "", nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestQuizAnswerReporterCarriesBankFromFetchToPost(t *testing.T) {
 	}
 
 	report := NewQuizAnswerReporter(cfg, "key", "AA:BB:CC:DD:EE:FF", fetched.Bank)
-	report(1, "correct")
+	report(1, "correct", nil)
 
 	if posted["bank"] != "riddle" {
 		t.Errorf("bank did not survive fetch -> report: %+v", posted)
