@@ -37,6 +37,7 @@ those are the lines to rewrite.
 ## Acceptance criteria
 
 - [ ] `CLEARED_RESULTS` flipped for Quizzy only; Riddler's cleared behaviour verified unchanged
+- [ ] **Both sites flipped** — added by issue 002. `quiz.service.js:27` is not the only one: `mobile.service.js:3466` holds a second `QUIZ_CLEARED_RESULTS = ['correct','revealed']` for the parent-app analytics path. Flip only the first and the toy reopens a question the parent's dashboard still reports as done. Grep for other copies before starting.
 - [ ] Grandfather clause implemented per 002's decision, or its absence justified by 002's numbers
 - [ ] Grandfather clause is a read-side predicate; no `UPDATE` or `DELETE` against any answer log
 - [ ] STT Layer 1 normalisation applied to answer matching, with a test covering the misheard-but-correct case

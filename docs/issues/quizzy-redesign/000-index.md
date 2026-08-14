@@ -14,7 +14,7 @@ the rest of these tickets say.
 | # | Title | Type | Blocked by |
 |---|---|---|---|
 | [001](001-read-quiz-master-prompt.md) | Dump and read the `quiz_master` prompt | HITL | — |
-| [002](002-revealed-blast-radius.md) | Measure the `revealed` level-pullback blast radius | HITL | — |
+| [002](002-revealed-blast-radius.md) | Measure the `revealed` level-pullback blast radius | HITL | ⚠ script ready, needs DB1 data |
 | [003](003-adr-0009.md) | ADR-0009 — single bank, mastery over flow, attempt logging | HITL | 001, 002 |
 
 **Phase B — instrument before you enforce.**
@@ -97,7 +97,19 @@ node scripts/dump-agent-prompt.js ./prompt-backup-db1
 empty `system_prompt` — the two silent failures ticket 006 hit. One run with a different
 connection string; no new code.
 
-**Blocks:** 008, 010, 013 (all three edit the prompt). Does not block 002–007.
+**Blocks:** 008, 010, 013 (all three edit the prompt). Does not block 003–007.
+
+### Also open: 002's measurement needs DB1
+
+The local database holds 27 quiz answers, all `correct` — no `revealed` row has ever been
+written there, so the blast radius measures as zero for want of data, not for want of
+risk. The script is committed and safe; only the run is outstanding.
+
+```bash
+node scripts/quiz-revealed-blast-radius.js
+```
+
+**Blocks:** 003 (ADR-0009 records the grandfather decision) and 008 (implements it).
 
 ## Standing constraints
 
