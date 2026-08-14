@@ -172,6 +172,8 @@ type AgentBridge struct {
 	// quizAnswerReporter logs one verdict against the bank.
 	quizBatch          *QuizBatch
 	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
+	// quizAttemptReporter flushes tries for a question that never resolved.
+	quizAttemptReporter func(questionID int64, attempts []QuizAttempt)
 	// reportedQuizIDs de-duplicates verdicts within the session: the model
 	// re-emits its cumulative MEMO every turn. Guarded because proactive and
 	// async-tool turns can land concurrently with a conversation turn.
@@ -245,6 +247,9 @@ type AgentBridgeConfig struct {
 	// QuizAnswerReporter logs one scored verdict against the bank, with the
 	// tries that led to it (empty when the child got it first time).
 	QuizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
+	// QuizAttemptReporter logs tries for a question the session ended on, which
+	// produce no verdict and would otherwise leave no trace at all.
+	QuizAttemptReporter func(questionID int64, attempts []QuizAttempt)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -300,6 +305,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		greetingPrompt:            strings.TrimSpace(cfg.GreetingPrompt),
 		quizBatch:                 cfg.QuizBatch,
 		quizAnswerReporter:        cfg.QuizAnswerReporter,
+		quizAttemptReporter:       cfg.QuizAttemptReporter,
 		reportedQuizIDs:           map[int64]bool{},
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
@@ -318,6 +324,12 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 // Close gracefully releases the session memory store and conditionally cleans
 // the active workspace.
 func (ab *AgentBridge) Close() {
+	// Before anything is torn down: a question the child was still trying when
+	// the session ended produces no verdict, so its tries were held here and
+	// lost. That is the child who tried six times and gave up — the one most
+	// worth seeing, and until this the only one leaving no trace at all.
+	ab.flushPendingQuizAttempts()
+
 	ab.closeMu.Lock()
 	if ab.closed {
 		ab.closeMu.Unlock()
@@ -962,6 +974,28 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 		result = "revealed"
 	}
 	go ab.quizAnswerReporter(questionID, result, attempts)
+}
+
+// flushPendingQuizAttempts sends the tries for a question that never resolved.
+// Safe to call more than once: the buffer is cleared under the lock, so a second
+// call finds nothing and does nothing.
+func (ab *AgentBridge) flushPendingQuizAttempts() {
+	if ab == nil || ab.quizAttemptReporter == nil {
+		return
+	}
+	ab.reportedQuizMu.Lock()
+	questionID := ab.pendingQuizID
+	attempts := ab.pendingQuizAttempts
+	ab.pendingQuizAttempts = nil
+	ab.pendingQuizID = 0
+	ab.reportedQuizMu.Unlock()
+
+	if questionID == 0 || len(attempts) == 0 {
+		return
+	}
+	// Synchronous on purpose. A goroutine here would race teardown and usually
+	// lose, which is how the rows went missing in the first place.
+	ab.quizAttemptReporter(questionID, attempts)
 }
 
 // doorForPendingLocked is the Door the pending question was on before this

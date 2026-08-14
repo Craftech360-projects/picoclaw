@@ -188,3 +188,46 @@ func TestNoDirectiveWithoutAnAuthoredLadder(t *testing.T) {
 		t.Fatal("an authored ladder must still drive the turn")
 	}
 }
+
+// A session that ends mid-question produces no verdict, so its tries were held
+// in the bridge and lost on teardown — the child who tried six times and gave up
+// left no trace at all. Observed live 2026-08-14 on question 226: eight tries
+// across two sessions, zero attempt rows.
+func TestPendingAttemptsFlushOnClose(t *testing.T) {
+	var gotID int64
+	var gotAttempts []QuizAttempt
+	ab := &AgentBridge{
+		pendingQuizID:       226,
+		pendingQuizAttempts: []QuizAttempt{{Verdict: "wrong", Transcript: "the leg"}, {Verdict: "wrong", Transcript: "the ears"}},
+		quizAttemptReporter: func(id int64, a []QuizAttempt) { gotID, gotAttempts = id, a },
+	}
+
+	ab.flushPendingQuizAttempts()
+	if gotID != 226 || len(gotAttempts) != 2 {
+		t.Fatalf("expected 2 attempts for question 226, got id=%d n=%d", gotID, len(gotAttempts))
+	}
+	if gotAttempts[1].Transcript != "the ears" {
+		t.Errorf("transcripts must survive the flush: %+v", gotAttempts)
+	}
+
+	// Idempotent: teardown paths can overlap, and a double flush must not write
+	// the same tries twice.
+	gotID, gotAttempts = 0, nil
+	ab.flushPendingQuizAttempts()
+	if gotID != 0 || gotAttempts != nil {
+		t.Fatalf("second flush must be a no-op, got id=%d n=%d", gotID, len(gotAttempts))
+	}
+}
+
+func TestFlushDoesNothingWithoutPendingTries(t *testing.T) {
+	called := false
+	ab := &AgentBridge{quizAttemptReporter: func(int64, []QuizAttempt) { called = true }}
+	ab.flushPendingQuizAttempts()
+	// A question answered first time has no held tries, and a session with no
+	// quiz has no pending question. Neither should produce a request.
+	ab.pendingQuizID = 5
+	ab.flushPendingQuizAttempts()
+	if called {
+		t.Fatal("flushed with nothing pending")
+	}
+}

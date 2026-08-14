@@ -269,8 +269,21 @@ func PostQuizAnswer(
 		return err
 	}
 
-	endpoint := managerQuizBaseURL(cfg) + "/quiz/answer"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	return postQuizJSON(ctx, cfg, serviceKey, "/quiz/answer", payload, "quiz answer")
+}
+
+// postQuizJSON POSTs a JSON body to a quiz endpoint and validates the envelope.
+// Shared so the answer and attempts paths cannot drift in how they authenticate
+// or how they decide a response was a failure.
+func postQuizJSON(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	path string,
+	payload []byte,
+	what string,
+) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, managerQuizBaseURL(cfg)+path, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -289,12 +302,74 @@ func PostQuizAnswer(
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("quiz answer status=%d body=%s", resp.StatusCode, string(body))
+		return fmt.Errorf("%s status=%d body=%s", what, resp.StatusCode, string(body))
 	}
-	if _, err := unwrapQuizEnvelope(body, "quiz answer"); err != nil {
+	if _, err := unwrapQuizEnvelope(body, what); err != nil {
 		return err
 	}
 	return nil
+}
+
+// PostQuizAttempts logs tries for a question that never resolved. No verdict is
+// sent, because none was reached — the server writes attempt rows only.
+func PostQuizAttempts(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+	questionID int64,
+	bank string,
+	attempts []QuizAttempt,
+) error {
+	deviceMac = strings.TrimSpace(deviceMac)
+	if deviceMac == "" {
+		return fmt.Errorf("device mac is empty")
+	}
+	if len(attempts) == 0 {
+		return nil
+	}
+
+	fields := map[string]any{
+		"device_mac":  deviceMac,
+		"question_id": strconv.FormatInt(questionID, 10),
+		"attempts":    attempts,
+	}
+	if bank = strings.TrimSpace(bank); bank != "" {
+		fields["bank"] = bank
+	}
+
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return postQuizJSON(ctx, cfg, serviceKey, "/quiz/attempts", payload, "quiz attempts")
+}
+
+// NewQuizAttemptReporter returns the teardown flush handed to the bridge. One
+// try, no retry: this runs while the session is closing, and holding teardown
+// open to retry a diagnostic write would delay releasing the room.
+func NewQuizAttemptReporter(
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+	bank string,
+) func(questionID int64, attempts []QuizAttempt) {
+	return func(questionID int64, attempts []QuizAttempt) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := PostQuizAttempts(ctx, cfg, serviceKey, deviceMac, questionID, bank, attempts); err != nil {
+			logger.WarnCF("livekit", "Unresolved attempts not logged", map[string]any{
+				"question_id": questionID,
+				"attempts":    len(attempts),
+				"error":       err.Error(),
+			})
+			return
+		}
+		logger.InfoCF("livekit", "Unresolved attempts flushed at teardown", map[string]any{
+			"question_id": questionID,
+			"attempts":    len(attempts),
+		})
+	}
 }
 
 // NewQuizAnswerReporter returns the per-session verdict reporter handed to the

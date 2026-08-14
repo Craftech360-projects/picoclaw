@@ -1071,6 +1071,14 @@ func main() {
 				// API reads as the quiz default.
 				quizBatchBank(quizBatchForSession),
 			),
+			// Same bank, same device: this only ever fires at teardown, for a
+			// question the child was still working on.
+			QuizAttemptReporter: livekit.NewQuizAttemptReporter(
+				lkCfg.ManagerAPI,
+				managerAPIServiceKey(),
+				deviceMAC,
+				quizBatchBank(quizBatchForSession),
+			),
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
 			MaxIterations:     sessionCfg.Agents.Defaults.MaxToolIterations,
