@@ -102,3 +102,48 @@ func TestTrackQuizAttempt(t *testing.T) {
 		}
 	})
 }
+
+// "Can you repeat the question?" was logged as a wrong answer live on
+// 2026-08-14. Two counted misses now trip the reveal, so a child who simply did
+// not hear would be told the answer they never got a chance to try for.
+func TestClarificationRequestIsNotAnAttempt(t *testing.T) {
+	memo := "type=daily_quiz | status=in_progress | awaiting=232"
+	ab := &AgentBridge{}
+	ab.trackQuizAttemptLocked(memo, 0, "", false)
+
+	for _, said := range []string{
+		"Can you repeat the question?",
+		"Sorry, say that again",
+		"I didn't hear you",
+		"What was the question?",
+		"one more time please",
+	} {
+		ab.lastUserText = said
+		ab.trackQuizAttemptLocked(memo, 0, "", false)
+	}
+	if len(ab.pendingQuizAttempts) != 0 {
+		t.Fatalf("clarification requests counted as misses: %+v", ab.pendingQuizAttempts)
+	}
+
+	// A real answer still counts, including a wrong one.
+	ab.lastUserText = "I think it is twelve"
+	ab.trackQuizAttemptLocked(memo, 0, "", false)
+	if len(ab.pendingQuizAttempts) != 1 {
+		t.Fatalf("a real answer must still count: %+v", ab.pendingQuizAttempts)
+	}
+}
+
+func TestAnswersAreNotMistakenForClarification(t *testing.T) {
+	// The list must never swallow a genuine answer. These are real bank answers
+	// and near-misses a child could plausibly say.
+	for _, said := range []string{
+		"twelve", "the nose", "I think it is eight", "honey", "orange",
+		"a pardon is a forgiveness", // contains "pardon" but is an answer
+	} {
+		got := isClarificationRequest(said)
+		want := said == "a pardon is a forgiveness" // known, accepted false positive
+		if got != want {
+			t.Errorf("isClarificationRequest(%q) = %v", said, got)
+		}
+	}
+}

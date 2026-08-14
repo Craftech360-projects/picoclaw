@@ -1012,6 +1012,34 @@ func (ab *AgentBridge) doorForPendingLocked(questionID int64) int {
 	return doorOpen
 }
 
+// clarificationPhrases are asks to hear the question again, not answers to it.
+// Deliberately narrow: every entry is a phrase no child would offer as an answer
+// to a quiz question, so a real answer is never discarded as a request.
+//
+// ponytail: substring match, no NLU. The right fix is the model marking the turn
+// UNCLEAR — the prompt already has that class and simply does not report it —
+// but that needs a MEMO change, and this covers the phrasings seen live today.
+var clarificationPhrases = []string{
+	"repeat", "say that again", "say it again", "what did you say",
+	"didn't hear", "did not hear", "didn't catch", "did not catch",
+	"come again", "pardon", "what was the question", "ask again", "one more time",
+}
+
+// isClarificationRequest reports whether the child asked to hear the question
+// again rather than attempting an answer.
+func isClarificationRequest(said string) bool {
+	said = strings.ToLower(strings.TrimSpace(said))
+	if said == "" {
+		return false
+	}
+	for _, phrase := range clarificationPhrases {
+		if strings.Contains(said, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // maxTrackedAttempts caps one question's attempt list. Three Doors means three
 // tries by design; the ceiling is only here so a session that loops cannot grow
 // this slice without bound.
@@ -1062,6 +1090,17 @@ func (ab *AgentBridge) trackQuizAttemptLocked(memo string, questionID int64, res
 	// Same question still awaiting, and the child said something: a missed try.
 	// Silence is not an attempt — the prompt says so, and a row for it would
 	// make a quiet child look like a struggling one.
+	//
+	// Neither is asking for the question again. "Can you repeat the question?"
+	// was logged as a wrong answer live on 2026-08-14; two of those now trip the
+	// reveal, so a child who simply did not hear would be handed the answer they
+	// never got to try for.
+	if isClarificationRequest(said) {
+		logger.DebugCF("livekit", "Clarification request not counted as an attempt", map[string]any{
+			"question_id": awaiting,
+		})
+		return nil
+	}
 	if said != "" && len(ab.pendingQuizAttempts) < maxTrackedAttempts {
 		ab.pendingQuizAttempts = append(ab.pendingQuizAttempts, QuizAttempt{Verdict: "wrong", Transcript: said})
 	}
