@@ -40,6 +40,7 @@ serialising, whatever value it now carries.
 - [ ] Parent-app endpoint still serialises `banks[].age_band` per the frozen contract from 005
 - [ ] Riddler's `riddle_question.age_band` handling explicitly decided — changed or deliberately left alone
 - [ ] Question selection returns the same ladder for a 3-year-old and a 10-year-old
+- [ ] **Prompt §5 rewritten** — added by issue 001. The live `quiz_master` prompt hardcodes 4-5 / 6-7 / 8-10 bands with per-band speaking instructions, and §2 reads the band from `USER.md`. Collapsing the data without rewriting §5 leaves the model branching on bands the bank no longer has. Backup-and-diff before the `UPDATE`.
 
 ## Blocked by
 

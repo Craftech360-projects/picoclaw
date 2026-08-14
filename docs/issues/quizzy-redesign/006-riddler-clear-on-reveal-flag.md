@@ -27,6 +27,11 @@ character's behaviour in the same commit.
 
 Riddler keeps today's behaviour: `clearOnReveal: true`. Quizzy flips to `false` in 008.
 
+**Open first, added by issue 001:** `ai_agent_template` on the local dev database has **no
+`riddler` row** — only `quiz_master`. Establish where Riddler's template actually lives
+(DB1, prod, or not a template row at all) before starting; this ticket assumes a Riddler
+that this database does not show.
+
 ## Acceptance criteria
 
 - [ ] `clearOnReveal` defined per bank in `banks.js`, defaulting to today's behaviour

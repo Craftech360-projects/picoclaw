@@ -35,6 +35,7 @@ question about whether mastery is hurting a child.
 ## Acceptance criteria
 
 - [ ] Count of `revealed` rows with no matching `correct` row for the same `(device, question)`
+- [ ] Count of `wrong` rows per character — **added by issue 001**: the live Quizzy prompt emits only `correct|revealed` and cannot produce `wrong`, so any Quizzy `wrong` row was written by something else and needs explaining before 008
 - [ ] Per-child level pullback computed: current level vs level they would fall back to
 - [ ] Worst-case and median pullback reported in levels, for both `quiz_question_answer` and `riddle_question_answer`
 - [ ] Explicit go/no-go on the grandfather clause, with the cutover date if needed

@@ -26,7 +26,17 @@ rendering instructions.
 Freeze the wire before 008 changes the meaning underneath it:
 
 1. **Map new verdicts to the old three on response** — `solo → correct`,
-   `helped → revealed`, `missed → wrong`. The mapping is nearly semantic already.
+   `helped → correct`, `missed → revealed`.
+
+   **Corrected by issue 001.** The GDD proposed `helped → revealed`, `missed → wrong`.
+   Reading the live prompt showed that is backwards: the MEMO contract emits only
+   `correct|revealed`, `revealed` already means *the answer was told to the child after
+   two failed tries* — i.e. missed — and Quizzy never emits `wrong` at all. The mapping
+   above is the one that keeps a parent's dashboard showing what it shows today.
+
+   Because `helped` and `solo` both map to `correct`, the distinction between them lives
+   **only** in the additive `mastery` field below. That is also why the mastery bar
+   cannot be backfilled from history — see 001 finding 3.
 2. **Add new fields additively** — `door`, `attempts_within_question`,
    `mastery: solo|helped|practised`. Never repurpose an existing field's meaning; an
    app in the wild will keep rendering the old one.
