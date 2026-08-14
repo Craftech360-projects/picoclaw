@@ -354,3 +354,30 @@ func TestAuthoredLadderTerminatesAfterThreeTries(t *testing.T) {
 		t.Fatalf("try 3 (2 misses) should still teach: %q", got)
 	}
 }
+
+// REAL corpus, ticket 011. Every pair below is a scored_text the live model
+// actually emitted in a session on 2026-08-14, against the bank question it was
+// judging. This is the evidence the ticket asked for, and it says something the
+// design did not expect: the model reproduces the question VERBATIM rather than
+// paraphrasing it. The guard's one-word threshold has enormous headroom.
+func TestGuardAgainstRealScoredText(t *testing.T) {
+	corpus := []struct{ bank, said string }{
+		{"What is five plus seven?", "What is five plus seven?"},
+		{"What do bees make that we can eat?", "What do bees make that we can eat?"},
+		{"Which part of your body do you use to smell?", "Which part of your body do you use to smell?"},
+		{"Which planet do we live on?", "Which planet do we live on?"},
+		{"What colour do you get when you mix red and yellow?", "What colour do you get when you mix red and yellow?"},
+		{"How many legs does a spider have?", "How many legs does a spider have?"},
+	}
+	rejected := 0
+	for _, c := range corpus {
+		if !questionTextMatchesBank(c.said, c.bank) {
+			rejected++
+			t.Errorf("REAL verdict rejected by the guard: bank=%q said=%q", c.bank, c.said)
+		}
+	}
+	// False-reject rate on real data: 0 of 6. No relaxation is warranted.
+	if rejected != 0 {
+		t.Fatalf("false-reject rate %d/%d — the guard is dropping real verdicts", rejected, len(corpus))
+	}
+}
