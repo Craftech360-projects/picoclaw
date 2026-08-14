@@ -15,7 +15,7 @@ the rest of these tickets say.
 |---|---|---|---|
 | [001](001-read-quiz-master-prompt.md) | Dump and read the `quiz_master` prompt | HITL | — |
 | [002](002-revealed-blast-radius.md) | Measure the `revealed` level-pullback blast radius | HITL | ✅ closed — no clause needed |
-| [003](003-adr-0009.md) | ADR-0009 — single bank, mastery over flow, attempt logging | HITL | 001, 002 |
+| [003](003-adr-0009.md) | ADR-0009 — single bank, mastery over flow, attempt logging | HITL | ✅ closed — [ADR-0009](../../adr/0009-mastery-over-flow-on-one-bank-measured-by-an-attempt-log.md) |
 
 **Phase B — instrument before you enforce.**
 
