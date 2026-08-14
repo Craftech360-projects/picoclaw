@@ -76,13 +76,38 @@ Four assertions, all passing, test rows deleted afterwards:
    written and returned
 4. A worker sending no `attempts` behaves exactly as today
 
+### Worker half — done (picoclaw, committed)
+
+`pkg/livekit/agent_bridge.go`, `pkg/livekit/quiz_bank.go`, `pkg/livekit/quiz_attempt_test.go`.
+
+`trackQuizAttemptLocked` folds each finished reply into the pending question's list and
+returns the completed list when that question is judged. `QuizAnswerReporter` and
+`PostQuizAnswer` take the attempts; the field is omitted when empty, so a first-time
+correct answer posts exactly the bytes it posted before.
+
+Three judgement calls worth knowing about:
+
+- **Silence is not an attempt.** The prompt already says silence does not count as a try,
+  and a row for it would make a quiet child read as a struggling one.
+- **A verdict for an untracked question reports only its final try.** `parseQuizVerdict`
+  corrects a stray id to the only pending question, so a verdict can arrive for a question
+  whose earlier turns were never tracked. Attaching another question's tries to it would be
+  worse than losing them.
+- **The list is capped** (`maxTrackedAttempts = 10`) so a looping session cannot grow it
+  without bound. Three Doors means three tries by design; the cap is only a ceiling.
+
+Six test cases cover the sequences a real Daily Ten produces: two tries then correct,
+first-time correct, silence, the untracked-question case, the cap, and a non-quiet
+character emitting no quiz MEMO at all. `go vet` clean, package tests pass.
+
+**One pre-existing failure in the suite**, unrelated: `TestSynthesizeAndPlayLogsTTSProviderType`
+fails identically with these changes stashed.
+
 ### Remaining
 
-- **Worker (Go):** accumulate attempts per pending question and send them with the answer.
-  `NewQuizAnswerReporter`'s signature (`func(questionID int64, result string)`) grows an
-  attempts argument.
 - **End-to-end against a real session** — the last acceptance criterion, and not satisfied
-  by the unit-level run above.
+  by the unit-level runs above. Needs the worker and the API running together against
+  local, with a child (or a tester) missing a question on purpose.
 
 ### Two things found, neither in scope here
 
@@ -99,14 +124,14 @@ Four assertions, all passing, test rows deleted afterwards:
 
 ## Acceptance criteria
 
-- [ ] Migration adds the attempt table per §6a, with an index supporting per-question and per-kid lookups
-- [ ] An attempt row is written for every try, including wrong ones that never become an outcome row
-- [ ] Each row carries at minimum: question, kid, attempt ordinal, verdict, and the raw transcribed answer
-- [ ] `quiz_question_answer` write behaviour is unchanged — verified by existing tests still passing
-- [ ] An attempt-write failure does not fail the answer submission or block the child's turn
-- [ ] Read-back proven: a query returns the attempt sequence for a single question in order
-- [ ] Nothing added under `memory/state/`
-- [ ] Verified end-to-end against a real session, not only unit tests
+- [x] Migration adds the attempt table per §6a, with an index supporting per-question and per-kid lookups
+- [x] An attempt row is written for every try, including wrong ones that never become an outcome row — assembled by the worker from `awaiting=`, no prompt change
+- [x] Each row carries at minimum: question, kid, attempt ordinal, verdict, and the raw transcribed answer
+- [x] `quiz_question_answer` write behaviour is unchanged — existing Go tests updated only for the new signature; the one suite failure is pre-existing and unrelated
+- [x] An attempt-write failure does not fail the answer submission or block the child's turn — proven with a forced database error, not by inspection
+- [x] Read-back proven: a query returns the attempt sequence for a single question in order
+- [x] Nothing added under `memory/state/`
+- [ ] **Verified end-to-end against a real session, not only unit tests** — outstanding
 
 ## Blocked by
 
