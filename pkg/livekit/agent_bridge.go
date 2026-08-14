@@ -1168,16 +1168,36 @@ func (ab *AgentBridge) quizDoorDirective() string {
 	if q == nil {
 		return ""
 	}
-	// No authored ladder means there is no Doors behaviour to drive, so say
-	// nothing and leave the character prompt's own ask/hint/reveal flow alone.
+	// No authored ladder means there is no Doors behaviour to drive. Carry the
+	// try count instead, because the model cannot know it.
 	//
-	// Without this the directive pinned every question on Door 1 and told the
-	// model "do not hint yet" on every single turn, which suppressed the escape
-	// the prompt already had. Observed live 2026-08-14: a child answered one
-	// question wrong eight times across two sessions and was never hinted,
-	// never told, and never scored — an unbounded loop on one question.
+	// The prompt's own rule is "second unsuccessful attempt, reveal the answer",
+	// but nothing in the MEMO says which try this is — `answered`, `first_try`
+	// and `missed` are all day totals. The only record of the count is the chat
+	// history, and that is summarised away (observed live: 21 messages trimmed
+	// to 5 mid-question). With the evidence gone the model kept encouraging
+	// another try and never scored the question at all: five wrong answers, no
+	// verdict, no answer row, awaiting= frozen on one id.
+	//
+	// The worker counted those tries exactly. This hands the count back, which
+	// is the server owning game state rather than asking a 31B model to hold it
+	// in prose (GDD §11).
 	if len(q.ChoiceOrder) < 2 && strings.TrimSpace(q.TeachText) == "" {
-		return ""
+		switch {
+		case tries == 0:
+			return "" // First ask. The prompt's normal flow is correct here.
+		case tries == 1:
+			return fmt.Sprintf(
+				"## This Question\nThe child has now missed question %s once. Give one hint or an either/or version, then ask the same question again and wait.",
+				q.IDString)
+		default:
+			// Two misses is the prompt's own reveal threshold. Naming the MEMO
+			// fields matters: without a verdict the question is never scored,
+			// and the child stays on it forever.
+			return fmt.Sprintf(
+				"## This Question\nThe child has now missed question %s %d times. Kindly tell them the answer, say one warm encouraging line, and move straight on to the next question. Your MEMO for this turn MUST carry scored_q=%s, scored_text, and result=revealed.",
+				q.IDString, tries, q.IDString)
+		}
 	}
 
 	switch q.DoorFor(tries) {

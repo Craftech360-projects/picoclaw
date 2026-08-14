@@ -173,10 +173,31 @@ func TestNoDirectiveWithoutAnAuthoredLadder(t *testing.T) {
 	bare := &QuizBatch{Questions: []QuizQuestion{{ID: 226, IDString: "226", Text: "Which part do you smell with?"}}}
 	ab := &AgentBridge{quizBatch: bare, pendingQuizID: 226}
 
-	for _, tries := range []int{0, 1, 2, 8} {
+	// First ask: the prompt's own flow is correct, so say nothing.
+	if got := ab.quizDoorDirective(); got != "" {
+		t.Fatalf("first ask needs no directive, got %q", got)
+	}
+
+	// One miss: hint. Must not tell the child the answer yet.
+	ab.pendingQuizAttempts = make([]QuizAttempt, 1)
+	one := ab.quizDoorDirective()
+	if !strings.Contains(one, "hint") {
+		t.Fatalf("after one miss the child should be hinted: %q", one)
+	}
+	if strings.Contains(one, "result=revealed") {
+		t.Fatalf("one miss must not reveal: %q", one)
+	}
+
+	// Two or more: reveal and SCORE. Naming the MEMO fields is the whole point —
+	// without a verdict the question is never scored and the child is stuck on
+	// it. Observed live: five misses, no verdict, awaiting= frozen on one id.
+	for _, tries := range []int{2, 5, 8} {
 		ab.pendingQuizAttempts = make([]QuizAttempt, tries)
-		if got := ab.quizDoorDirective(); got != "" {
-			t.Fatalf("after %d tries an unauthored question must produce no directive, got %q", tries, got)
+		got := ab.quizDoorDirective()
+		for _, want := range []string{"scored_q=226", "result=revealed", "next question"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("after %d misses the directive must contain %q: %q", tries, want, got)
+			}
 		}
 	}
 
