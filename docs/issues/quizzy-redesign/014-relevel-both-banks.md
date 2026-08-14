@@ -50,7 +50,7 @@ ticket runs.
 
 ## Acceptance criteria
 
-- [ ] `/content-audit` run first; rows per level per bank recorded before any re-levelling
+- [x] Content audit run; rows per level per bank recorded — see below
 - [ ] Every active question assigned a level on the single merged ladder, both banks
 - [ ] `teach_text` authored for every question reachable at Door 3
 - [ ] Distractors authored (not generated) per the locked design decision
@@ -63,3 +63,73 @@ ticket runs.
 ## Blocked by
 
 - 013 — Collapse `age_band` to `'all'` (code side)
+
+
+---
+
+## Progress — 2026-08-14: audited and scaffolded; the authoring is yours
+
+`manager-api-node` `da7d84ba`.
+
+### The audit
+
+| | quiz | riddle |
+|---|---|---|
+| active questions | 240 | 240 |
+| levels | 3 × 80 | 3 × 80 |
+| `teach_text` | **0** | 0 |
+| distractors | **0** | 0 |
+| inactive (untouched) | 90 | 90 |
+
+Quiz categories are reasonably spread — animals 42, numbers 37, science 35, body 19,
+geography 19, space 15 — with a long tail of ones and twos (family 1, measurement 1,
+letters 2, food 2). Riddles lean hard on objects 56, nature 40, wordplay 37.
+
+### The difficulty signal survived 013
+
+Dropping `age_band` looked like it destroyed the only human judgement about difficulty. It
+did not: every `code` still carries it. `6-8-L02-Q07-a6` encodes the band, the original
+level within that band, and the per-age variant. Nothing was lost.
+
+### The worksheet
+
+`scripts/export-relevel-sheet.js` exports 240 questions as **24 levels of 10**, ordered by
+that provenance — 3-5 content, then 6-8, then 9+, preserving each band's internal level
+order. That re-expresses the original authors' own difficulty judgement as one ladder,
+which beats alphabetical or random by a distance.
+
+**It is a starting point, not an answer.** A 3-5 level-3 question may well be harder than a
+6-8 level-1 one. The `level` column exists to be overwritten.
+
+```bash
+node scripts/export-relevel-sheet.js --out relevel-quiz.xlsx
+node scripts/export-relevel-sheet.js --bank riddle --out relevel-riddle.xlsx
+```
+
+Verified: the sheet round-trips through the existing importer — 240 rows, zero skipped, on
+a dry run.
+
+### Where I stopped, and why
+
+`teach_text` and `distractors` are exported **empty and stay empty**. 480 of each across the
+two banks.
+
+I did not generate them, and I would push back on generating them. A distractor is a
+**scored choice** — the wrong option a child picks at Door 2 — and `teach_text` is spoken to
+a child as fact. ADR-0005 removed LLM-invented content from scored play precisely because
+every generated item risked a hallucinated fact aimed at a young child, and "distractors
+**authored**" is one of the locked design decisions on this redesign. Generating 480
+explanations and handing them to four-year-olds as true is the exact failure that ADR
+exists to prevent.
+
+If you want drafting help, the honest framing is: I can propose candidates for a human to
+**review and correct row by row**, treating every one as wrong until checked. That is a
+different activity from authoring, and it should not be started by accident.
+
+### Remaining criteria, all authoring
+
+- assign final levels (the sheet suggests; a human decides)
+- author 480 `teach_text` and 480 distractors
+- 3-year-old floor and 10-year-old ceiling validation
+- `/balance-check` on the exported sheet
+- import to local first, then DB1 — **never prod**
