@@ -30,16 +30,16 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [008](008-mastery-flip-and-stt-normalisation.md) | `CLEARED_RESULTS = ['correct']` + STT Layer 1 | AFK | 004, 005, 006 |
+| [008](008-mastery-flip-and-stt-normalisation.md) | `CLEARED_RESULTS = ['correct']` + STT Layer 1 | AFK | ⚠ 8/9 — prompt line needs you |
 
 **Phase D — the Doors.**
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [009](009-server-computed-doors.md) | Server computes `ask_mode` / Door per question | AFK | 004, 008 |
-| [010](010-worker-per-turn-door-injection.md) | Worker injects the Door per turn + MEMO carries it | AFK | 009 |
-| [011](011-door-3-micro-teach.md) | Door 3 micro-teach + re-verify `questionTextMatchesBank` | AFK | 007, 010 |
-| [012](012-anti-trap-days-on-level.md) | Anti-trap: `days_on_level` from the answer log | AFK | 004, 009 |
+| [009](009-server-computed-doors.md) | Server computes `ask_mode` / Door per question | AFK | ✅ closed |
+| [010](010-worker-per-turn-door-injection.md) | Worker injects the Door per turn | AFK | ⚠ 10/12 — needs a session |
+| [011](011-door-3-micro-teach.md) | Door 3 micro-teach + re-verify `questionTextMatchesBank` | AFK | ⚠ 6/8 — blocked on 014 |
+| [012](012-anti-trap-days-on-level.md) | Anti-trap: `days_on_level` from the answer log | AFK | ✅ closed |
 
 **Phase E — the bank collapse.** Hardest to reverse (§13 Q1).
 
@@ -53,6 +53,20 @@ the rest of these tickets say.
 | # | Title | Type | Blocked by |
 |---|---|---|---|
 | [015](015-wonder-question.md) | M4 Wonder Question, shipped alone | AFK | 004 |
+
+## The one gate in front of everything else
+
+**Nothing left can be finished without a real voice session.** Four items are waiting on
+one:
+
+| Ticket | Waiting for |
+|---|---|
+| 004 | the end-to-end run itself — worker and API together, a child missing a question |
+| 008 | the prompt line (needs a human to run the `UPDATE`) |
+| 010 | cache hit ratio, and watching escalation reach Door 3 |
+| 011 | real Door 3 transcripts — which also need 014's authored `teach_text` |
+
+Everything below Phase D is either that session or content authoring.
 
 ## Not ticketed, deliberately
 
