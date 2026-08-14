@@ -33,6 +33,7 @@ serialising, whatever value it now carries.
 ## Acceptance criteria
 
 - [ ] `ageBandFromBirthDate` returns a single constant; function and column retained
+- [ ] **`AGE_BANDS` in `scripts/lib/quiz-import.js` accepts `'all'`** — added by issue 007. It is currently the closed set `'3'..'10'` and rejects anything else loudly by design, so without this every re-levelled row in 014's sheet is skipped. Bands are already per-age; this collapse is 8 → 1, not 3 → 1.
 - [ ] Active `quiz_question` rows set to `age_band = 'all'`; `(age_band, language, level)` index unchanged
 - [ ] `kid_learning_progress` topic-string decision made, implemented, and recorded in the ADR or this issue
 - [ ] If migrating strings: no child loses a previously-earned achievement row — verified by before/after counts per kid
