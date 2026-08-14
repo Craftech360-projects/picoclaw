@@ -1134,6 +1134,17 @@ func (ab *AgentBridge) quizDoorDirective() string {
 	if q == nil {
 		return ""
 	}
+	// No authored ladder means there is no Doors behaviour to drive, so say
+	// nothing and leave the character prompt's own ask/hint/reveal flow alone.
+	//
+	// Without this the directive pinned every question on Door 1 and told the
+	// model "do not hint yet" on every single turn, which suppressed the escape
+	// the prompt already had. Observed live 2026-08-14: a child answered one
+	// question wrong eight times across two sessions and was never hinted,
+	// never told, and never scored — an unbounded loop on one question.
+	if len(q.ChoiceOrder) < 2 && strings.TrimSpace(q.TeachText) == "" {
+		return ""
+	}
 
 	switch q.DoorFor(tries) {
 	case doorChoice:

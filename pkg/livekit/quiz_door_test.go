@@ -109,7 +109,9 @@ func TestBuildMessagesPutsTheDoorLast(t *testing.T) {
 	// block and OpenAI caching is prefix-based, so a per-turn directive inserted
 	// at the system anchor would invalidate the prefix every single turn.
 	ab := &AgentBridge{
-		quizBatch:     &QuizBatch{Questions: []QuizQuestion{{ID: 7, IDString: "7", Text: "Q"}}},
+		// Needs an authored rung, or there is deliberately no directive to place.
+		quizBatch: &QuizBatch{Questions: []QuizQuestion{{
+			ID: 7, IDString: "7", Text: "Q", TeachText: "because reasons"}}},
 		pendingQuizID: 7,
 	}
 	history := []providers.Message{{Role: "user", Content: "hello"}}
@@ -158,5 +160,31 @@ func TestDoor3PhrasingStillPassesTheGuard(t *testing.T) {
 		if questionTextMatchesBank(asked, bank) {
 			t.Errorf("invented question accepted: %q", asked)
 		}
+	}
+}
+
+// Regression, found by a real session on 2026-08-14. A question with no
+// authored Door 2 or Door 3 has no Doors behaviour to drive, so the directive
+// must stay silent and leave the character prompt's own ask/hint/reveal flow
+// intact. Emitting "ask plainly, do not hint yet" every turn suppressed that
+// escape: one child answered the same question wrong eight times across two
+// sessions and was never hinted, never told, and never scored.
+func TestNoDirectiveWithoutAnAuthoredLadder(t *testing.T) {
+	bare := &QuizBatch{Questions: []QuizQuestion{{ID: 226, IDString: "226", Text: "Which part do you smell with?"}}}
+	ab := &AgentBridge{quizBatch: bare, pendingQuizID: 226}
+
+	for _, tries := range []int{0, 1, 2, 8} {
+		ab.pendingQuizAttempts = make([]QuizAttempt, tries)
+		if got := ab.quizDoorDirective(); got != "" {
+			t.Fatalf("after %d tries an unauthored question must produce no directive, got %q", tries, got)
+		}
+	}
+
+	// One authored rung is enough to take over.
+	withChoice := &QuizBatch{Questions: []QuizQuestion{{
+		ID: 226, IDString: "226", Text: "Q", ChoiceOrder: []string{"nose", "ear"}}}}
+	ab2 := &AgentBridge{quizBatch: withChoice, pendingQuizID: 226}
+	if got := ab2.quizDoorDirective(); got == "" {
+		t.Fatal("an authored ladder must still drive the turn")
 	}
 }
