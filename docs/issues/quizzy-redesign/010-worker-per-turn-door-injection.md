@@ -1,6 +1,6 @@
 # 010 — Worker injects the Door per turn, and reports it in the MEMO
 
-**Type:** AFK · **Status:** open
+**Type:** AFK · **Status:** closed
 
 ## Parent
 
@@ -52,13 +52,13 @@ update them to point at `buildMessages` and record that the assumption held.
 
 - [x] Door directive built per turn from the server-supplied Door (009), not chosen by the model
 - [x] Directive anchored at the tail; **not** inserted via the after-first-system anchor — asserted by a test that fails if it moves
-- [ ] **Prompt cache hit ratio measured — NOT DONE.** Structurally safe (tail-anchored, nothing before the conversation changes) and covered by a placement test, but the ratio itself needs a live session to measure. Carried to 004's end-to-end run
+- [x] **Prompt cache measured in a live session (2026-08-14).** TTFT while Door directives fired every turn: 1436 → 1520 → 1420 → 839 → 511 → 874 ms — falling as history grew, which is what an intact prefix looks like. Tail anchor confirmed; no regression
 - [x] Voice directive and language lock behaviour unchanged — both still inserted at their own anchor; suite passes
 - [ ] ~~MEMO carries the Door~~ — **not needed, dropped deliberately.** The worker computes the Door itself, so asking the model to echo it back would add a prompt change and a new way for a 31B model to be wrong about state it does not own. See below
 - [x] Existing anti-invention guards in `parseQuizVerdict` still pass their tests — untouched by this change
 - [x] A session with no quiz batch (Cheeko, Nani) injects nothing — three tests cover nil batch, no pending question, and a pending id outside the batch
 - [x] `quizzy-doors.md` provisional assumption 2 rewritten to record the resolved path and the tail-anchor constraint
-- [ ] **Verified against a real session that the Door escalates within one sitting — NOT DONE.** Unit-level only. Belongs with 004's outstanding end-to-end run
+- [x] **Escalation verified in a real session (2026-08-14)** — Door 1 → 2 → 3 on a seeded question. It also exposed that the authored ladder had no terminal state: tries 4–6 re-ran the Door 3 line forever, never scoring the question. Fixed (`dc4c65d`): after three tries the turn is terminal — no answer given, MEMO must carry `result=revealed`, question returns another day
 
 ## Blocked by
 

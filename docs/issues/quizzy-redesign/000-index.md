@@ -37,7 +37,7 @@ the rest of these tickets say.
 | # | Title | Type | Blocked by |
 |---|---|---|---|
 | [009](009-server-computed-doors.md) | Server computes `ask_mode` / Door per question | AFK | ✅ closed |
-| [010](010-worker-per-turn-door-injection.md) | Worker injects the Door per turn | AFK | ⚠ 10/12 — needs a session |
+| [010](010-worker-per-turn-door-injection.md) | Worker injects the Door per turn | AFK | ✅ closed |
 | [011](011-door-3-micro-teach.md) | Door 3 micro-teach + re-verify `questionTextMatchesBank` | AFK | ⚠ 6/8 — blocked on 014 |
 | [012](012-anti-trap-days-on-level.md) | Anti-trap: `days_on_level` from the answer log | AFK | ✅ closed |
 
