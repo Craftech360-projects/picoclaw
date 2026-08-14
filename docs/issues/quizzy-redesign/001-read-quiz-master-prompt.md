@@ -1,6 +1,6 @@
 # 001 — Dump and read the `quiz_master` prompt
 
-**Type:** HITL · **Status:** open
+**Type:** HITL · **Status:** closed
 
 ## Parent
 
@@ -18,8 +18,10 @@ This is a read-only investigation. Nothing here changes the prompt — that happ
 008 and 010, each with its own backup.
 
 ```sql
+-- Corrected: 'riddle_master', not 'riddler'. Both codes differ from the names
+-- the characters are known by, in the same way.
 SELECT agent_code, agent_name, length(system_prompt), length(greeting_prompt)
-FROM ai_agent_template WHERE agent_code IN ('quiz_master','riddler');
+FROM ai_agent_template WHERE agent_code IN ('quiz_master','riddle_master');
 ```
 
 **Trap:** the row is `agent_code = 'quiz_master'`, **not** `'quizzy'`. A query written
@@ -40,12 +42,12 @@ Four things to check in `system_prompt`, in priority order:
 
 ## Acceptance criteria
 
-- [ ] Both rows located using `agent_code IN ('quiz_master','riddler')`; row count and prompt lengths recorded
-- [ ] `system_prompt` for `quiz_master` dumped to a backup file, and the file confirmed non-empty before proceeding
-- [ ] Each of the four checks above answered explicitly in a comment on this issue, quoting the relevant prompt lines
-- [ ] Any GDD claim contradicted by the real prompt is listed, so the affected design doc can be corrected
-- [ ] Stated explicitly whether M2a is still needed as specced (drives scope of 011)
-- [ ] No `UPDATE` executed under this issue
+- [x] Both rows located using `agent_code IN ('quiz_master','riddle_master')`; row count and prompt lengths recorded — the first run used `'riddler'` and found one row; see the correction below
+- [x] `system_prompt` for `quiz_master` dumped to a backup file, and the file confirmed non-empty before proceeding
+- [x] Each of the four checks above answered explicitly in a comment on this issue, quoting the relevant prompt lines
+- [x] Any GDD claim contradicted by the real prompt is listed, so the affected design doc can be corrected
+- [x] Stated explicitly whether M2a is still needed as specced (drives scope of 011)
+- [x] No `UPDATE` executed under this issue
 
 ## Blocked by
 
@@ -61,17 +63,18 @@ Read from the **local dev** Supabase project (`shlrfpbqkfnxqcmuatvs`:6543), the 
 
 > **Verified on DB1 — 2026-08-14.** Dumped `quiz_master` from DB1
 > (`tsiocygczplmnjpqmutc`) and diffed against the local copy: `system_prompt` and
-> `greeting_prompt` are **byte-identical**, same 12,439 / 2,428 chars. `riddler` is
-> absent on DB1 too, so that finding holds on both. Every finding below applies to DB1
-> unchanged. **Prod is still a third copy and has not been read.**
+> `greeting_prompt` are **byte-identical**, same 12,439 / 2,428 chars. Every finding below
+> applies to DB1 unchanged. **Prod is still a third copy and has not been read.**
 
 **The `quiz_master` trap is real and now confirmed from both sides:** `agent_code` is
 `quiz_master` while `agent_name` is `quizzy`. Anyone querying by the name they hear in
 conversation gets zero rows.
 
-**`riddler` does not exist on this database.** The query returned one row, not two.
-Riddler's template is either only on DB1 / prod or is not an `ai_agent_template` row at
-all. Issue 006 assumes a Riddler bank exists — confirm where before working it.
+**~~`riddler` does not exist on this database.~~ Corrected by issue 006: the row is
+`riddle_master`.** The query returned one row because it asked for `agent_code = 'riddler'`
+— but `riddler` is the *agent_name*, and the code is `riddle_master`. This is the very trap
+this ticket documents for `quiz_master`/`quizzy`, repeated one line later in the GDD's own
+SQL, and I walked into it. Riddler exists and is wired up in `banks.js`.
 
 ### 1. Does two-tries-then-reveal explain anything? — **No. M2a is needed as specced.**
 

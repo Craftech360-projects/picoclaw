@@ -13,7 +13,7 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [001](001-read-quiz-master-prompt.md) | Dump and read the `quiz_master` prompt | HITL | — |
+| [001](001-read-quiz-master-prompt.md) | Dump and read the `quiz_master` prompt | HITL | ✅ closed |
 | [002](002-revealed-blast-radius.md) | Measure the `revealed` level-pullback blast radius | HITL | ✅ closed — no clause needed |
 | [003](003-adr-0009.md) | ADR-0009 — single bank, mastery over flow, attempt logging | HITL | ✅ closed — [ADR-0009](../../adr/0009-mastery-over-flow-on-one-bank-measured-by-an-attempt-log.md) |
 
@@ -21,9 +21,9 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [004](004-attempt-log.md) | Attempt log: table, write path, read-back | AFK | 003 |
+| [004](004-attempt-log.md) | Attempt log: table, write path, read-back | AFK | ⚠ 7/8 — end-to-end left |
 | [005](005-freeze-parent-app-contract.md) | Freeze the parent-app wire contract | AFK | ✅ closed |
-| [006](006-riddler-clear-on-reveal-flag.md) | Riddler `clearOnReveal` flag | AFK | 003 |
+| [006](006-riddler-clear-on-reveal-flag.md) | Riddler `clearOnReveal` flag | AFK | ✅ closed |
 | [007](007-importer-teach-text.md) | `teach_text` in the importer | AFK | ✅ closed |
 
 **Phase C — the mastery reversal.**
@@ -78,17 +78,17 @@ projects and drift silently.
 ### ✅ Closed 2026-08-14: DB1 prompt verified identical to local
 
 `quiz_master` on DB1 is **byte-identical** to local — 12,439 / 2,428 chars, both fields.
-Every 001 finding applies to DB1 unchanged, and `riddler` is missing from both. **Prod
-has not been read**, so re-run the dump there before a prod prompt `UPDATE`:
+Every 001 finding applies to DB1 unchanged. **Prod has not been read**, so re-run the dump
+there before a prod prompt `UPDATE`:
 
 ```bash
 node scripts/dump-agent-prompt.js ./prompt-backup-db1
 ```
 
-`manager-api-node/scripts/dump-agent-prompt.js` (uncommitted as of 2026-08-14). Reads
-`DATABASE_URL`, writes one file per prompt field, exits non-zero on zero rows or an
-empty `system_prompt` — the two silent failures ticket 006 hit. One run with a different
-connection string; no new code.
+`manager-api-node/scripts/dump-agent-prompt.js`. Reads `DATABASE_URL`, writes one file per
+prompt field, exits non-zero on zero rows or an empty `system_prompt` — the two silent
+failures quiz-bank ticket 006 hit. It also prints every `agent_code` in the table when it
+finds nothing, which is what makes a wrong code visible instead of silent.
 
 ### ✅ Closed 2026-08-14: 002 measured, no grandfather clause
 
@@ -136,6 +136,20 @@ destination are the same database, and resets the id sequences afterwards.
 - **The parent app is a published API consumer.** Verdict renames are external breaks;
   map on the wire, add fields additively.
 - **Content changes go to the dev DO box only — never prod.**
+
+## Character codes differ from the names — check twice
+
+`agent_code` is never the name you hear: `quiz_master` is *quizzy*, `riddle_master` is
+*riddler*. Both the GDD's SQL and this ticket set's first attempt queried `'riddler'` and
+concluded the character did not exist. A wrong code matches zero rows **silently**.
+
+```sql
+SELECT agent_code, agent_name FROM ai_agent_template ORDER BY agent_code;
+```
+
+Eight characters: `calm_companion` (Chanda), `Cheeko`, `masti` (Masti), `quiz_master`
+(quizzy), `riddle_master` (riddler), `science_buddy` (Tara), `story_explorer` (Nani),
+`word_wizard` (Mitthu).
 
 ## Locked design decisions
 
