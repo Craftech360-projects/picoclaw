@@ -34,16 +34,63 @@ The multilingual judging rule (added 2026-08-04) may also need extending for Doo
 
 ## Acceptance criteria
 
-- [ ] Door 3 serves authored `teach_text` from the question row; no improvised explanation when text exists
-- [ ] Behaviour defined and tested for a question whose `teach_text` is null
-- [ ] `questionTextMatchesBank` re-verified against **real** Door 3 transcripts, with the sample size recorded
-- [ ] False-reject rate measured: legitimate Door 3 verdicts that the guard drops
-- [ ] False-accept still zero: no invented question reaches the database in the test corpus
-- [ ] Multilingual judging rule extended per 001's finding, or explicitly recorded as not needed
-- [ ] Door 3 does not clear a question (mastery bar stays at Door 1 or 2, per 009)
-- [ ] Any guard relaxation justified by transcript evidence in a comment, not by hand-written examples
+- [x] Door 3 serves authored `teach_text` from the question row; no improvised explanation when text exists — landed in 010's directive
+- [x] Behaviour defined and tested for a question whose `teach_text` is null — `DoorFor` skips the rung entirely rather than teaching nothing
+- [ ] **Re-verified against REAL Door 3 transcripts — NOT DONE, and cannot be yet.** Zero exist: no Door 3 has ever run, and no question has `teach_text`. See the analysis below
+- [ ] **False-reject rate measured — NOT DONE.** Same blocker; a rate computed from hand-written examples would be a number with no meaning
+- [x] False-accept still zero on the existing corpus — the guard is untouched, so its behaviour is unchanged by this ticket
+- [x] Multilingual judging rule — **explicitly not needed.** 001 finding 4: the rule is answer-side only, governing how a child's answer is judged, not how the ask is phrased. Door 3 changes the ask
+- [x] Door 3 does not clear a question — implemented in 010: Door 3 success reports as `revealed`, which after 008 does not clear
+- [x] Any guard relaxation justified by transcript evidence — **no relaxation was made**, which is the finding
 
 ## Blocked by
 
 - 007 — `teach_text` in the importer
 - 010 — Worker injects the Door per turn
+
+
+---
+
+## Findings — 2026-08-14: the guard needs no change, and the measurement is blocked
+
+picoclaw `b7f4296` (Door 3 serving) plus one test added here.
+
+### Most of this ticket landed in 010
+
+Serving authored `teach_text`, skipping the rung when it is null, and Door 3 not clearing
+are all done. What was left is the question this ticket exists for: **does Door 3's looser
+phrasing break `questionTextMatchesBank`?**
+
+### The guard is already at its loosest useful setting
+
+`questionTextMatchesBank` requires **one** shared content word after filler is stripped
+([quiz_state.go:135](../../../pkg/livekit/quiz_state.go)). Its own comment records why: any
+share-of-words threshold dropped real answers, and two were lost live that way.
+
+So the premise behind this ticket — that Door 3 might need the guard relaxed — does not
+hold. There is nothing left to relax short of disabling it. And it should not be disabled:
+false accepts are caught by a separate check (`verdictMatchesClaimedQuestion`, strongest
+match wins), but the one-word floor is what stopped four invented questions reaching the
+database.
+
+This is the same shape as 001 finding 4: `scored_text` is already *"that same question in a
+few plain words"*, so the guard has always been matching a paraphrase. **Door 3 widens an
+existing tolerance rather than introducing a new one.**
+
+A test covers Door 3-shaped `scored_text` against the guard — including the single-word
+`"legs"` — alongside two invented questions that must still be rejected. Those examples are
+**hand-written and are not grounds for relaxing anything**; they check the opposite claim,
+that no relaxation is needed.
+
+### What genuinely cannot be done yet
+
+**There are no real Door 3 transcripts.** No Door 3 has ever run: the bank has zero
+`teach_text`, so `DoorFor` skips the rung for every question until 014 authors content. A
+false-reject rate computed from examples I invented would be a number with no meaning, and
+this ticket's own instruction is not to relax the guard on that basis.
+
+**To close:** author `teach_text` on a handful of questions, run real sessions until
+children reach Door 3, then replay the logged `scored_text` values through the guard and
+record the sample size. The attempt log (004) already captures what is needed.
+
+Blocked behind 014 (authored content) and 004's end-to-end run — not behind any code.

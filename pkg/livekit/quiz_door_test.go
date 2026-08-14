@@ -125,3 +125,38 @@ func TestBuildMessagesPutsTheDoorLast(t *testing.T) {
 		}
 	}
 }
+
+// Ticket 011 asked whether Door 3's looser phrasing breaks the anti-invention
+// guard. These are hand-written examples and are NOT grounds for relaxing it —
+// the ticket is explicit that only real transcripts can justify that. They exist
+// to check the opposite claim: that no relaxation is needed.
+func TestDoor3PhrasingStillPassesTheGuard(t *testing.T) {
+	bank := "How many legs does a spider have?"
+
+	// scored_text is "that same question in a few plain words", so what reaches
+	// the guard after a Door 3 turn is still a description of the question, not
+	// the teaching sentence.
+	door3 := []string{
+		"how many legs a spider has",
+		"the spider legs question",
+		"number of legs on a spider",
+		"legs",
+	}
+	for _, asked := range door3 {
+		if !questionTextMatchesBank(asked, bank) {
+			t.Errorf("Door 3 paraphrase rejected, which would silently drop a real verdict: %q", asked)
+		}
+	}
+
+	// And the guard still earns its keep: four invented questions reached the
+	// database before it existed.
+	invented := []string{
+		"what is your favourite colour",
+		"can you count to twenty",
+	}
+	for _, asked := range invented {
+		if questionTextMatchesBank(asked, bank) {
+			t.Errorf("invented question accepted: %q", asked)
+		}
+	}
+}
