@@ -35,6 +35,19 @@ says to verify `RenderQuizQuestions` before committing, and provisional assumpti
 flags per-turn injection as the design's likeliest surprise. Both are now settled —
 update them to point at `buildMessages` and record that the assumption held.
 
+## Added by 009
+
+- [ ] **Report Door 3 success as `revealed`, not `correct`.** That is the mastery bar: the
+  child was walked to the answer, and after 008 `revealed` does not clear. No schema change
+  needed — the vocabulary already carries it.
+- [ ] **Escalate through the ladder served at fetch.** 009 ships `ask_mode`, `choice_order`
+  and `teach_text` with each question rather than per turn, to avoid an HTTP round trip
+  mid-question on a voice path. If per-turn server assignment is wanted instead, that is a
+  change to 004's worker (post each attempt as it happens) and a deliberate latency
+  trade — decide it here.
+- [ ] **Skip a Door with no authored content.** `choice_order` and `teach_text` are omitted
+  when unauthored, which is every question until 014. Never improvise the missing rung.
+
 ## Acceptance criteria
 
 - [ ] Door directive built per turn from the server-supplied Door (009), not chosen by the model
