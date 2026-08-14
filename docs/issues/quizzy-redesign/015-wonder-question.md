@@ -87,11 +87,26 @@ One thing found while wiring it: capture had to read the MEMO **before** the ver
 Behind it, the Wonder Question would have been silently dropped whenever the quiz path was
 inactive — two unrelated things coupled by an early return.
 
-### Remaining: the prompt must emit `wonder=`
+### The prompt patch — applied to local 2026-08-14
 
-Nothing asks the model for one yet. The plumbing is complete and inert until the prompt
-gains two instructions: ask an open, unscored question at the end of the Daily Ten, and
-carry it in the MEMO as `wonder=`.
+`manager-api-node/scripts/patch-quiz-prompt-015.js`. Two additive edits, 12,638 → 13,311
+chars, 1 row changed, verified by re-dump. Backup in `/tmp/p015`.
 
-That is a prompt `UPDATE` on the same backup-and-diff procedure as 008, and it is the last
-thing between this and a real two-day test.
+1. **The closing beat**, after the score is announced: one open question with no right
+   answer, asked warmly, and the conversation ends there. Spelled out as **not** a quiz
+   question — not judged, not scored, not corrected, never affects the Daily Ten. Without
+   saying that explicitly, a model told to ask a question reaches for its quiz reflexes and
+   marks the child's answer, which would turn the one unscored moment into another test.
+2. **`wonder=` on the completion MEMO**, which is how the worker receives it.
+
+Dry-run by default, and the `UPDATE` is guarded on the exact prior text so a prompt that
+moved since the backup updates nothing rather than clobbering another edit.
+
+**DB1 and prod still have the old prompt.** Same patch applies cleanly there when promoting.
+
+### Remaining: one real two-day test
+
+Play a session, hang up, come back the next day. Quizzy should close by wondering something
+aloud and open the next session by remembering it. `kid_wonder_question` should hold exactly
+one row per session that ended properly, and `quiz_question_answer` should be untouched by
+any of it.
