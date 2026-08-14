@@ -1279,6 +1279,21 @@ func (ab *AgentBridge) quizDoorDirective() string {
 		}
 	}
 
+	// Past the last Door. The ladder has to END, and until this existed it did
+	// not: DoorFor clamps at Door 3, so every further try re-ran the Door 3 line
+	// — "explain, ask again, do not say the answer" — forever. Observed live
+	// 2026-08-14: six wrong tries on one question, no verdict, no answer row.
+	//
+	// quizzy-doors.md specifies the terminal: one reprompt at Door 3, then
+	// `missed`. The answer is deliberately NOT supplied — that is what separates
+	// this redesign from the reveal it replaced — but the question MUST be scored
+	// or the child never leaves it.
+	if tries >= doorGuided {
+		return fmt.Sprintf(
+			"## This Question\nQuestion %s has now had all three tries. Do not explain it again and do NOT tell the child the answer. Say one warm line — you will come back to this one another day — and move straight on to the next question. Your MEMO for this turn MUST carry scored_q=%s, scored_text, and result=revealed.",
+			q.IDString, q.IDString)
+	}
+
 	switch q.DoorFor(tries) {
 	case doorChoice:
 		return fmt.Sprintf(

@@ -320,3 +320,37 @@ func TestWonderQuestionAppearsInTheBlock(t *testing.T) {
 		t.Errorf("no wonder question means no section: %q", bare)
 	}
 }
+
+// The ladder must END. DoorFor clamps at Door 3, so without a terminal state
+// every try past the third re-issued "ask again, do not say the answer" forever.
+// Observed live 2026-08-14: six wrong tries on one authored question, no verdict,
+// no answer row. Same bug as the unauthored branch, fixed there first, missed here.
+func TestAuthoredLadderTerminatesAfterThreeTries(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{{
+		ID: 184, IDString: "184", Text: "What colour is a banana?", Answer: "yellow",
+		ChoiceOrder: []string{"yellow", "something else"}, TeachText: "think of one you have eaten",
+	}}}
+	ab := &AgentBridge{quizBatch: batch, pendingQuizID: 184}
+
+	// Tries 3+ must all be the terminal directive: score it and move on.
+	for _, tries := range []int{3, 4, 6, 9} {
+		ab.pendingQuizAttempts = make([]QuizAttempt, tries)
+		got := ab.quizDoorDirective()
+		for _, want := range []string{"scored_q=184", "result=revealed", "next question"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("after %d tries the ladder must terminate with %q: %q", tries, want, got)
+			}
+		}
+		// The answer is deliberately NOT supplied — the question returns another
+		// day. Telling it here would be the old reveal behaviour back again.
+		if !strings.Contains(got, "do NOT tell the child the answer") {
+			t.Fatalf("the terminal turn must not give the answer: %q", got)
+		}
+	}
+
+	// And the rungs below are untouched: try 2 is still Door 3 teaching.
+	ab.pendingQuizAttempts = make([]QuizAttempt, 2)
+	if got := ab.quizDoorDirective(); !strings.Contains(got, "think of one you have eaten") {
+		t.Fatalf("try 3 (2 misses) should still teach: %q", got)
+	}
+}
