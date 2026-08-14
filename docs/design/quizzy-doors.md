@@ -563,11 +563,28 @@ cue. Parent-facing Door distribution belongs to system #23.
    new authoring obligations on **every row, in both banks** — the largest
    non-code cost in the redesign. The importer needs both columns before any
    content work starts.
-2. **The worker can receive and honour a per-question `ask_mode`.** If the batch
-   is injected once per session rather than per turn, escalation within a sitting
-   needs a per-turn refresh path that may not exist yet. **Verify against
-   `RenderQuizQuestions` before committing** — this could be the design's biggest
-   implementation surprise.
+2. ~~**The worker can receive and honour a per-question `ask_mode`.**~~
+   **RESOLVED 2026-08-14 — the assumption holds, and the surprise did not
+   materialise.** The batch *is* injected once per session: `RenderQuizQuestions`
+   substitutes `{{QUIZ_QUESTIONS}}` into the greeting inside `GenerateGreeting`,
+   and there is no refresh path on that placeholder.
+
+   But the per-turn path is elsewhere. `buildMessages` runs every turn and
+   already injects dynamic system directives (the voice rules, the RFID language
+   lock), so the Door line follows that same pattern — **no change to
+   `RenderQuizQuestions` was needed**.
+
+   One constraint shapes it: the Door line is anchored at the **tail**, after the
+   conversation, *not* at the after-first-system anchor the language lock uses.
+   The prompt cache breakpoint sits on the static system block and OpenAI-side
+   caching is prefix-based, so a directive that changes every turn inserted up
+   there would invalidate the cached prefix on every single turn. The language
+   lock is safe there only because it is fixed for the session.
+
+   Escalation within a sitting is the worker counting tries against the ladder
+   the server authored — the whole ladder ships at fetch, so no HTTP round trip
+   lands inside a voice turn. See ticket 009 for that deviation from the
+   read-before/write-after contract above.
 3. **STT confidence is available to the worker.** If the provider doesn't expose
    it, `stt_flag` is permanently 0 and the audio circuit-breaker is lost.
 4. **One attempt per Door is legible to a child.** Untested. The existing prompt

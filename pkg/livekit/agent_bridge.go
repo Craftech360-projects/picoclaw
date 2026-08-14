@@ -945,12 +945,37 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 	if ok {
 		ab.reportedQuizIDs[questionID] = true
 	}
+	doorUsed := ab.doorForPendingLocked(questionID)
 	attempts := ab.trackQuizAttemptLocked(memo, questionID, result, ok)
 	ab.reportedQuizMu.Unlock()
 	if !ok {
 		return
 	}
+	// The mastery bar (ADR-0009): Door 1 or 2 unaided clears, Door 3 does not.
+	// A child who was walked to the answer at Door 3 was given it, so `revealed`
+	// is the honest verdict — and after ticket 008 `revealed` no longer clears.
+	// No schema change needed; the vocabulary already carries the distinction.
+	if result == "correct" && doorUsed == doorGuided {
+		logger.InfoCF("livekit", "Door 3 success reported as revealed; guided answers do not clear", map[string]any{
+			"question_id": questionID,
+		})
+		result = "revealed"
+	}
 	go ab.quizAnswerReporter(questionID, result, attempts)
+}
+
+// doorForPendingLocked is the Door the pending question was on before this
+// reply's verdict was folded in. Caller holds reportedQuizMu.
+func (ab *AgentBridge) doorForPendingLocked(questionID int64) int {
+	if ab.quizBatch == nil || ab.pendingQuizID != questionID {
+		return doorOpen
+	}
+	for i := range ab.quizBatch.Questions {
+		if ab.quizBatch.Questions[i].ID == questionID {
+			return ab.quizBatch.Questions[i].DoorFor(len(ab.pendingQuizAttempts))
+		}
+	}
+	return doorOpen
 }
 
 // maxTrackedAttempts caps one question's attempt list. Three Doors means three
@@ -1068,7 +1093,66 @@ CRITICAL RULES FOR VOICE:
 	}
 	// Deterministic priority: base system -> language lock -> voice.
 
+	// The Door line goes LAST, after the conversation, and this placement is
+	// load-bearing. The prompt cache breakpoint sits on the static system block
+	// and OpenAI-side caching is prefix-based, so a directive that changes every
+	// turn inserted at the system anchor would invalidate the cached prefix on
+	// every single turn. The language lock is safe up there only because it is
+	// fixed for the whole session. This is not.
+	if directive := ab.quizDoorDirective(); directive != "" {
+		messages = append(messages, providers.Message{Role: "system", Content: directive})
+	}
+
 	return messages
+}
+
+// quizDoorDirective is the one line telling the model how to ask the pending
+// question this turn. Empty when there is no scored quiz, no pending question,
+// or the question is not in this session's batch — Cheeko and Nani never see it.
+//
+// The model is told WHICH Door and given its words; it does not choose. The
+// escalation is the worker counting tries against what the server authored.
+func (ab *AgentBridge) quizDoorDirective() string {
+	if ab == nil || ab.quizBatch == nil {
+		return ""
+	}
+	ab.reportedQuizMu.Lock()
+	pending := ab.pendingQuizID
+	tries := len(ab.pendingQuizAttempts)
+	ab.reportedQuizMu.Unlock()
+	if pending == 0 {
+		return ""
+	}
+
+	var q *QuizQuestion
+	for i := range ab.quizBatch.Questions {
+		if ab.quizBatch.Questions[i].ID == pending {
+			q = &ab.quizBatch.Questions[i]
+			break
+		}
+	}
+	if q == nil {
+		return ""
+	}
+
+	switch q.DoorFor(tries) {
+	case doorChoice:
+		return fmt.Sprintf(
+			"## This Question\nAsk question %s as a two-way choice, exactly these options and in this order: %q or %q. Do not add a third option and do not say which is right.",
+			q.IDString, q.ChoiceOrder[0], q.ChoiceOrder[1])
+	case doorGuided:
+		// The handback is mandatory: Door 3 explains and then reopens the
+		// question, so the child answers rather than being told. Supplying the
+		// answer here would make it `revealed` — the behaviour this redesign
+		// exists to remove.
+		return fmt.Sprintf(
+			"## This Question\nQuestion %s: say this explanation in your own warm words, in one breath: %q. Then ask the question again and wait. Do NOT say the answer.",
+			q.IDString, q.TeachText)
+	default:
+		return fmt.Sprintf(
+			"## This Question\nAsk question %s plainly, in your own words. Do not offer choices and do not hint yet.",
+			q.IDString)
+	}
 }
 
 func insertSystemDirectiveAfterFirstSystem(messages []providers.Message, directive providers.Message) []providers.Message {

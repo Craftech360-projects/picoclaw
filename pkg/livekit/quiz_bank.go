@@ -39,6 +39,55 @@ type QuizQuestion struct {
 	Text     string   `json:"question_text"`
 	Answer   string   `json:"answer_text"`
 	Accepted []string `json:"accepted_answers"`
+
+	// The Door ladder, assigned by the server (ADR-0005: the model voices, the
+	// server decides). AskMode is the STARTING door; the worker escalates
+	// through the rungs below as tries are used.
+	//
+	// ChoiceOrder and TeachText are ABSENT when that Door has not been authored
+	// for this question — which is every question until the bank is re-levelled.
+	// An unauthored Door is skipped, never improvised: inventing the second
+	// option or the explanation is exactly the generated scored content ADR-0005
+	// removed.
+	AskMode     string   `json:"ask_mode"`
+	AttemptNo   int      `json:"attempt_no"`
+	ChoiceOrder []string `json:"choice_order"`
+	TeachText   string   `json:"teach_text"`
+}
+
+// Door numbers. The server names them open|choice|guided; the worker counts
+// tries, so it needs the ordinal too.
+const (
+	doorOpen   = 1
+	doorChoice = 2
+	doorGuided = 3
+)
+
+// DoorFor returns the Door this question is on after `tries` failed attempts,
+// skipping any Door the question has no authored content for.
+//
+// Skipping matters: with an unauthored Door 2, a child who misses twice should
+// reach the teaching Door rather than be asked to choose between options that do
+// not exist.
+func (q QuizQuestion) DoorFor(tries int) int {
+	// Clamp FIRST. Skipping unauthored Doors before clamping let a question with
+	// no authored content at all land on an empty Door 3 once tries exceeded the
+	// ladder — the child would hear an explanation that does not exist.
+	door := doorOpen + tries
+	if door > doorGuided {
+		door = doorGuided
+	}
+	if door == doorChoice && len(q.ChoiceOrder) < 2 {
+		door = doorGuided
+	}
+	if door == doorGuided && strings.TrimSpace(q.TeachText) == "" {
+		// Nothing left to escalate to; hold on the last Door that has content.
+		if len(q.ChoiceOrder) >= 2 {
+			return doorChoice
+		}
+		return doorOpen
+	}
+	return door
 }
 
 // QuizBatch is one session's worth of questions: the current Level for this
