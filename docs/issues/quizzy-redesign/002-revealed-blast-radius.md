@@ -34,13 +34,15 @@ question about whether mastery is hurting a child.
 
 ## Acceptance criteria
 
-- [ ] Count of `revealed` rows with no matching `correct` row for the same `(device, question)`
-- [ ] Count of `wrong` rows per character — **added by issue 001**: the live Quizzy prompt emits only `correct|revealed` and cannot produce `wrong`, so any Quizzy `wrong` row was written by something else and needs explaining before 008
-- [ ] Per-child level pullback computed: current level vs level they would fall back to
-- [ ] Worst-case and median pullback reported in levels, for both `quiz_question_answer` and `riddle_question_answer`
-- [ ] Explicit go/no-go on the grandfather clause, with the cutover date if needed
-- [ ] Queries recorded in a comment so the measurement can be re-run after the cutover
-- [ ] No `UPDATE` or `DELETE` executed under this issue
+Measured on **local and dev (DB1)**. Prod deliberately out of scope — see the decision below.
+
+- [x] Count of `revealed` rows with no matching `correct` row for the same `(device, question)` — **0** on both banks, both databases
+- [x] Count of `wrong` rows per character — **0** on both banks, both databases. Consistent with issue 001's finding that the live prompt emits only `correct|revealed`, though the sample is too small to call it proof
+- [x] Per-child level pullback computed: current level vs level they would fall back to — **0 devices affected** of 5 (quiz) and 1 (riddle)
+- [x] Worst-case and median pullback reported in levels, for both `quiz_question_answer` and `riddle_question_answer` — **worst 0, median 0**, both tables
+- [x] Explicit go/no-go on the grandfather clause, with the cutover date if needed — **no clause needed for local or dev**; prod undecided, see below
+- [x] Queries recorded so the measurement can be re-run after the cutover — committed as `manager-api-node/scripts/quiz-revealed-blast-radius.js`
+- [x] No `UPDATE` or `DELETE` executed under this issue — the measurement is two `SELECT`s per bank and writes nothing. (Separately, the DB1→local refresh **did** replace local's four quiz/riddle tables. That was a deliberate data refresh via `copy-quiz-tables.js`, not part of the measurement, and it touched no answer log other than local's own throwaway rows.)
 
 ## Blocked by
 
@@ -117,16 +119,46 @@ zero `revealed` across real children, the reveal path is not firing and **requir
 reverses a decision that never takes effect**, which would change what this whole redesign
 is for.
 
-### Still open: only prod can close this
+---
 
-Neither local nor DB1 has ever recorded a child failing a question twice. The
-grandfather-clause decision needs prod, which no dev session touches without being asked.
+## Decision — closed 2026-08-14 for local and dev
 
-The measurement is read-only — two `SELECT`s and no writes — so it is safe to point at
-prod, but that is a decision to take deliberately, not a side effect of this ticket.
+**No grandfather clause. Issue 008 ships the `CLEARED_RESULTS` flip with no date
+predicate and no cutover date.**
+
+Zero `revealed` rows exist on either database, so zero questions reopen and no child is
+pulled back a single level. There is nothing to grandfather. Adding a date predicate to
+`loadClearedIds` would be dead code guarding a case that cannot occur — and dead code in
+the cleared-set path is exactly the kind of thing that later gets mistaken for a rule.
+
+If the prod run (below) comes back non-zero, this decision is reopened, and the clause
+goes in then. The measurement is cheap to re-run and the flip has not shipped yet, so
+deferring it costs nothing.
+
+### The prod run is a gate on prod rollout, not on this ticket
+
+Prod is the DigitalOcean managed cluster and was deliberately not queried. This ticket is
+scoped to local and dev, which is where 008 will be built and tested.
+
+**Before 008 is promoted to prod**, run the same script against prod and confirm the
+count is still zero:
 
 ```bash
-node scripts/quiz-revealed-blast-radius.js
+DATABASE_URL="<prod-url>" node scripts/quiz-revealed-blast-radius.js
 ```
 
-Then fill in the criteria above from real numbers and make the grandfather-clause call.
+A non-zero `revealed` count there means real children are mid-progress on questions that
+are about to reopen, and the flip must not ship until the clause is added. Recorded as a
+promotion gate in [000-index.md](000-index.md).
+
+### The finding worth carrying forward
+
+Across local and dev: **55 answer rows, zero `revealed`, zero `wrong`.** Both the API
+(`ANSWER_RESULTS`) and the worker (`quizVerdictResults`) accept all three verdicts, so the
+pipeline is not filtering them out.
+
+On dev data this is explainable as staff smoke-testing — 9 answers per device, and a
+tester answers their own quiz correctly. **On prod it would not be.** If prod also shows
+zero `revealed` across real children, the reveal path is not firing, and requirement 4
+reverses a decision that never takes effect. Check the verdict spread first when the prod
+run happens; it is a bigger question than the grandfather clause.

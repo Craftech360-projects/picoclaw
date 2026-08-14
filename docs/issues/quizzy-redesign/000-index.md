@@ -14,7 +14,7 @@ the rest of these tickets say.
 | # | Title | Type | Blocked by |
 |---|---|---|---|
 | [001](001-read-quiz-master-prompt.md) | Dump and read the `quiz_master` prompt | HITL | — |
-| [002](002-revealed-blast-radius.md) | Measure the `revealed` level-pullback blast radius | HITL | ⚠ script ready, needs DB1 data |
+| [002](002-revealed-blast-radius.md) | Measure the `revealed` level-pullback blast radius | HITL | ✅ closed — no clause needed |
 | [003](003-adr-0009.md) | ADR-0009 — single bank, mastery over flow, attempt logging | HITL | 001, 002 |
 
 **Phase B — instrument before you enforce.**
@@ -90,17 +90,31 @@ node scripts/dump-agent-prompt.js ./prompt-backup-db1
 empty `system_prompt` — the two silent failures ticket 006 hit. One run with a different
 connection string; no new code.
 
-### Still open: 002's measurement needs **prod**, not DB1
+### ✅ Closed 2026-08-14: 002 measured, no grandfather clause
 
-DB1's bank and answer log have been copied into local
-(`scripts/copy-quiz-tables.js`), so local now mirrors dev. It did not help: across local
-and DB1 combined there are **55 answer rows and zero `revealed`, zero `wrong`**. No child
-has failed a question twice on either database, so the blast radius measures zero for want
-of data, not for want of risk.
+Across local and DB1: **55 answer rows, zero `revealed`, zero `wrong`, zero level
+pullback.** Nothing to grandfather, so 008 ships the flip with no date predicate. 003 and
+008 are unblocked.
 
-Only prod can close it. The measurement is read-only.
+## Promotion gate — before anything here reaches prod
 
-**Blocks:** 003 (ADR-0009 records the grandfather decision) and 008 (implements it).
+Prod is the DigitalOcean managed cluster (`db-postgresql-blr1-93302…:25060/defaultdb`).
+It has **not** been queried, by design; everything measured so far is local and dev only.
+
+Re-run the blast radius against prod before promoting 008:
+
+```bash
+DATABASE_URL="<prod-url>" node scripts/quiz-revealed-blast-radius.js
+```
+
+- **Non-zero `revealed`** → real children are mid-progress on questions about to reopen.
+  The grandfather clause goes back in and 002's decision is reopened.
+- **Zero `revealed` on real children** → the reveal path is not firing at all, and
+  requirement 4 reverses a decision that never takes effect. Bigger than the clause;
+  settle it before shipping.
+
+Also re-dump the prompt there before any prod prompt `UPDATE` — prod is a third copy and
+has not been diffed against local/dev.
 
 ### Refreshing local from DB1
 
