@@ -1052,38 +1052,16 @@ func (ab *AgentBridge) doorForPendingLocked(questionID int64) int {
 	return doorOpen
 }
 
-// clarificationPhrases are asks to hear the question again, not answers to it.
-// Deliberately narrow: every entry is a phrase no child would offer as an answer
-// to a quiz question, so a real answer is never discarded as a request.
-//
-// ponytail: substring match, no NLU. The right fix is the model marking the turn
-// UNCLEAR — the prompt already has that class and simply does not report it —
-// but that needs a MEMO change, and this covers the phrasings seen live today.
-var clarificationPhrases = []string{
-	"repeat", "say that again", "say it again", "what did you say",
-	"didn't hear", "did not hear", "didn't catch", "did not catch",
-	"come again", "pardon", "what was the question", "ask again", "one more time",
-}
-
-// isClarificationRequest reports whether the child asked to hear the question
-// again rather than attempting an answer.
-func isClarificationRequest(said string) bool {
-	said = strings.ToLower(strings.TrimSpace(said))
-	if said == "" {
-		return false
-	}
-	for _, phrase := range clarificationPhrases {
-		if strings.Contains(said, phrase) {
-			return true
-		}
+// memoFlagIsYes reports whether a MEMO carries a boolean-ish field set true.
+// Tolerant of what a 31B model actually emits: yes/true/1, any casing.
+func memoFlagIsYes(memo, field string) bool {
+	switch strings.ToLower(strings.TrimSpace(memoField(memo, field))) {
+	case "yes", "true", "1":
+		return true
 	}
 	return false
 }
 
-// maxTrackedAttempts caps one question's attempt list. Three Doors means three
-// tries by design; the ceiling is only here so a session that loops cannot grow
-// this slice without bound.
-// ponytail: fixed cap, revisit if a mechanic ever needs more than a handful.
 const maxTrackedAttempts = 10
 
 // trackQuizAttemptLocked folds one finished reply into the pending question's
@@ -1135,8 +1113,17 @@ func (ab *AgentBridge) trackQuizAttemptLocked(memo string, questionID int64, res
 	// was logged as a wrong answer live on 2026-08-14; two of those now trip the
 	// reveal, so a child who simply did not hear would be handed the answer they
 	// never got to try for.
-	if isClarificationRequest(said) {
-		logger.DebugCF("livekit", "Clarification request not counted as an attempt", map[string]any{
+	// The model reports this turn as UNCLEAR when it could not make out the
+	// speech, or when the child asked to hear the question again. Neither is an
+	// attempt at the answer.
+	//
+	// Asked of the model rather than guessed here: the prompt already classifies
+	// UNCLEAR and it is the only participant that can tell "I don't know" from
+	// "say that again". A phrase list stood in for this and was replaced — it
+	// matched substrings with no understanding, so "a pardon is a forgiveness"
+	// read as a request to repeat.
+	if memoFlagIsYes(memo, "unclear") {
+		logger.DebugCF("livekit", "Turn reported UNCLEAR; not counted as an attempt", map[string]any{
 			"question_id": awaiting,
 		})
 		return nil
