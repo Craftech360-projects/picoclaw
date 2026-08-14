@@ -22,7 +22,7 @@ the rest of these tickets say.
 | # | Title | Type | Blocked by |
 |---|---|---|---|
 | [004](004-attempt-log.md) | Attempt log: table, write path, read-back | AFK | 003 |
-| [005](005-freeze-parent-app-contract.md) | Freeze the parent-app wire contract | AFK | 003 |
+| [005](005-freeze-parent-app-contract.md) | Freeze the parent-app wire contract | AFK | ✅ closed |
 | [006](006-riddler-clear-on-reveal-flag.md) | Riddler `clearOnReveal` flag | AFK | 003 |
 | [007](007-importer-teach-text.md) | `teach_text` in the importer | AFK | ✅ closed |
 
