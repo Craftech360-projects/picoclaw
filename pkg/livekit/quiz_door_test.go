@@ -381,3 +381,64 @@ func TestGuardAgainstRealScoredText(t *testing.T) {
 		t.Fatalf("false-reject rate %d/%d — the guard is dropping real verdicts", rejected, len(corpus))
 	}
 }
+
+// A restored MEMO is a quotation, not a new question.
+//
+// A session starts by restoring the previous one's completed MEMO from
+// MEMORY.md and restating it, `wonder=` included. Taken at face value that read
+// as a second moment of curiosity, and teardown saved it again. On dev
+// 2026-08-15 the same question landed twice, minutes apart, from two sessions
+// where the child had wondered once. Same disease as the day gate reading
+// "complete" out of a restored transcript.
+//
+// The strings below are the real ones from that session.
+func TestRestatedWonderQuestionIsNotSavedAgain(t *testing.T) {
+	const asked = "If you could have any superpower, what would it be?"
+
+	saved := ""
+	ab := &AgentBridge{
+		// The server told us what the child was already left with — this is the
+		// question rendered as the opening beat.
+		quizBatch:              &QuizBatch{WonderQuestion: asked},
+		reportedQuizIDs:        map[int64]bool{},
+		wonderQuestionReporter: func(q string) { saved = q },
+	}
+
+	ab.reportQuizVerdict("[happy] Good afternoon, Kishore!\nMEMO: type=daily_quiz | date=2026-08-15 | status=completed | answered=10 | wonder=" + asked)
+	ab.flushWonderQuestion()
+	if saved != "" {
+		t.Fatalf("restated the recalled question and saved it again: %q", saved)
+	}
+
+	// Restating rarely comes back byte for byte.
+	ab.reportQuizVerdict(`x
+MEMO: type=daily_quiz | wonder="If you could have ANY superpower, what would it be"`)
+	ab.flushWonderQuestion()
+	if saved != "" {
+		t.Fatalf("re-punctuated restatement got through: %q", saved)
+	}
+
+	// The session's own new question still saves — this is the whole mechanic,
+	// and a guard that ate it would be worse than the duplicate it prevents.
+	ab.reportQuizVerdict("y\nMEMO: type=daily_quiz | wonder=I wonder if fish ever dream about swimming in a giant bubble of juice?")
+	ab.flushWonderQuestion()
+	if saved != "I wonder if fish ever dream about swimming in a giant bubble of juice?" {
+		t.Fatalf("a genuinely new wonder question was dropped: %q", saved)
+	}
+}
+
+// With nothing recalled, every question is new — a first-ever session must not
+// be silently swallowed by an empty comparison.
+func TestFirstEverWonderQuestionIsSaved(t *testing.T) {
+	saved := ""
+	ab := &AgentBridge{
+		quizBatch:              &QuizBatch{},
+		reportedQuizIDs:        map[int64]bool{},
+		wonderQuestionReporter: func(q string) { saved = q },
+	}
+	ab.reportQuizVerdict("z\nMEMO: type=daily_quiz | wonder=Where does the sky end?")
+	ab.flushWonderQuestion()
+	if saved != "Where does the sky end?" {
+		t.Fatalf("first wonder question not saved: %q", saved)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -965,9 +966,25 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 	// couple two unrelated things and lose the question whenever the quiz path
 	// happened to be inactive.
 	if wonder := strings.TrimSpace(memoField(memo, "wonder")); wonder != "" {
-		ab.reportedQuizMu.Lock()
-		ab.pendingWonderQuestion = wonder
-		ab.reportedQuizMu.Unlock()
+		// Not the one this session opened by recalling.
+		//
+		// A new session restores the previous session's completed MEMO from
+		// MEMORY.md and restates it — `wonder=` and all — usually on the very
+		// first turn. Taken at face value that reads as "the child was left with
+		// a new question", and teardown saved it again: on dev 2026-08-15 the
+		// same question was stored twice, minutes apart, from two sessions where
+		// only one child ever wondered anything.
+		//
+		// This is the same disease the day gate had, and the same cure. The gate
+		// kept reading "the Daily Ten is complete" out of a restored transcript
+		// until it was decided from the log instead of from the model. Here the
+		// server told us what the child was already left with, so a `wonder=`
+		// matching it is a quotation, not a new question.
+		if !sameWonderQuestion(wonder, ab.recalledWonderQuestion()) {
+			ab.reportedQuizMu.Lock()
+			ab.pendingWonderQuestion = wonder
+			ab.reportedQuizMu.Unlock()
+		}
 	}
 
 	if ab.quizAnswerReporter == nil {
@@ -1018,6 +1035,38 @@ func (ab *AgentBridge) flushPendingQuizAttempts() {
 	// Synchronous on purpose. A goroutine here would race teardown and usually
 	// lose, which is how the rows went missing in the first place.
 	ab.quizAttemptReporter(questionID, attempts)
+}
+
+// recalledWonderQuestion is the question the server said this child was already
+// left with — the one rendered as this session's opening beat, if any.
+func (ab *AgentBridge) recalledWonderQuestion() string {
+	if ab == nil || ab.quizBatch == nil {
+		return ""
+	}
+	return ab.quizBatch.WonderQuestion
+}
+
+// sameWonderQuestion asks whether the model handed back the sentence it was
+// given, ignoring casing, surrounding quotes and trailing punctuation — a model
+// restating a remembered question rarely reproduces it byte for byte.
+//
+// Deliberately not a similarity measure. "Is this the same sentence" is the
+// question being asked, and anything fuzzier would start discarding a child's
+// genuinely new curiosity, which is the one thing this mechanic exists to keep.
+func sameWonderQuestion(a, b string) bool {
+	normalise := func(s string) string {
+		var out strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if unicode.IsLetter(r) || unicode.IsNumber(r) {
+				out.WriteRune(r)
+			} else if unicode.IsSpace(r) {
+				out.WriteRune(' ')
+			}
+		}
+		return strings.Join(strings.Fields(out.String()), " ")
+	}
+	na, nb := normalise(a), normalise(b)
+	return na != "" && na == nb
 }
 
 // flushWonderQuestion saves the open question the session ended on (M4). Like
