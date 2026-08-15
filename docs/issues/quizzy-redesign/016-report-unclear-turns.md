@@ -1,6 +1,6 @@
 # 016 — The model must report UNCLEAR turns
 
-**Type:** AFK · **Status:** built, pending one session check
+**Type:** AFK · **Status:** closed
 
 ## Parent
 
@@ -43,7 +43,7 @@ hear tone, and the worker cannot tell a confused child from a wrong one.
 - [x] A genuine wrong answer still counts — the test sends **identical words** down both paths, separated only by the model's judgement
 - [x] `isClarificationRequest` and its phrase list are **deleted**
 - [x] Prompt change went through backup-and-diff; 13,311 → 13,835 chars, 1 row, verified by re-dump. Additive, so an older worker ignores it
-- [ ] **Verified in a real session — outstanding.** Ask for a repeat twice, then answer; the reveal must not fire early
+- [x] **Verified in a real session (dev, 2026-08-15)** — and by a better case than the scripted one
 
 ## Blocked by
 
@@ -90,3 +90,27 @@ need applying there.
 
 One live check: ask for a repeat twice, then answer. The reveal must not have fired early,
 and `question_attempt` must hold one row rather than three.
+
+
+---
+
+## Closed 2026-08-15 — verified, and the phrase list could not have done it
+
+Nobody ran the scripted "ask for a repeat twice" test. It happened anyway, on STT garble,
+which is a harder case.
+
+Question 187, *"what sound does a cow make"*:
+
+| said | model | counted? |
+|---|---|---|
+| "May sound." | `unclear=yes` | no |
+| "Move sound." | `unclear=yes` | no |
+| "I think it will go with move." | judged | yes → `correct` |
+
+`question_attempt` holds **one** row for 187, not three. A third fired on *"Color."* before
+the Malayalam answer landed on q208. Three unclear turns, three correctly excluded.
+
+**This is the case the deleted phrase list would have failed.** "May sound" and "Move sound"
+contain no repeat-request words — nothing to substring-match. They are speech recognition
+mangling "moo sound", and only the participant that heard the audio could tell they were
+garble rather than wrong answers. The scripted test would have proven less.

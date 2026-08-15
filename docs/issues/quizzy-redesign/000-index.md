@@ -38,7 +38,7 @@ the rest of these tickets say.
 |---|---|---|---|
 | [009](009-server-computed-doors.md) | Server computes `ask_mode` / Door per question | AFK | ✅ closed |
 | [010](010-worker-per-turn-door-injection.md) | Worker injects the Door per turn | AFK | ✅ closed |
-| [011](011-door-3-micro-teach.md) | Door 3 micro-teach + re-verify `questionTextMatchesBank` | AFK | ⚠ 6/8 — blocked on 014 |
+| [011](011-door-3-micro-teach.md) | Door 3 micro-teach + re-verify `questionTextMatchesBank` | AFK | ✅ closed |
 | [012](012-anti-trap-days-on-level.md) | Anti-trap: `days_on_level` from the answer log | AFK | ✅ closed |
 
 **Phase E — the bank collapse.** Hardest to reverse (§13 Q1).
@@ -52,13 +52,13 @@ the rest of these tickets say.
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [015](015-wonder-question.md) | M4 Wonder Question, shipped alone | AFK | ⚠ built — needs the prompt to emit `wonder=` |
+| [015](015-wonder-question.md) | M4 Wonder Question, shipped alone | AFK | ✅ closed |
 
 **Found in testing.**
 
 | # | Title | Type | Blocked by |
 |---|---|---|---|
-| [016](016-report-unclear-turns.md) | The model must report UNCLEAR turns | AFK | ⚠ built — needs one session check |
+| [016](016-report-unclear-turns.md) | The model must report UNCLEAR turns | AFK | ✅ closed |
 
 ## The one gate in front of everything else
 

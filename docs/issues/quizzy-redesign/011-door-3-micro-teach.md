@@ -1,6 +1,6 @@
 # 011 — Door 3 micro-teach, and re-verify `questionTextMatchesBank`
 
-**Type:** AFK · **Status:** open
+**Type:** AFK · **Status:** closed
 
 ## Parent
 
@@ -122,3 +122,17 @@ warranted and none was made.**
 Sample caveat: six is small, and none are from a Door 3 turn specifically — the newest
 session's chat history had not flushed when this was measured. The corpus is a committed
 test, so adding Door 3 samples later is one edit.
+
+
+---
+
+## Closed 2026-08-14 — Door 3 sample obtained on dev
+
+The gap in the earlier measurement was that no sample came from a Door 3 turn. A full
+Daily Ten on dev (`00:16:3E:7A:11:C4`, kid 15) produced one: **q184 went to Door 3, resolved
+`revealed`, and its `scored_text` was verbatim.** So were the other nine.
+
+**16 real samples now, false-reject rate 0.** The guard needs no change and none was made.
+The prompt asks for "that same question in a few plain words" and the model returns the
+question exactly — Door 3's looser *asking* never reached `scored_text` at all, which is why
+the concern behind this ticket never materialised.

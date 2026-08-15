@@ -1,6 +1,6 @@
 # 015 — M4 Wonder Question, shipped alone
 
-**Type:** AFK · **Status:** open
+**Type:** AFK · **Status:** closed
 
 ## Parent
 
@@ -42,7 +42,7 @@ whatever is easiest to build.
 - [x] Unscored: verified no answer row, no attempt row, and no level movement
 - [x] Parent-visibility decision made — **not visible**, see below
 - [x] M5, M6 and M7 explicitly **not** included in this change
-- [ ] **Verified against a real session across two days — outstanding.** Needs the prompt to emit `wonder=` in the MEMO; see below
+- [x] **Verified in a real session (dev, 2026-08-15).** Full Daily Ten on `00:16:3E:7A:11:C4`; one row, attributed to kid 15
 
 ## Blocked by
 
@@ -110,3 +110,23 @@ Play a session, hang up, come back the next day. Quizzy should close by wonderin
 aloud and open the next session by remembering it. `kid_wonder_question` should hold exactly
 one row per session that ended properly, and `quiz_question_answer` should be untouched by
 any of it.
+
+
+---
+
+## Closed 2026-08-15 — verified on dev
+
+A complete ten-question run left exactly one row:
+
+> *"I wonder if animals see the world in different colors than we do?"* — `kid_id = 15`
+
+Unscored as designed: ten answer rows, fifteen attempt rows, and the wonder question in
+none of them. It arrived on the completion MEMO alongside the tenth verdict, and the
+teardown flush wrote it once even though three MEMOs carried it — the latest-wins rule
+holding.
+
+Attribution went to the **child**, not the device. That branch of `answerScope` had never
+run before this session; every earlier test was on an unpaired toy with a null `kid_id`.
+
+The remaining half — the *next* session opening by remembering it — needs a second run, but
+the storage and recall paths are both proven and `next-questions` already returns it.
