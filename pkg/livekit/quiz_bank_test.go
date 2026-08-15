@@ -292,6 +292,7 @@ func TestPostQuizAnswer(t *testing.T) {
 		482,
 		"correct",
 		"",
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

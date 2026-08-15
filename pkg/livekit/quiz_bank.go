@@ -39,6 +39,55 @@ type QuizQuestion struct {
 	Text     string   `json:"question_text"`
 	Answer   string   `json:"answer_text"`
 	Accepted []string `json:"accepted_answers"`
+
+	// The Door ladder, assigned by the server (ADR-0005: the model voices, the
+	// server decides). AskMode is the STARTING door; the worker escalates
+	// through the rungs below as tries are used.
+	//
+	// ChoiceOrder and TeachText are ABSENT when that Door has not been authored
+	// for this question — which is every question until the bank is re-levelled.
+	// An unauthored Door is skipped, never improvised: inventing the second
+	// option or the explanation is exactly the generated scored content ADR-0005
+	// removed.
+	AskMode     string   `json:"ask_mode"`
+	AttemptNo   int      `json:"attempt_no"`
+	ChoiceOrder []string `json:"choice_order"`
+	TeachText   string   `json:"teach_text"`
+}
+
+// Door numbers. The server names them open|choice|guided; the worker counts
+// tries, so it needs the ordinal too.
+const (
+	doorOpen   = 1
+	doorChoice = 2
+	doorGuided = 3
+)
+
+// DoorFor returns the Door this question is on after `tries` failed attempts,
+// skipping any Door the question has no authored content for.
+//
+// Skipping matters: with an unauthored Door 2, a child who misses twice should
+// reach the teaching Door rather than be asked to choose between options that do
+// not exist.
+func (q QuizQuestion) DoorFor(tries int) int {
+	// Clamp FIRST. Skipping unauthored Doors before clamping let a question with
+	// no authored content at all land on an empty Door 3 once tries exceeded the
+	// ladder — the child would hear an explanation that does not exist.
+	door := doorOpen + tries
+	if door > doorGuided {
+		door = doorGuided
+	}
+	if door == doorChoice && len(q.ChoiceOrder) < 2 {
+		door = doorGuided
+	}
+	if door == doorGuided && strings.TrimSpace(q.TeachText) == "" {
+		// Nothing left to escalate to; hold on the last Door that has content.
+		if len(q.ChoiceOrder) >= 2 {
+			return doorChoice
+		}
+		return doorOpen
+	}
+	return door
 }
 
 // QuizBatch is one session's worth of questions: the current Level for this
@@ -56,6 +105,9 @@ type QuizBatch struct {
 	// bank the questions came from. The worker never decides this and never
 	// needs to know what the value means.
 	Bank string `json:"bank"`
+	// WonderQuestion is the open, unscored question the LAST session left this
+	// child with (M4). Empty for a child who has never been left one.
+	WonderQuestion string `json:"wonder_question"`
 }
 
 // managerQuizBaseURL resolves the Manager API base the same way the persona pull
@@ -174,6 +226,13 @@ func FetchQuizBatch(
 	return &batch, nil
 }
 
+// QuizAttempt is one try at a question, including the wrong ones that never
+// become an answer row. Transcript is what STT heard, empty for silence.
+type QuizAttempt struct {
+	Verdict    string `json:"verdict"`
+	Transcript string `json:"transcript,omitempty"`
+}
+
 // PostQuizAnswer logs one verdict against the bank. question_id goes out as a
 // string, matching the id form the selection endpoint serves.
 func PostQuizAnswer(
@@ -184,13 +243,14 @@ func PostQuizAnswer(
 	questionID int64,
 	result string,
 	bank string,
+	attempts []QuizAttempt,
 ) error {
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" {
 		return fmt.Errorf("device mac is empty")
 	}
 
-	fields := map[string]string{
+	fields := map[string]any{
 		"device_mac":  deviceMac,
 		"question_id": strconv.FormatInt(questionID, 10),
 		"result":      result,
@@ -201,14 +261,32 @@ func PostQuizAnswer(
 	if bank = strings.TrimSpace(bank); bank != "" {
 		fields["bank"] = bank
 	}
+	// Also omitted when empty: the field is optional on the API, and sending []
+	// would only add bytes to every turn of a quiz that never needed a retry.
+	if len(attempts) > 0 {
+		fields["attempts"] = attempts
+	}
 
 	payload, err := json.Marshal(fields)
 	if err != nil {
 		return err
 	}
 
-	endpoint := managerQuizBaseURL(cfg) + "/quiz/answer"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	return postQuizJSON(ctx, cfg, serviceKey, "/quiz/answer", payload, "quiz answer")
+}
+
+// postQuizJSON POSTs a JSON body to a quiz endpoint and validates the envelope.
+// Shared so the answer and attempts paths cannot drift in how they authenticate
+// or how they decide a response was a failure.
+func postQuizJSON(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	path string,
+	payload []byte,
+	what string,
+) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, managerQuizBaseURL(cfg)+path, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -227,12 +305,120 @@ func PostQuizAnswer(
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("quiz answer status=%d body=%s", resp.StatusCode, string(body))
+		return fmt.Errorf("%s status=%d body=%s", what, resp.StatusCode, string(body))
 	}
-	if _, err := unwrapQuizEnvelope(body, "quiz answer"); err != nil {
+	if _, err := unwrapQuizEnvelope(body, what); err != nil {
 		return err
 	}
 	return nil
+}
+
+// PostQuizAttempts logs tries for a question that never resolved. No verdict is
+// sent, because none was reached — the server writes attempt rows only.
+func PostQuizAttempts(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+	questionID int64,
+	bank string,
+	attempts []QuizAttempt,
+) error {
+	deviceMac = strings.TrimSpace(deviceMac)
+	if deviceMac == "" {
+		return fmt.Errorf("device mac is empty")
+	}
+	if len(attempts) == 0 {
+		return nil
+	}
+
+	fields := map[string]any{
+		"device_mac":  deviceMac,
+		"question_id": strconv.FormatInt(questionID, 10),
+		"attempts":    attempts,
+	}
+	if bank = strings.TrimSpace(bank); bank != "" {
+		fields["bank"] = bank
+	}
+
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return postQuizJSON(ctx, cfg, serviceKey, "/quiz/attempts", payload, "quiz attempts")
+}
+
+// NewQuizAttemptReporter returns the teardown flush handed to the bridge. One
+// try, no retry: this runs while the session is closing, and holding teardown
+// open to retry a diagnostic write would delay releasing the room.
+func NewQuizAttemptReporter(
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+	bank string,
+) func(questionID int64, attempts []QuizAttempt) {
+	return func(questionID int64, attempts []QuizAttempt) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := PostQuizAttempts(ctx, cfg, serviceKey, deviceMac, questionID, bank, attempts); err != nil {
+			logger.WarnCF("livekit", "Unresolved attempts not logged", map[string]any{
+				"question_id": questionID,
+				"attempts":    len(attempts),
+				"error":       err.Error(),
+			})
+			return
+		}
+		logger.InfoCF("livekit", "Unresolved attempts flushed at teardown", map[string]any{
+			"question_id": questionID,
+			"attempts":    len(attempts),
+		})
+	}
+}
+
+// PostWonderQuestion saves the open question a session ended on (M4). Unscored:
+// it writes no answer row and gates nothing.
+func PostWonderQuestion(
+	ctx context.Context,
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+	question string,
+) error {
+	deviceMac = strings.TrimSpace(deviceMac)
+	if deviceMac == "" {
+		return fmt.Errorf("device mac is empty")
+	}
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return nil
+	}
+
+	payload, err := json.Marshal(map[string]any{"device_mac": deviceMac, "question": question})
+	if err != nil {
+		return err
+	}
+	return postQuizJSON(ctx, cfg, serviceKey, "/quiz/wonder", payload, "wonder question")
+}
+
+// NewWonderQuestionReporter returns the teardown save handed to the bridge. One
+// try, no retry: a lost wonder question costs one warm opening line next time,
+// which is not worth holding a closing session open for.
+func NewWonderQuestionReporter(
+	cfg config.LiveKitServiceManagerAPIConfig,
+	serviceKey string,
+	deviceMac string,
+) func(question string) {
+	return func(question string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := PostWonderQuestion(ctx, cfg, serviceKey, deviceMac, question); err != nil {
+			// The question itself is not logged: it is the child's, and a log
+			// line is a second place it would have to be protected.
+			logger.WarnCF("livekit", "Wonder question not saved", map[string]any{"error": err.Error()})
+			return
+		}
+		logger.InfoCF("livekit", "Wonder question saved", map[string]any{"chars": len(question)})
+	}
 }
 
 // NewQuizAnswerReporter returns the per-session verdict reporter handed to the
@@ -243,17 +429,18 @@ func NewQuizAnswerReporter(
 	serviceKey string,
 	deviceMac string,
 	bank string,
-) func(questionID int64, result string) {
-	return func(questionID int64, result string) {
+) func(questionID int64, result string, attempts []QuizAttempt) {
+	return func(questionID int64, result string, attempts []QuizAttempt) {
 		for attempt := 1; attempt <= 2; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err := PostQuizAnswer(ctx, cfg, serviceKey, deviceMac, questionID, result, bank)
+			err := PostQuizAnswer(ctx, cfg, serviceKey, deviceMac, questionID, result, bank, attempts)
 			cancel()
 			if err == nil {
 				logger.DebugCF("livekit", "Quiz answer reported", map[string]any{
 					"question_id": questionID,
 					"result":      result,
 					"bank":        bank,
+					"attempts":    len(attempts),
 				})
 				return
 			}
@@ -262,6 +449,7 @@ func NewQuizAnswerReporter(
 					"question_id": questionID,
 					"result":      result,
 					"bank":        bank,
+					"attempts":    len(attempts),
 					"error":       err.Error(),
 				})
 				return
@@ -305,6 +493,15 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 	}
 
 	var b strings.Builder
+	// The Wonder Question the child was left with last time (M4). Placed before
+	// the questions because it is the opening beat, not part of the scored run.
+	if wonder := strings.TrimSpace(batch.WonderQuestion); wonder != "" {
+		b.WriteString("## Last Time You Wondered\n")
+		b.WriteString(fmt.Sprintf(
+			"Before the quiz, warmly remind the child of the question you left them with: %q. ", wonder))
+		b.WriteString("Ask if they thought any more about it, listen, and be delighted by whatever they say. ")
+		b.WriteString("There is no right answer and it is NOT scored. One short exchange, then start the quiz.\n\n")
+	}
 	b.WriteString("## Today's Quiz Questions")
 	var scope []string
 	if batch.Level > 0 {

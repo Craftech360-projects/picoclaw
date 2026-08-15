@@ -56,6 +56,61 @@ func TestResolvePersistenceFieldsFromMetadata(t *testing.T) {
 	}
 }
 
+func TestResolvePersistenceFieldsFromCharacterID(t *testing.T) {
+	// What the gateway actually sends: character_id, never agent_id.
+	room := "62f6d2a2_AA11BB22CC33_conversation"
+	metadata := `{"device_mac":"AA11BB22CC33","character":"Quizzy","character_id":"11111111-2222-3333-4444-555555555555"}`
+
+	deviceMAC, agentID := resolvePersistenceFields(room, metadata)
+	if deviceMAC != "aa:11:bb:22:cc:33" {
+		t.Fatalf("deviceMAC = %q, want %q", deviceMAC, "aa:11:bb:22:cc:33")
+	}
+	if agentID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("agentID = %q, want the character_id", agentID)
+	}
+}
+
+func TestResolveAgentIDPrefersAgentIDOverCharacterID(t *testing.T) {
+	// Map iteration is randomised, so this has to be a priority order rather
+	// than one lookup over a merged key set — run it enough to catch a flake.
+	metadata := `{"agent_id":"agent-42","character_id":"character-7"}`
+	for i := 0; i < 50; i++ {
+		if got := resolveAgentID(metadata); got != "agent-42" {
+			t.Fatalf("resolveAgentID() = %q on iteration %d, want agent-42", got, i)
+		}
+	}
+}
+
+func TestResolveAgentIDRejectsNonUUIDCharacterID(t *testing.T) {
+	// The firmware's hello payload carries character_id as a SLUG ("tara",
+	// "masti", "quizzy") — a different namespace that happens to share the key
+	// name with room metadata's ai_agent.id. findFirstString recurses into
+	// nested objects, so a slug reaching us is not hypothetical. Manager's
+	// agent_id column is @db.Uuid with an FK: a slug would fail the insert and
+	// lose the whole transcript, which is worse than the mis-attribution this
+	// resolution exists to fix. Falling back to empty restores the old, safe
+	// behaviour — the Manager fills in the device default.
+	for _, slug := range []string{"tara", "masti", "quizzy", ""} {
+		metadata := `{"device_mac":"AA11BB22CC33","character_id":"` + slug + `"}`
+		if got := resolveAgentID(metadata); got != "" {
+			t.Fatalf("resolveAgentID(character_id=%q) = %q, want empty", slug, got)
+		}
+	}
+}
+
+func TestResolveAgentIDAcceptsUppercaseUUIDCharacterID(t *testing.T) {
+	metadata := `{"character_id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"}`
+	if got := resolveAgentID(metadata); got != "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE" {
+		t.Fatalf("resolveAgentID() = %q, want the uppercase UUID unchanged", got)
+	}
+}
+
+func TestResolveAgentIDEmptyWithoutEitherKey(t *testing.T) {
+	if got := resolveAgentID(`{"device_mac":"AA11BB22CC33"}`); got != "" {
+		t.Fatalf("resolveAgentID() = %q, want empty", got)
+	}
+}
+
 func TestSendUsageSummaryIncludesTotalTokens(t *testing.T) {
 	var payload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

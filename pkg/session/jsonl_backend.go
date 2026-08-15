@@ -89,6 +89,21 @@ func (b *JSONLBackend) LastActivity(key string) (time.Time, bool) {
 	return reporter.LastActivity(context.Background(), key)
 }
 
+// Delete removes the session outright when the underlying store supports it.
+// Stores that cannot delete simply do not, the same way LastActivity degrades:
+// nothing depends on the removal, it only reclaims a file nobody reads.
+func (b *JSONLBackend) Delete(key string) {
+	deleter, ok := b.store.(interface {
+		Delete(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	if err := deleter.Delete(context.Background(), key); err != nil {
+		log.Printf("session: delete: %v", err)
+	}
+}
+
 // Close releases resources held by the underlying store.
 func (b *JSONLBackend) Close() error {
 	return b.store.Close()

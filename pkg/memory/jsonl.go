@@ -469,6 +469,22 @@ func (s *JSONLStore) rewriteJSONL(
 	return fileutil.WriteFileAtomic(s.jsonlPath(sessionKey), buf.Bytes(), 0o644)
 }
 
+// Delete removes a session's files. Not on the Store interface: only a caller
+// retiring a key it has stopped writing to needs it, and the other backends have
+// no such key to retire.
+func (s *JSONLStore) Delete(_ context.Context, sessionKey string) error {
+	l := s.sessionLock(sessionKey)
+	l.Lock()
+	defer l.Unlock()
+
+	for _, path := range []string{s.jsonlPath(sessionKey), s.metaPath(sessionKey)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("memory: delete session: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *JSONLStore) Close() error {
 	return nil
 }

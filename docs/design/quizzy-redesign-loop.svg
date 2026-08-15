@@ -1,0 +1,225 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1360 1250" width="1360" height="1250" font-family="Segoe UI, Inter, system-ui, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fdfcff"/><stop offset="100%" stop-color="#f1eff9"/>
+    </linearGradient>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5b5470"/></marker>
+    <marker id="arG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1e8a5f"/></marker>
+    <marker id="arO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#c2691c"/></marker>
+    <marker id="arB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#3a5aa8"/></marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#2a2440" flood-opacity="0.12"/></filter>
+  </defs>
+  <rect width="1360" height="1250" fill="url(#bg)"/>
+
+  <!-- ═══ HEADER ═══ -->
+  <text x="44" y="54" font-size="30" font-weight="700" fill="#2a2440">Quizzy Redesign — Core Loop</text>
+  <text x="44" y="81" font-size="15" fill="#5b5470">One shared bank · one level a day · ten questions · repeats until the child answers it <tspan font-style="italic">themselves</tspan></text>
+  <text x="44" y="101" font-size="11.5" fill="#8b83a6">final · post-review · 11 blocking findings applied across both system GDDs</text>
+  <rect x="44" y="114" width="1272" height="1" fill="#d9d4e8"/>
+
+  <!-- ═══ DAY START ═══ -->
+  <rect x="44" y="134" width="700" height="52" rx="11" fill="#fff" stroke="#c9c2de" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="64" y="157" font-size="12" font-weight="700" fill="#7a6ea8" letter-spacing="1.1">DAY START</text>
+  <text x="64" y="176" font-size="13.5" fill="#2a2440">Greet · name the streak · name the level and what's left <tspan font-size="11.5" fill="#8b83a6">(P4 — unspoken state doesn't exist)</tspan></text>
+  <path d="M394 186 L394 214" stroke="#5b5470" stroke-width="2" marker-end="url(#ar)" fill="none"/>
+
+  <!-- ═══ THE THREE DOORS ═══ -->
+  <rect x="44" y="218" width="700" height="322" rx="13" fill="#fff" stroke="#a89ccc" stroke-width="2" filter="url(#sh)"/>
+  <text x="66" y="247" font-size="16" font-weight="700" fill="#2a2440">M1 · The Three Doors</text>
+  <text x="66" y="267" font-size="12.5" fill="#6c6486">Difficulty lives in the <tspan font-style="italic">ask</tspan>, not the question — this is what lets one bank serve ages 3–10</text>
+
+  <rect x="66" y="280" width="200" height="92" rx="10" fill="#eef3ff" stroke="#8fa7dd" stroke-width="1.5"/>
+  <text x="82" y="303" font-size="12.5" font-weight="700" fill="#3a5aa8">DOOR 1 · OPEN</text>
+  <text x="82" y="324" font-size="12" fill="#2a2440">“How many legs does</text>
+  <text x="82" y="340" font-size="12" fill="#2a2440">a spider have?”</text>
+  <text x="82" y="362" font-size="11" font-style="italic" fill="#6c6486">always opens here</text>
+
+  <rect x="288" y="280" width="200" height="92" rx="10" fill="#fff6e8" stroke="#dcb478" stroke-width="1.5"/>
+  <text x="304" y="303" font-size="12.5" font-weight="700" fill="#96601a">DOOR 2 · CHOICE</text>
+  <text x="304" y="324" font-size="12" fill="#2a2440">“Six legs, or eight?”</text>
+  <text x="304" y="345" font-size="10.5" fill="#6c6486">authored distractor ·</text>
+  <text x="304" y="361" font-size="10.5" font-weight="600" fill="#3a5aa8">position randomised (F3)</text>
+
+  <rect x="510" y="280" width="212" height="92" rx="10" fill="#eefaf3" stroke="#7cc4a0" stroke-width="1.5"/>
+  <text x="526" y="303" font-size="12.5" font-weight="700" fill="#1e6b48">DOOR 3 · GUIDED</text>
+  <text x="526" y="324" font-size="12" fill="#2a2440">the micro-teach →</text>
+  <text x="526" y="345" font-size="10.5" fill="#3d6b55">absorbs system #16;</text>
+  <text x="526" y="361" font-size="10.5" font-weight="700" fill="#1e6b48">child speaks last, always</text>
+
+  <path d="M266 324 L284 324" stroke="#c2691c" stroke-width="2" marker-end="url(#arO)" fill="none"/>
+  <path d="M488 324 L506 324" stroke="#c2691c" stroke-width="2" marker-end="url(#arO)" fill="none"/>
+
+  <rect x="66" y="384" width="656" height="66" rx="9" fill="#faf8fe" stroke="#d9d4e8"/>
+  <text x="82" y="404" font-size="12" font-weight="700" fill="#544a80">Escalation rules</text>
+  <text x="82" y="422" font-size="11.5" fill="#5b5470"><tspan font-weight="700">1 attempt per Door</tspan>, all three in one sitting · <tspan font-weight="700">1 re-prompt per Door</tspan> on silence, which costs a turn but <tspan font-style="italic">never</tspan> an attempt</text>
+  <text x="82" y="440" font-size="11.5" fill="#5b5470">Repeats reopen at Door 1 — the only route by which a HELPED question can ever become SOLO</text>
+
+  <rect x="66" y="460" width="656" height="62" rx="9" fill="#f4f8ff" stroke="#8fa7dd"/>
+  <text x="82" y="480" font-size="12" font-weight="700" fill="#2a3f78">STT circuit-breaker · <tspan font-family="Consolas, monospace" font-size="11">door = min(3, max(attempt_no, 1 + stt_flag))</tspan></text>
+  <text x="82" y="498" font-size="11.5" fill="#4a5f96">Two garbled reads → the Door is <tspan font-weight="700">floored at 2</tspan>, the binary format that survives bad audio. It never adds.</text>
+  <text x="82" y="514" font-size="11" fill="#8f3436">Review fix: the draft formula <tspan font-style="italic">added</tspan> stt_flag, pushing a misheard child <tspan font-weight="700">past</tspan> the only Door built for them.</text>
+
+  <path d="M394 540 L394 566" stroke="#5b5470" stroke-width="2" marker-end="url(#ar)" fill="none"/>
+
+  <!-- ═══ VERDICTS ═══ -->
+  <rect x="44" y="570" width="700" height="86" rx="13" fill="#fff" stroke="#c9c2de" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="66" y="594" font-size="14.5" font-weight="700" fill="#2a2440">M2 · Verdict — only unaided answers clear</text>
+  <rect x="66" y="604" width="200" height="38" rx="8" fill="#e5f6ec" stroke="#1e8a5f" stroke-width="1.5"/>
+  <text x="82" y="621" font-size="12.5" font-weight="700" fill="#1e6b48">SOLO</text>
+  <text x="82" y="636" font-size="10.5" fill="#3d6b55">Door 1 or 2 → clears ✓</text>
+  <rect x="288" y="604" width="200" height="38" rx="8" fill="#fdf0dc" stroke="#c2691c" stroke-width="1.5"/>
+  <text x="304" y="621" font-size="12.5" font-weight="700" fill="#96601a">HELPED</text>
+  <text x="304" y="636" font-size="10.5" fill="#7d5a25">Door 3 → returns tomorrow</text>
+  <rect x="510" y="604" width="212" height="38" rx="8" fill="#fbe9e9" stroke="#b4494b" stroke-width="1.5"/>
+  <text x="526" y="621" font-size="12.5" font-weight="700" fill="#8f3436">MISSED</text>
+  <text x="526" y="636" font-size="10.5" fill="#7d3c3e">never produced → returns</text>
+
+  <path d="M394 656 L394 682" stroke="#5b5470" stroke-width="2" marker-end="url(#ar)" fill="none"/>
+
+  <!-- ═══ LEVEL END ═══ -->
+  <rect x="44" y="686" width="700" height="212" rx="13" fill="#fff" stroke="#a89ccc" stroke-width="2" filter="url(#sh)"/>
+  <text x="66" y="714" font-size="16" font-weight="700" fill="#2a2440">M2/M3 · Level End — mastery, and the promise it can end</text>
+  <rect x="66" y="726" width="200" height="60" rx="10" fill="#e5f6ec" stroke="#1e8a5f" stroke-width="1.5"/>
+  <text x="82" y="748" font-size="12.5" font-weight="700" fill="#1e6b48">PASSED</text>
+  <text x="82" y="766" font-size="10.5" fill="#3d6b55">all ten SOLO → advance</text>
+  <text x="82" y="780" font-size="10" fill="#3d6b55">beats the cap on day 3</text>
+  <rect x="288" y="726" width="200" height="60" rx="10" fill="#fdf0dc" stroke="#c2691c" stroke-width="1.5"/>
+  <text x="304" y="748" font-size="12.5" font-weight="700" fill="#96601a">OPEN</text>
+  <text x="304" y="766" font-size="10.5" fill="#7d5a25">repeat tomorrow —</text>
+  <text x="304" y="780" font-size="10.5" fill="#7d5a25">uncleared only, at Door 1</text>
+  <rect x="510" y="726" width="212" height="60" rx="10" fill="#eef0fb" stroke="#7a6ea8" stroke-width="1.5"/>
+  <text x="526" y="748" font-size="12.5" font-weight="700" fill="#544a80">PRACTISED <tspan font-size="10">(sticky)</tspan></text>
+  <text x="526" y="766" font-size="10.5" fill="#5b5470">day-3 cap → advance anyway</text>
+  <text x="526" y="780" font-size="10.5" fill="#5b5470">→ spaced pool, never reopens</text>
+
+  <rect x="66" y="798" width="656" height="42" rx="9" fill="#f7f5fd" stroke="#c9c2de"/>
+  <text x="82" y="817" font-size="11.5" font-weight="700" fill="#544a80">P5 · Never trap a child</text>
+  <text x="82" y="832" font-size="11" fill="#5b5470">A shared bank + “repeat until solo” can strand a 3-year-old forever. 3 days is a starting value with a test plan, not a guess.</text>
+
+  <rect x="66" y="848" width="656" height="36" rx="9" fill="#fff4f4" stroke="#d98b8d"/>
+  <text x="82" y="866" font-size="11" fill="#8f3436"><tspan font-weight="700">Safety fix:</tspan> <tspan font-family="Consolas, monospace" font-size="10">days_on_level</tspan> derives from <tspan font-family="Consolas, monospace" font-size="10">quiz_question_answer</tspan>, <tspan font-weight="700">not</tspan> the attempt log —</text>
+  <text x="82" y="879" font-size="11" fill="#8f3436">that log may fail its write, and the cap would silently never fire. Anchored per run so added questions get a fresh 3 days.</text>
+
+  <!-- loop back -->
+  <path d="M44 812 L26 812 L26 172 L40 172" stroke="#1e8a5f" stroke-width="2" marker-end="url(#arG)" fill="none" stroke-dasharray="6 4"/>
+  <text x="34" y="500" font-size="11" fill="#1e8a5f" transform="rotate(-90 34 500)" text-anchor="middle">next day</text>
+
+  <!-- ═══ DOOR 3 MICRO-TEACH ═══ -->
+  <rect x="776" y="134" width="540" height="222" rx="13" fill="#f6fdf9" stroke="#7cc4a0" stroke-width="2" filter="url(#sh)"/>
+  <text x="798" y="161" font-size="15.5" font-weight="700" fill="#1e6b48">Door 3 in detail — the micro-teach</text>
+  <text x="798" y="180" font-size="11.5" fill="#3d6b55">The only place in Quizzy where <tspan font-style="italic">teaching</tspan> happens. Reveal tells; this teaches.</text>
+  <rect x="798" y="192" width="496" height="30" rx="7" fill="#fff" stroke="#7cc4a0"/>
+  <text x="812" y="212" font-size="11.5" fill="#2a2440"><tspan font-weight="700">1 · the reason</tspan> — concrete and physical, from authored <tspan font-family="Consolas, monospace" font-size="10">teach_text</tspan></text>
+  <rect x="798" y="228" width="496" height="30" rx="7" fill="#fff" stroke="#7cc4a0"/>
+  <text x="812" y="248" font-size="11.5" fill="#2a2440"><tspan font-weight="700">2 · the bridge</tspan> — a partial statement the child can finish</text>
+  <rect x="798" y="264" width="496" height="30" rx="7" fill="#fff" stroke="#7cc4a0"/>
+  <text x="812" y="284" font-size="11.5" fill="#2a2440"><tspan font-weight="700">3 · the handback</tspan> — the question, reopened. <tspan font-weight="700">Quizzy never says the answer.</tspan></text>
+  <text x="798" y="314" font-size="11" font-style="italic" fill="#1e6b48">“Four legs on each side, so it can walk right across a web — so how many altogether?”</text>
+  <text x="798" y="335" font-size="11" fill="#5b5470"><tspan font-weight="700">12–18 words</tspan> for parts 1+2 — longer isn't heard by a 6-year-old, it's waited through.</text>
+  <text x="798" y="350" font-size="11" fill="#8f3436">Authored, never model-generated. A wrong explanation is worse than none — they remember it.</text>
+
+  <!-- ═══ EXCHANGE BUDGET ═══ -->
+  <rect x="776" y="370" width="540" height="106" rx="13" fill="#fff" stroke="#c9c2de" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="798" y="396" font-size="14.5" font-weight="700" fill="#2a2440">Turn budget — the cost driver</text>
+  <text x="798" y="417" font-size="11.5" fill="#5b5470"><tspan font-family="Consolas, monospace" font-size="10.5">exchanges = Σ over doors reached (1 + reprompt_used)</tspan></text>
+  <text x="798" y="437" font-size="11.5" fill="#2a2440">Worst case <tspan font-weight="700">6 per question · 60 per session</tspan>. Realistic 12–18. p90 target: under 25.</text>
+  <text x="798" y="456" font-size="11" fill="#8f3436">Review fix: the draft claimed 4 and 40 — it counted one re-prompt per <tspan font-style="italic">question</tspan></text>
+  <text x="798" y="469" font-size="11" fill="#8f3436">where three edge cases each grant one per <tspan font-style="italic">Door</tspan>. The ceiling was understated by 50%.</text>
+
+  <!-- ═══ DATA MODEL ═══ -->
+  <rect x="776" y="490" width="540" height="238" rx="13" fill="#fff" stroke="#c9c2de" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="798" y="516" font-size="14.5" font-weight="700" fill="#2a2440">What the database records</text>
+  <g font-size="11">
+    <text x="798" y="538" fill="#1e8a5f">✓</text><text x="816" y="538" fill="#2a2440"><tspan font-weight="700">progress</tspan> — level, cleared, day gate. Derived, never stored (ADR-0005)</text>
+    <text x="798" y="557" fill="#c2691c">~</text><text x="816" y="557" fill="#2a2440"><tspan font-weight="700">tries</tspan> — counted across days already; <tspan font-style="italic">within</tspan> a question, not yet</text>
+    <text x="798" y="576" fill="#8f3436">✗</text><text x="816" y="576" fill="#2a2440">what the child <tspan font-weight="700">said</tspan> · the <tspan font-weight="700">Door</tspan> · <tspan font-weight="700">STT confidence</tspan> — none exist</text>
+  </g>
+  <rect x="798" y="588" width="240" height="46" rx="8" fill="#fff8f8" stroke="#b4494b"/>
+  <text x="812" y="606" font-size="11" font-weight="700" fill="#8f3436">+ quiz_question_attempt</text>
+  <text x="812" y="621" font-size="9.5" fill="#5b5470">door · said_raw · verdict · confidence</text>
+  <rect x="1054" y="588" width="240" height="46" rx="8" fill="#fff8f8" stroke="#b4494b"/>
+  <text x="1068" y="606" font-size="11" font-weight="700" fill="#8f3436">+ kid_wonder_question</text>
+  <text x="1068" y="621" font-size="9.5" fill="#5b5470">the only other new table</text>
+  <text x="798" y="652" font-size="10.5" font-style="italic" fill="#8b83a6">Observation logs only — quiz_question_answer stays the source of truth.</text>
+  <rect x="798" y="662" width="496" height="52" rx="8" fill="#f7f5fd" stroke="#c9c2de"/>
+  <text x="812" y="680" font-size="11" font-weight="700" fill="#544a80">Reward state never lives in memory/state/</text>
+  <text x="812" y="695" font-size="10.5" fill="#5b5470">The 48h prune would erase the child's named sound. Streak derives from the</text>
+  <text x="812" y="708" font-size="10.5" fill="#5b5470">answer log <tspan font-weight="700">by kid_id</tspan> — no migration, child-scoped for free (ADR-0008).</text>
+
+  <!-- ═══ REWARD ═══ -->
+  <rect x="776" y="742" width="540" height="156" rx="13" fill="#fff" stroke="#7cc4a0" stroke-width="2" filter="url(#sh)"/>
+  <text x="798" y="768" font-size="15.5" font-weight="700" fill="#2a2440">The day always ends with a reward</text>
+  <text x="798" y="786" font-size="11.5" fill="#6c6486">passed or not — failure costs progress, never dignity</text>
+  <rect x="798" y="796" width="496" height="46" rx="9" fill="#eefaf3" stroke="#1e8a5f" stroke-width="1.5"/>
+  <text x="812" y="815" font-size="13" font-weight="700" fill="#1e6b48">M4 · The Wonder Question ★</text>
+  <text x="812" y="832" font-size="10.5" fill="#3d6b55">The child asks <tspan font-style="italic">Quizzy</tspan> anything. CD3+CD4 — and it is also the ad. Ship it alone, first.</text>
+  <rect x="798" y="848" width="240" height="40" rx="8" fill="#f7f5fd" stroke="#c9c2de"/>
+  <text x="812" y="865" font-size="11.5" font-weight="700" fill="#544a80">M6 · Reward Beat</text>
+  <text x="812" y="880" font-size="10" fill="#5b5470">a sound the child <tspan font-weight="700">names</tspan></text>
+  <rect x="1054" y="848" width="240" height="40" rx="8" fill="#f7f5fd" stroke="#c9c2de"/>
+  <text x="1068" y="865" font-size="11.5" font-weight="700" fill="#544a80">M5 · Spark Streak</text>
+  <text x="1068" y="880" font-size="10" fill="#5b5470">1 mercy day per 7, derived</text>
+
+  <!-- ═══ CROSS-CHARACTER ═══ -->
+  <rect x="44" y="912" width="700" height="118" rx="13" fill="#fff" stroke="#c9c2de" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="66" y="937" font-size="14.5" font-weight="700" fill="#2a2440">Who else this touches</text>
+  <rect x="66" y="948" width="205" height="42" rx="8" fill="#e5f6ec" stroke="#1e8a5f"/>
+  <text x="82" y="966" font-size="12" font-weight="700" fill="#1e6b48">✓ Cheeko — safe</text>
+  <text x="82" y="981" font-size="10" fill="#3d6b55">no placeholder → fetch cancelled</text>
+  <rect x="283" y="948" width="205" height="42" rx="8" fill="#e5f6ec" stroke="#1e8a5f"/>
+  <text x="299" y="966" font-size="12" font-weight="700" fill="#1e6b48">✓ Nani — safe</text>
+  <text x="299" y="981" font-size="10" fill="#3d6b55">reads only USER.md</text>
+  <rect x="500" y="948" width="222" height="42" rx="8" fill="#fdf0dc" stroke="#c2691c"/>
+  <text x="516" y="966" font-size="12" font-weight="700" fill="#96601a">⚠ Riddler — inherits</text>
+  <text x="516" y="981" font-size="10" fill="#7d5a25">add clearOnReveal to keep flow</text>
+  <text x="66" y="1010" font-size="11" fill="#8f3436"><tspan font-weight="700">4th consumer:</tspan> the parent app's published API types result as correct|wrong|revealed — renaming verdicts is an <tspan font-weight="700">external break</tspan>.</text>
+  <text x="66" y="1024" font-size="11" fill="#5b5470"><tspan font-weight="700">Watch:</tspan> kid_learning_progress.topic is “&lt;band&gt; level n” — collapsing the band orphans every old achievement row.</text>
+
+  <!-- ═══ CORRECTION ═══ -->
+  <rect x="776" y="912" width="540" height="118" rx="13" fill="#fff4f4" stroke="#d98b8d" stroke-width="2" filter="url(#sh)"/>
+  <text x="798" y="937" font-size="14.5" font-weight="700" fill="#8f3436">This was never a bug</text>
+  <text x="798" y="958" font-size="11.5" fill="#2a2440">Ticket 006 line 15: <tspan font-style="italic">“Two wrong tries → reveal the answer warmly,</tspan></text>
+  <text x="798" y="974" font-size="11.5" fill="#2a2440"><tspan font-style="italic">emit result=revealed (nothing blocks progression).”</tspan></text>
+  <text x="798" y="995" font-size="11.5" fill="#2a2440">The original design chose <tspan font-weight="700">flow over mastery, on purpose</tspan>.</text>
+  <text x="798" y="1016" font-size="11.5" fill="#8f3436">Requirement 4 reverses it — a design change needing <tspan font-weight="700">ADR-0009</tspan>, not a fix.</text>
+
+  <!-- ═══ BUILD ORDER ═══ -->
+  <rect x="44" y="1046" width="1272" height="104" rx="13" fill="#2a2440"/>
+  <text x="68" y="1073" font-size="14.5" font-weight="700" fill="#fff">Build order — measure before you enforce</text>
+  <g font-size="11">
+    <rect x="68" y="1086" width="192" height="44" rx="8" fill="#3d3560"/>
+    <text x="82" y="1105" fill="#fff" font-weight="700">1 · Read the prompt</text>
+    <text x="82" y="1121" fill="#b9b2d4">agent_code = 'quiz_master'</text>
+    <rect x="270" y="1086" width="192" height="44" rx="8" fill="#3d3560"/>
+    <text x="284" y="1105" fill="#fff" font-weight="700">2 · Two code checks</text>
+    <text x="284" y="1121" fill="#b9b2d4">per-turn ask_mode? guard?</text>
+    <rect x="472" y="1086" width="192" height="44" rx="8" fill="#3d3560"/>
+    <text x="486" y="1105" fill="#fff" font-weight="700">3 · Count the damage</text>
+    <text x="486" y="1121" fill="#b9b2d4">revealed rows + pullback</text>
+    <rect x="674" y="1086" width="192" height="44" rx="8" fill="#1e6b48"/>
+    <text x="688" y="1105" fill="#fff" font-weight="700">4 · Attempt log</text>
+    <text x="688" y="1121" fill="#a9dcc3">log first, then enforce</text>
+    <rect x="876" y="1086" width="192" height="44" rx="8" fill="#3d3560"/>
+    <text x="890" y="1105" fill="#fff" font-weight="700">5 · Mastery + STT L1</text>
+    <text x="890" y="1121" fill="#b9b2d4">ship them together</text>
+    <rect x="1078" y="1086" width="214" height="44" rx="8" fill="#3d3560"/>
+    <text x="1092" y="1105" fill="#fff" font-weight="700">6 · Content + playtest</text>
+    <text x="1092" y="1121" fill="#b9b2d4">teach_text + distractor, ×2 banks</text>
+  </g>
+
+  <!-- ═══ FOOTER ═══ -->
+  <rect x="44" y="1166" width="700" height="44" rx="9" fill="#f7f5fd" stroke="#c9c2de"/>
+  <text x="66" y="1185" font-size="11" font-weight="700" fill="#544a80">The governing constraint</text>
+  <text x="66" y="1201" font-size="10.5" fill="#5b5470">Doors, verdicts, mastery, streak and the day gate are computed <tspan font-weight="700">server-side</tspan>. ADR-0005: decide it in code, hand the model a line.</text>
+  <rect x="776" y="1166" width="540" height="44" rx="9" fill="#f7f5fd" stroke="#c9c2de"/>
+  <text x="798" y="1185" font-size="11" font-weight="700" fill="#544a80">Why this works — Yu-kai Chou, top-10 kids' learning games</text>
+  <text x="798" y="1201" font-size="10.5" fill="#5b5470">Winners run on CD3+CD4. Old Quizzy: one verb, one reward, pure CD2.</text>
+
+  <g font-size="10.5" fill="#5b5470">
+    <rect x="44" y="1222" width="244" height="24" rx="6" fill="#fff" stroke="#c9c2de"/><text x="56" y="1238">P1 · Figuring out beats being told</text>
+    <rect x="298" y="1222" width="244" height="24" rx="6" fill="#fff" stroke="#c9c2de"/><text x="310" y="1238">P2 · A person, not a score</text>
+    <rect x="552" y="1222" width="244" height="24" rx="6" fill="#fff" stroke="#c9c2de"/><text x="564" y="1238">P3 · Difficulty lives in the ask</text>
+    <rect x="806" y="1222" width="244" height="24" rx="6" fill="#fff" stroke="#c9c2de"/><text x="818" y="1238">P4 · No screen, no unspoken state</text>
+    <rect x="1060" y="1222" width="256" height="24" rx="6" fill="#fff" stroke="#c9c2de"/><text x="1072" y="1238">P5 · Never trap a child</text>
+  </g>
+</svg>

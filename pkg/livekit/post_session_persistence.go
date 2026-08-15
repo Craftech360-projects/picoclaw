@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 const defaultManagerAPIURL = "http://localhost:8002/toy"
 
 var mac12HexPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// ai_agent.id is a Postgres uuid; see resolveAgentID for why this is enforced.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 	if rs == nil || bridge == nil {
@@ -525,13 +529,91 @@ func resolveDeviceMAC(roomName, metadata string) string {
 	return extractMACFromRoomName(roomName)
 }
 
-func resolveAgentID(metadata string) string {
+// ResolveKidID returns the child this device is paired to, or "" when the
+// gateway sent none. The manager sends the PAIRING, never the child-profile
+// fallback: an unpaired device's profile resolves to the owner's most recently
+// created child, which is a fine name to greet but the wrong owner for state.
+//
+// The result becomes a directory component, so it is reduced to digits. A kid id
+// is a bigint; anything else is metadata we did not write and is discarded
+// rather than sanitised into something plausible.
+func ResolveKidID(metadata string) string {
 	md := parseMetadataMap(metadata)
 	keys := map[string]struct{}{
-		"agent_id": {},
-		"agentid":  {},
+		"kid_id": {},
+		"kidid":  {},
 	}
-	return strings.TrimSpace(findFirstString(md, keys))
+	raw := findFirstScalar(md, keys)
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return raw
+}
+
+// findFirstScalar is findFirstString that also accepts JSON numbers, because an
+// id is as likely to arrive unquoted as quoted and a silent miss here would send
+// every session back to the MAC-named workspace without any error.
+func findFirstScalar(node any, keys map[string]struct{}) string {
+	switch v := node.(type) {
+	case map[string]any:
+		for key, value := range v {
+			lowerKey := strings.ToLower(strings.TrimSpace(key))
+			if _, ok := keys[lowerKey]; ok {
+				switch typed := value.(type) {
+				case string:
+					if s := strings.TrimSpace(typed); s != "" {
+						return s
+					}
+				case float64:
+					if typed == math.Trunc(typed) && typed > 0 {
+						return strconv.FormatInt(int64(typed), 10)
+					}
+				}
+			}
+			if nested := findFirstScalar(value, keys); nested != "" {
+				return nested
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if nested := findFirstScalar(item, keys); nested != "" {
+				return nested
+			}
+		}
+	}
+	return ""
+}
+
+// resolveAgentID returns the id of the character that is speaking this session.
+//
+// The gateway spells it character_id and has never sent agent_id — both name the
+// same ai_agent.id. Without the second spelling the worker sent no id at all and
+// the Manager filled the hole with ai_device.agent_id, the device's DEFAULT
+// character, so every character's chat history was filed under that one.
+//
+// The two spellings are tried in order rather than merged into one key set: map
+// iteration is randomised, so a merged lookup would pick a winner at random on
+// the metadata that carries both.
+//
+// character_id must look like a UUID before we believe it. The firmware's hello
+// payload uses the SAME key name for a character SLUG ("tara", "masti"), and
+// findFirstString recurses into nested objects, so the two namespaces can meet.
+// The Manager's agent_id column is @db.Uuid with a foreign key: a slug would
+// fail the insert and lose the entire transcript — worse than the
+// mis-attribution this resolution exists to fix. agent_id keeps its historical
+// permissive behaviour; only the newly-trusted key is checked.
+func resolveAgentID(metadata string) string {
+	md := parseMetadataMap(metadata)
+	if id := strings.TrimSpace(findFirstString(md, map[string]struct{}{"agent_id": {}, "agentid": {}})); id != "" {
+		return id
+	}
+	id := strings.TrimSpace(findFirstString(md, map[string]struct{}{"character_id": {}, "characterid": {}}))
+	if uuidPattern.MatchString(id) {
+		return id
+	}
+	return ""
 }
 
 func parseMetadataMap(metadata string) map[string]any {

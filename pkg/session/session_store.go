@@ -48,3 +48,10 @@ type RealtimeChatPersistenceMarker interface {
 type LastActivityReporter interface {
 	LastActivity(key string) (time.Time, bool)
 }
+
+// SessionDeleter is implemented by stores that can retire a session key
+// outright. Used to drop a transcript whose key scheme changed, so the orphan
+// stops riding along in every workspace sync.
+type SessionDeleter interface {
+	Delete(key string)
+}

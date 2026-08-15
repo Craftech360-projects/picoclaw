@@ -446,6 +446,20 @@ func main() {
 		workspaceIdentity := lifecycle.WorkspaceIdentity
 		preserveWorkspace := lifecycle.PreserveWorkspace
 
+		// An unpaired toy has no child to attribute anything to, so this session's
+		// chat history lands with kid_id NULL and its workspace is named after the
+		// device instead of the child. That is legitimate — a toy out of the box has
+		// no child yet — but it is indistinguishable from a bug when reading the
+		// database later, so say it once per session rather than leaving the null to
+		// be explained from first principles.
+		if strings.TrimSpace(lifecycle.KidID) == "" {
+			logger.WarnCF("livekit", "Device is not paired to a child; history will carry no kid_id", map[string]any{
+				"device_mac": deviceMAC,
+				"workspace":  workspaceIdentity,
+				"room":       roomName,
+			})
+		}
+
 		agentCfg := &config.AgentConfig{
 			ID:     workspaceIdentity,
 			Name:   "LiveKit-" + workspaceIdentity,
@@ -537,7 +551,26 @@ func main() {
 					return nil
 				}
 				managerLockLease = lease
+				// The Manager has just told us who owns this device's stored
+				// workspace. Renaming the directory to match has to happen HERE:
+				// after the acquire (which needs only the MAC) and before the
+				// per-device lock below, which is the first thing to touch the
+				// path. Room metadata only got us this far.
 				if lease != nil {
+					if identity := workspaceIdentityFromOwnerKey(lease.ownerKey); identity != "" && identity != workspaceIdentity {
+						logger.InfoCF("livekit", "Workspace identity resolved from manager owner key", map[string]any{
+							"room":               roomName,
+							"device_mac":         deviceMAC,
+							"owner_key":          lease.ownerKey,
+							"previous_identity":  workspaceIdentity,
+							"workspace_identity": identity,
+							"previous_workspace": workspace,
+						})
+						workspaceIdentity = identity
+						agentCfg.ID = identity
+						agentCfg.Name = "LiveKit-" + identity
+						workspace = filepath.Join(baseWorkspace, "..", "workspace-"+routing.NormalizeAgentID(identity))
+					}
 					logger.InfoCF("livekit", "Acquired manager distributed workspace lock", map[string]any{
 						"room":             roomName,
 						"device_mac":       deviceMAC,
@@ -637,10 +670,21 @@ func main() {
 				deviceMAC, characterID, characterName,
 			)
 			if err != nil {
-				logger.DebugCF("livekit", "Speculative quiz batch fetch did not complete", map[string]any{
-					"device_mac": deviceMAC,
-					"error":      err.Error(),
-				})
+				// A cancel here is this session deciding it has no scored quiz and
+				// aborting the speculative GET (see quizFetchCancel below) — the
+				// optimisation working, not a failure. Logging both the same way sent
+				// someone reading a Nani session hunting for a broken quiz endpoint.
+				if errors.Is(err, context.Canceled) {
+					logger.DebugCF("livekit", "Speculative quiz batch fetch cancelled; this character runs no scored quiz", map[string]any{
+						"device_mac": deviceMAC,
+						"character":  characterName,
+					})
+				} else {
+					logger.DebugCF("livekit", "Speculative quiz batch fetch did not complete", map[string]any{
+						"device_mac": deviceMAC,
+						"error":      err.Error(),
+					})
+				}
 				quizFetchCh <- nil
 				return
 			}
@@ -1026,6 +1070,21 @@ func main() {
 				// verdicts belong to. Empty when there is no batch, which the
 				// API reads as the quiz default.
 				quizBatchBank(quizBatchForSession),
+			),
+			// Same bank, same device: this only ever fires at teardown, for a
+			// question the child was still working on.
+			QuizAttemptReporter: livekit.NewQuizAttemptReporter(
+				lkCfg.ManagerAPI,
+				managerAPIServiceKey(),
+				deviceMAC,
+				quizBatchBank(quizBatchForSession),
+			),
+			// Unscored and bank-agnostic: the Wonder Question belongs to the
+			// child, not to a question bank.
+			WonderQuestionReporter: livekit.NewWonderQuestionReporter(
+				lkCfg.ManagerAPI,
+				managerAPIServiceKey(),
+				deviceMAC,
 			),
 			AgentInstance:     agentInstance,
 			PreserveWorkspace: preserveWorkspace,
@@ -1795,6 +1854,13 @@ func (e *livekitCronExecutor) ProcessDirectWithChannel(ctx context.Context, cont
 
 func livekitCronSessionKey(deviceMAC, agentID, roomName string) string {
 	if mac := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(deviceMAC), ":", "")); mac != "" {
+		// Same (child × character) rule as sessionKeyForParticipant, or a
+		// scheduled task writes to a different file than the voice session it
+		// belongs to. NormalizeAgentID leaves an ai_agent UUID untouched, which
+		// is what the gateway's character_id always is.
+		if aid := strings.TrimSpace(agentID); aid != "" {
+			return "livekit:device:" + mac + ":agent:" + routing.NormalizeAgentID(aid)
+		}
 		return "livekit:device:" + mac
 	}
 	if aid := strings.TrimSpace(agentID); aid != "" {

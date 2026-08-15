@@ -152,6 +152,44 @@ func TestManagerAPIBackendHydratesFullHistoryFromSessionMessages(t *testing.T) {
 	}
 }
 
+// Without the character on the URL the manager falls back to the device's
+// default agent, so a Quizzy session hydrates from Cheeko's messages.
+func TestManagerAPIBackendBootstrapNamesTheRunningCharacter(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		agentID string
+		want    string
+	}{
+		{name: "character known", agentID: "quizzy-agent-id", want: "quizzy-agent-id"},
+		{name: "no character", agentID: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAgentID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/bootstrap") {
+					gotAgentID = r.URL.Query().Get("agentId")
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{}})
+			}))
+			defer server.Close()
+
+			store := session.NewManagerAPIBackend(session.ManagerAPIBackendConfig{
+				BaseURL:    server.URL,
+				ServiceKey: "service-secret",
+				MACAddress: "AA:BB:CC:DD:EE:FF",
+				AgentID:    tc.agentID,
+				SessionID:  "room-1",
+			})
+
+			store.GetHistory("livekit:device:AABBCCDDEEFF")
+
+			if gotAgentID != tc.want {
+				t.Fatalf("bootstrap agentId = %q, want %q", gotAgentID, tc.want)
+			}
+		})
+	}
+}
+
 func TestManagerAPIBackendReportsUserAndAssistantMessages(t *testing.T) {
 	var reportPayloads []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

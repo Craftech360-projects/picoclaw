@@ -9,9 +9,11 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -170,12 +172,26 @@ type AgentBridge struct {
 	// quizBatch is this session's curated question set (nil = no scored quiz);
 	// quizAnswerReporter logs one verdict against the bank.
 	quizBatch          *QuizBatch
-	quizAnswerReporter func(questionID int64, result string)
+	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
+	// quizAttemptReporter flushes tries for a question that never resolved.
+	quizAttemptReporter func(questionID int64, attempts []QuizAttempt)
+	// wonderQuestionReporter saves the open question the session ended on (M4),
+	// and pendingWonderQuestion is the latest one the model emitted.
+	wonderQuestionReporter func(question string)
+	pendingWonderQuestion  string
 	// reportedQuizIDs de-duplicates verdicts within the session: the model
 	// re-emits its cumulative MEMO every turn. Guarded because proactive and
 	// async-tool turns can land concurrently with a conversation turn.
 	reportedQuizMu  sync.Mutex
 	reportedQuizIDs map[int64]bool
+	// The attempt log (ADR-0009) is assembled here rather than asked of the
+	// model: the prompt deliberately stays silent on turns that did not finish
+	// judging, but `awaiting=` staying on one id across turns already says the
+	// child tried and missed. pendingQuizID is the question those attempts
+	// belong to; lastUserText is the utterance that produced the current reply.
+	pendingQuizID       int64
+	pendingQuizAttempts []QuizAttempt
+	lastUserText        string
 
 	closeMu sync.Mutex
 	closed  bool
@@ -233,8 +249,14 @@ type AgentBridgeConfig struct {
 	// QuizBatch is the curated question set pulled for this session; nil means
 	// the bank was unreachable or unused, and no scored quiz runs.
 	QuizBatch *QuizBatch
-	// QuizAnswerReporter logs one scored verdict against the bank.
-	QuizAnswerReporter func(questionID int64, result string)
+	// QuizAnswerReporter logs one scored verdict against the bank, with the
+	// tries that led to it (empty when the child got it first time).
+	QuizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
+	// QuizAttemptReporter logs tries for a question the session ended on, which
+	// produce no verdict and would otherwise leave no trace at all.
+	QuizAttemptReporter func(questionID int64, attempts []QuizAttempt)
+	// WonderQuestionReporter saves the Wonder Question (M4) at teardown.
+	WonderQuestionReporter func(question string)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -290,6 +312,8 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		greetingPrompt:            strings.TrimSpace(cfg.GreetingPrompt),
 		quizBatch:                 cfg.QuizBatch,
 		quizAnswerReporter:        cfg.QuizAnswerReporter,
+		quizAttemptReporter:       cfg.QuizAttemptReporter,
+		wonderQuestionReporter:    cfg.WonderQuestionReporter,
 		reportedQuizIDs:           map[int64]bool{},
 	}
 	policy := NormalizeSessionLanguagePolicy(cfg.SessionLanguageName, cfg.SessionLanguageCode)
@@ -308,6 +332,13 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 // Close gracefully releases the session memory store and conditionally cleans
 // the active workspace.
 func (ab *AgentBridge) Close() {
+	// Before anything is torn down: a question the child was still trying when
+	// the session ended produces no verdict, so its tries were held here and
+	// lost. That is the child who tried six times and gave up — the one most
+	// worth seeing, and until this the only one leaving no trace at all.
+	ab.flushPendingQuizAttempts()
+	ab.flushWonderQuestion()
+
 	ab.closeMu.Lock()
 	if ab.closed {
 		ab.closeMu.Unlock()
@@ -673,6 +704,11 @@ func (ab *AgentBridge) ChatStream(ctx context.Context, sessionKey string, text s
 	messages := ab.buildMessages(history, summary, text, sessionKey)
 	if strings.TrimSpace(text) != "" {
 		ab.recordTranscript(chatTypeUser, text)
+		// Held for the attempt log: when this turn's reply shows the same
+		// question still awaiting, this is what the child said and missed with.
+		ab.reportedQuizMu.Lock()
+		ab.lastUserText = text
+		ab.reportedQuizMu.Unlock()
 	}
 	if ab.sessions != nil && strings.TrimSpace(text) != "" {
 		ab.sessions.AddMessage(sessionKey, "user", text)
@@ -918,23 +954,233 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 // its own goroutine (the reporter retries and blocks) so the voice turn never
 // waits on the Manager API.
 func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
-	if ab.quizAnswerReporter == nil {
-		return
-	}
 	memo := extractQuizMemoLine(assistantContent)
 	if memo == "" {
 		return
 	}
+	// The Wonder Question rides the MEMO like everything else. Captured on every
+	// turn that carries one, so a session ending abruptly still keeps the last.
+	//
+	// Read BEFORE the verdict guard below: it is unscored and has nothing to do
+	// with the answer log, so gating it on the verdict reporter existing would
+	// couple two unrelated things and lose the question whenever the quiz path
+	// happened to be inactive.
+	if wonder := strings.TrimSpace(memoField(memo, "wonder")); wonder != "" {
+		// Not the one this session opened by recalling.
+		//
+		// A new session restores the previous session's completed MEMO from
+		// MEMORY.md and restates it — `wonder=` and all — usually on the very
+		// first turn. Taken at face value that reads as "the child was left with
+		// a new question", and teardown saved it again: on dev 2026-08-15 the
+		// same question was stored twice, minutes apart, from two sessions where
+		// only one child ever wondered anything.
+		//
+		// This is the same disease the day gate had, and the same cure. The gate
+		// kept reading "the Daily Ten is complete" out of a restored transcript
+		// until it was decided from the log instead of from the model. Here the
+		// server told us what the child was already left with, so a `wonder=`
+		// matching it is a quotation, not a new question.
+		if !sameWonderQuestion(wonder, ab.recalledWonderQuestion()) {
+			ab.reportedQuizMu.Lock()
+			ab.pendingWonderQuestion = wonder
+			ab.reportedQuizMu.Unlock()
+		}
+	}
+
+	if ab.quizAnswerReporter == nil {
+		return
+	}
+
 	ab.reportedQuizMu.Lock()
 	questionID, result, ok := parseQuizVerdict(memo, ab.quizBatch, ab.reportedQuizIDs)
 	if ok {
 		ab.reportedQuizIDs[questionID] = true
 	}
+	doorUsed := ab.doorForPendingLocked(questionID)
+	attempts := ab.trackQuizAttemptLocked(memo, questionID, result, ok)
 	ab.reportedQuizMu.Unlock()
 	if !ok {
 		return
 	}
-	go ab.quizAnswerReporter(questionID, result)
+	// The mastery bar (ADR-0009): Door 1 or 2 unaided clears, Door 3 does not.
+	// A child who was walked to the answer at Door 3 was given it, so `revealed`
+	// is the honest verdict — and after ticket 008 `revealed` no longer clears.
+	// No schema change needed; the vocabulary already carries the distinction.
+	if result == "correct" && doorUsed == doorGuided {
+		logger.InfoCF("livekit", "Door 3 success reported as revealed; guided answers do not clear", map[string]any{
+			"question_id": questionID,
+		})
+		result = "revealed"
+	}
+	go ab.quizAnswerReporter(questionID, result, attempts)
+}
+
+// flushPendingQuizAttempts sends the tries for a question that never resolved.
+// Safe to call more than once: the buffer is cleared under the lock, so a second
+// call finds nothing and does nothing.
+func (ab *AgentBridge) flushPendingQuizAttempts() {
+	if ab == nil || ab.quizAttemptReporter == nil {
+		return
+	}
+	ab.reportedQuizMu.Lock()
+	questionID := ab.pendingQuizID
+	attempts := ab.pendingQuizAttempts
+	ab.pendingQuizAttempts = nil
+	ab.pendingQuizID = 0
+	ab.reportedQuizMu.Unlock()
+
+	if questionID == 0 || len(attempts) == 0 {
+		return
+	}
+	// Synchronous on purpose. A goroutine here would race teardown and usually
+	// lose, which is how the rows went missing in the first place.
+	ab.quizAttemptReporter(questionID, attempts)
+}
+
+// recalledWonderQuestion is the question the server said this child was already
+// left with — the one rendered as this session's opening beat, if any.
+func (ab *AgentBridge) recalledWonderQuestion() string {
+	if ab == nil || ab.quizBatch == nil {
+		return ""
+	}
+	return ab.quizBatch.WonderQuestion
+}
+
+// sameWonderQuestion asks whether the model handed back the sentence it was
+// given, ignoring casing, surrounding quotes and trailing punctuation — a model
+// restating a remembered question rarely reproduces it byte for byte.
+//
+// Deliberately not a similarity measure. "Is this the same sentence" is the
+// question being asked, and anything fuzzier would start discarding a child's
+// genuinely new curiosity, which is the one thing this mechanic exists to keep.
+func sameWonderQuestion(a, b string) bool {
+	normalise := func(s string) string {
+		var out strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if unicode.IsLetter(r) || unicode.IsNumber(r) {
+				out.WriteRune(r)
+			} else if unicode.IsSpace(r) {
+				out.WriteRune(' ')
+			}
+		}
+		return strings.Join(strings.Fields(out.String()), " ")
+	}
+	na, nb := normalise(a), normalise(b)
+	return na != "" && na == nb
+}
+
+// flushWonderQuestion saves the open question the session ended on (M4). Like
+// the attempt flush: synchronous, and idempotent because the buffer is cleared
+// under the lock.
+func (ab *AgentBridge) flushWonderQuestion() {
+	if ab == nil || ab.wonderQuestionReporter == nil {
+		return
+	}
+	ab.reportedQuizMu.Lock()
+	question := ab.pendingWonderQuestion
+	ab.pendingWonderQuestion = ""
+	ab.reportedQuizMu.Unlock()
+
+	if strings.TrimSpace(question) == "" {
+		return
+	}
+	ab.wonderQuestionReporter(question)
+}
+
+// doorForPendingLocked is the Door the pending question was on before this
+// reply's verdict was folded in. Caller holds reportedQuizMu.
+func (ab *AgentBridge) doorForPendingLocked(questionID int64) int {
+	if ab.quizBatch == nil || ab.pendingQuizID != questionID {
+		return doorOpen
+	}
+	for i := range ab.quizBatch.Questions {
+		if ab.quizBatch.Questions[i].ID == questionID {
+			return ab.quizBatch.Questions[i].DoorFor(len(ab.pendingQuizAttempts))
+		}
+	}
+	return doorOpen
+}
+
+// memoFlagIsYes reports whether a MEMO carries a boolean-ish field set true.
+// Tolerant of what a 31B model actually emits: yes/true/1, any casing.
+func memoFlagIsYes(memo, field string) bool {
+	switch strings.ToLower(strings.TrimSpace(memoField(memo, field))) {
+	case "yes", "true", "1":
+		return true
+	}
+	return false
+}
+
+const maxTrackedAttempts = 10
+
+// trackQuizAttemptLocked folds one finished reply into the pending question's
+// attempt list and returns the completed list when that question was just
+// judged. Caller holds reportedQuizMu.
+//
+// The signal is `awaiting=`: it names the question being asked NOW. If it has
+// not changed since the previous reply, the child answered in between and the
+// question survived, which is exactly a failed try. Nothing is asked of the
+// model that it does not already emit.
+func (ab *AgentBridge) trackQuizAttemptLocked(memo string, questionID int64, result string, judged bool) []QuizAttempt {
+	said := strings.TrimSpace(ab.lastUserText)
+	ab.lastUserText = ""
+
+	awaiting, _ := strconv.ParseInt(memoField(memo, "awaiting"), 10, 64)
+
+	if judged {
+		// This utterance is what settled the question, whatever the verdict.
+		attempts := ab.pendingQuizAttempts
+		if ab.pendingQuizID != questionID {
+			// The judged question is not the one being tracked — a corrected id,
+			// or a verdict arriving for a question whose earlier tries were never
+			// seen. Report the final try alone rather than another question's.
+			attempts = nil
+		}
+		if len(attempts) < maxTrackedAttempts {
+			attempts = append(attempts, QuizAttempt{Verdict: result, Transcript: said})
+		}
+		// Whatever is being asked now starts with a clean list.
+		ab.pendingQuizID = awaiting
+		ab.pendingQuizAttempts = nil
+		return attempts
+	}
+
+	if awaiting == 0 {
+		return nil
+	}
+	if ab.pendingQuizID != awaiting {
+		// First time this question is asked: no try has happened yet.
+		ab.pendingQuizID = awaiting
+		ab.pendingQuizAttempts = nil
+		return nil
+	}
+	// Same question still awaiting, and the child said something: a missed try.
+	// Silence is not an attempt — the prompt says so, and a row for it would
+	// make a quiet child look like a struggling one.
+	//
+	// Neither is asking for the question again. "Can you repeat the question?"
+	// was logged as a wrong answer live on 2026-08-14; two of those now trip the
+	// reveal, so a child who simply did not hear would be handed the answer they
+	// never got to try for.
+	// The model reports this turn as UNCLEAR when it could not make out the
+	// speech, or when the child asked to hear the question again. Neither is an
+	// attempt at the answer.
+	//
+	// Asked of the model rather than guessed here: the prompt already classifies
+	// UNCLEAR and it is the only participant that can tell "I don't know" from
+	// "say that again". A phrase list stood in for this and was replaced — it
+	// matched substrings with no understanding, so "a pardon is a forgiveness"
+	// read as a request to repeat.
+	if memoFlagIsYes(memo, "unclear") {
+		logger.DebugCF("livekit", "Turn reported UNCLEAR; not counted as an attempt", map[string]any{
+			"question_id": awaiting,
+		})
+		return nil
+	}
+	if said != "" && len(ab.pendingQuizAttempts) < maxTrackedAttempts {
+		ab.pendingQuizAttempts = append(ab.pendingQuizAttempts, QuizAttempt{Verdict: "wrong", Transcript: said})
+	}
+	return nil
 }
 
 func (ab *AgentBridge) buildMessages(history []providers.Message, summary, text, sessionKey string) []providers.Message {
@@ -996,7 +1242,112 @@ CRITICAL RULES FOR VOICE:
 	}
 	// Deterministic priority: base system -> language lock -> voice.
 
+	// The Door line goes LAST, after the conversation, and this placement is
+	// load-bearing. The prompt cache breakpoint sits on the static system block
+	// and OpenAI-side caching is prefix-based, so a directive that changes every
+	// turn inserted at the system anchor would invalidate the cached prefix on
+	// every single turn. The language lock is safe up there only because it is
+	// fixed for the whole session. This is not.
+	if directive := ab.quizDoorDirective(); directive != "" {
+		messages = append(messages, providers.Message{Role: "system", Content: directive})
+	}
+
 	return messages
+}
+
+// quizDoorDirective is the one line telling the model how to ask the pending
+// question this turn. Empty when there is no scored quiz, no pending question,
+// or the question is not in this session's batch — Cheeko and Nani never see it.
+//
+// The model is told WHICH Door and given its words; it does not choose. The
+// escalation is the worker counting tries against what the server authored.
+func (ab *AgentBridge) quizDoorDirective() string {
+	if ab == nil || ab.quizBatch == nil {
+		return ""
+	}
+	ab.reportedQuizMu.Lock()
+	pending := ab.pendingQuizID
+	tries := len(ab.pendingQuizAttempts)
+	ab.reportedQuizMu.Unlock()
+	if pending == 0 {
+		return ""
+	}
+
+	var q *QuizQuestion
+	for i := range ab.quizBatch.Questions {
+		if ab.quizBatch.Questions[i].ID == pending {
+			q = &ab.quizBatch.Questions[i]
+			break
+		}
+	}
+	if q == nil {
+		return ""
+	}
+	// No authored ladder means there is no Doors behaviour to drive. Carry the
+	// try count instead, because the model cannot know it.
+	//
+	// The prompt's own rule is "second unsuccessful attempt, reveal the answer",
+	// but nothing in the MEMO says which try this is — `answered`, `first_try`
+	// and `missed` are all day totals. The only record of the count is the chat
+	// history, and that is summarised away (observed live: 21 messages trimmed
+	// to 5 mid-question). With the evidence gone the model kept encouraging
+	// another try and never scored the question at all: five wrong answers, no
+	// verdict, no answer row, awaiting= frozen on one id.
+	//
+	// The worker counted those tries exactly. This hands the count back, which
+	// is the server owning game state rather than asking a 31B model to hold it
+	// in prose (GDD §11).
+	if len(q.ChoiceOrder) < 2 && strings.TrimSpace(q.TeachText) == "" {
+		switch {
+		case tries == 0:
+			return "" // First ask. The prompt's normal flow is correct here.
+		case tries == 1:
+			return fmt.Sprintf(
+				"## This Question\nThe child has now missed question %s once. Give one hint or an either/or version, then ask the same question again and wait.",
+				q.IDString)
+		default:
+			// Two misses is the prompt's own reveal threshold. Naming the MEMO
+			// fields matters: without a verdict the question is never scored,
+			// and the child stays on it forever.
+			return fmt.Sprintf(
+				"## This Question\nThe child has now missed question %s %d times. Kindly tell them the answer, say one warm encouraging line, and move straight on to the next question. Your MEMO for this turn MUST carry scored_q=%s, scored_text, and result=revealed.",
+				q.IDString, tries, q.IDString)
+		}
+	}
+
+	// Past the last Door. The ladder has to END, and until this existed it did
+	// not: DoorFor clamps at Door 3, so every further try re-ran the Door 3 line
+	// — "explain, ask again, do not say the answer" — forever. Observed live
+	// 2026-08-14: six wrong tries on one question, no verdict, no answer row.
+	//
+	// quizzy-doors.md specifies the terminal: one reprompt at Door 3, then
+	// `missed`. The answer is deliberately NOT supplied — that is what separates
+	// this redesign from the reveal it replaced — but the question MUST be scored
+	// or the child never leaves it.
+	if tries >= doorGuided {
+		return fmt.Sprintf(
+			"## This Question\nQuestion %s has now had all three tries. Do not explain it again and do NOT tell the child the answer. Say one warm line — you will come back to this one another day — and move straight on to the next question. Your MEMO for this turn MUST carry scored_q=%s, scored_text, and result=revealed.",
+			q.IDString, q.IDString)
+	}
+
+	switch q.DoorFor(tries) {
+	case doorChoice:
+		return fmt.Sprintf(
+			"## This Question\nAsk question %s as a two-way choice, exactly these options and in this order: %q or %q. Do not add a third option and do not say which is right.",
+			q.IDString, q.ChoiceOrder[0], q.ChoiceOrder[1])
+	case doorGuided:
+		// The handback is mandatory: Door 3 explains and then reopens the
+		// question, so the child answers rather than being told. Supplying the
+		// answer here would make it `revealed` — the behaviour this redesign
+		// exists to remove.
+		return fmt.Sprintf(
+			"## This Question\nQuestion %s: say this explanation in your own warm words, in one breath: %q. Then ask the question again and wait. Do NOT say the answer.",
+			q.IDString, q.TeachText)
+	default:
+		return fmt.Sprintf(
+			"## This Question\nAsk question %s plainly, in your own words. Do not offer choices and do not hint yet.",
+			q.IDString)
+	}
 }
 
 func insertSystemDirectiveAfterFirstSystem(messages []providers.Message, directive providers.Message) []providers.Message {
