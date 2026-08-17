@@ -60,6 +60,12 @@ the rest of these tickets say.
 |---|---|---|---|
 | [016](016-report-unclear-turns.md) | The model must report UNCLEAR turns | AFK | ✅ closed |
 
+**Promotion.**
+
+| # | Title | Type | Blocked by |
+|---|---|---|---|
+| [017](017-production-promotion.md) | Production promotion | HITL | ⚠ prepared 2026-08-15, not executed — Rahul runs it |
+
 ## The one gate in front of everything else
 
 **Nothing left can be finished without a real voice session.** Four items are waiting on
