@@ -24,7 +24,66 @@ stats. Verified across a full day of real voice sessions on the dev box.
 
 ---
 
-## Step 0 — survey production before planning anything else
+## ✅ Step 0 ran 2026-08-17 — read-only. Result: NO-GO, and the reason is not the code
+
+| | verified on prod |
+|---|---|
+| Services | `manager-api` + `mqtt-gateway` on 139.59.7.72, branch `main` @ `67c6a806`, clean tree, 6d uptime |
+| Database | DigitalOcean managed `defaultdb` — reachable, healthy |
+| **Prisma** | **`SKIP_DB_SYNC=1`. Migrations never run on boot. 26 in the tree, 0 applied. The schema was built by hand** |
+| Quiz schema | **present**, but the OLD shape: `age_band` still there, values `3-5 / 6-8 / 9+`, 3 levels each, 90 active |
+| Absent | `question_attempt`, `kid_wonder_question`, `device_kid_assignment`, `teach_text`, `distractors` |
+| Prompt | `quiz_master` 12,439 / 2,428 — the pre-008/015/016 text. Dev is 13,835 |
+| **Real usage** | **71 children, 60 devices, 47 answer rows** |
+| Blast radius | **0 `revealed`, 0 `wrong`** ✅ |
+| EKS | **unreachable from this machine** — AWS token invalid, so `kubectl` cannot authenticate |
+
+**The 2026-08-05 record in [quiz-bank/008](../quiz-bank/008-production-promotion.md) is out of
+date.** It said prod had no `quiz*` tables. It has them — someone applied the bank by hand.
+That is also the root of the problem below.
+
+### Why this cannot proceed without a decision
+
+`SKIP_DB_SYNC=1` is the only reason prod boots. It makes `runPrismaMigrations()` a no-op,
+which is why 26 unapplied migrations sit harmlessly beside a schema that already exists.
+Three paths, two of them break production:
+
+1. **Deploy the code, keep the flag.** Migrations still never run. The new code queries
+   `question_attempt`, `teach_text` and `distractors` against a schema that has none of
+   them — every quiz call errors, for all 71 children.
+2. **Clear the flag so migrations apply.** `migrate deploy` starts at
+   `20260124000000_init` against a populated database, hits "already exists", records a
+   failed migration — P3009 — and `server.js` exits code 1. **Production goes down and
+   stays down**, because every restart repeats it.
+3. **Baseline first.** `migrate resolve --applied` for all 26 existing migrations, then
+   apply the 5 new ones. This is correct, one-way, and runs against a live database with
+   71 real children on it.
+
+Path 3 is the only one, and it needs a snapshot and a window — not a deploy step.
+
+### What is genuinely clear
+
+**Blast radius is zero on prod.** 47 answer rows, no `revealed`, no `wrong`. So 002's
+decision holds here too: the mastery flip ships with no grandfather clause. That gate is
+closed.
+
+### Content is a second, separate hazard
+
+Prod carries 90 questions across three age bands. The redesign needs 240 on one bank.
+**`copy-quiz-tables.js` must NOT be used** — it replaces the *answer* tables as well, and
+prod's 47 answer rows belong to real children. A question-tables-only import is required,
+and it has not been written.
+
+### Blocked on Rahul
+
+- A database snapshot, and a window to baseline 26 migrations
+- EKS credentials, or the worker rollout run by someone who has them
+- A decision on the content import: rewrite 90 rows in place, or import 240 and retire
+  the old ones by `active = false`
+
+---
+
+## Step 0 — the survey, for reference
 
 **The rest of this document branches on what you find, and the records say the branch is
 the expensive one.**
