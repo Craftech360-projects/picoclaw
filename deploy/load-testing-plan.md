@@ -8,7 +8,7 @@ Primary source: LiveKit field guide, "How to load test voice agents and get mean
 
 ## Goal
 
-Validate production readiness for the `cheeko-agent1` LiveKit voice agent by measuring:
+Validate production readiness for the `cheeko-agent` LiveKit voice agent by measuring:
 
 - concurrent LiveKit sessions
 - agent join delay
@@ -34,7 +34,7 @@ Capacity discovery goals:
 | Item | Value |
 | --- | --- |
 | LiveKit server | LiveKit Cloud |
-| Agent name | `cheeko-agent1` |
+| Agent name | `cheeko-agent` |
 | EKS cluster | `picoclaw-eks` |
 | AWS region | `ap-south-2` |
 | Namespace | `picoclaw-dev` |
@@ -105,7 +105,7 @@ Use LiveKit CLI first:
 ```powershell
 lk perf agent-load-test `
   --rooms 5 `
-  --agent-name cheeko-agent1 `
+  --agent-name cheeko-agent `
   --echo-speech-delay 10s `
   --duration 5m
 ```
@@ -266,7 +266,7 @@ The output of this section must answer:
 
 ### Preferred Method: Dedicated One-Pod Capacity Agent
 
-Do not use the production `cheeko-agent1` pool for this test if avoidable. Create a temporary canary Deployment with the same image, resources, secrets, security context, and node selector as production, but with:
+Do not use the production `cheeko-agent` pool for this test if avoidable. Create a temporary canary Deployment with the same image, resources, secrets, security context, and node selector as production, but with:
 
 ```text
 agent name: cheeko-agent-capacity-test
@@ -279,7 +279,7 @@ Why:
 
 - one pod receives all load for that test agent name
 - HPA does not hide the real per-pod breaking point
-- production `cheeko-agent1` traffic remains isolated
+- production `cheeko-agent` traffic remains isolated
 - the pod still runs on the same EKS node type and with the same resource limits
 
 Then run:
@@ -509,7 +509,7 @@ Recommended command shape:
 ```powershell
 lk perf agent-load-test `
   --rooms <room-count> `
-  --agent-name cheeko-agent1 `
+  --agent-name cheeko-agent `
   --echo-speech-delay 10s `
   --duration <duration>
 ```
@@ -517,9 +517,9 @@ lk perf agent-load-test `
 Examples:
 
 ```powershell
-lk perf agent-load-test --rooms 5 --agent-name cheeko-agent1 --echo-speech-delay 10s --duration 5m
-lk perf agent-load-test --rooms 25 --agent-name cheeko-agent1 --echo-speech-delay 10s --duration 10m
-lk perf agent-load-test --rooms 60 --agent-name cheeko-agent1 --echo-speech-delay 10s --duration 15m
+lk perf agent-load-test --rooms 5 --agent-name cheeko-agent --echo-speech-delay 10s --duration 5m
+lk perf agent-load-test --rooms 25 --agent-name cheeko-agent --echo-speech-delay 10s --duration 10m
+lk perf agent-load-test --rooms 60 --agent-name cheeko-agent --echo-speech-delay 10s --duration 15m
 ```
 
 If the CLI supports attributes for your installed version, tag runs:
@@ -527,7 +527,7 @@ If the CLI supports attributes for your installed version, tag runs:
 ```powershell
 lk perf agent-load-test `
   --rooms 25 `
-  --agent-name cheeko-agent1 `
+  --agent-name cheeko-agent `
   --echo-speech-delay 10s `
   --duration 10m `
   --attribute test_id=load-20260611-b3 `
@@ -952,7 +952,7 @@ Runner requirements:
   - language
   - provider selection if applicable
   - session identifiers
-- dispatch `cheeko-agent1`
+- dispatch `cheeko-agent`
 - join one synthetic audio participant per room
 - publish realistic short speech audio or echo agent speech
 - publish fixture audio for VAD cases: clean speech, quiet speech, long pauses, background noise, silence, and barge-in

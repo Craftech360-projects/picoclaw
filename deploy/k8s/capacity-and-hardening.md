@@ -60,7 +60,15 @@ The previous capacity-test node group has been promoted to production:
 - Instance type: `c6a.large`
 - Scaling: `minSize=2`, `desiredSize=2`, `maxSize=5`
 - Production Deployment: `picoclaw-livekit`
-- Production agent name: `cheeko-agent1`
+- Production agent name: `cheeko-agent`
+
+  Verify rather than trust this line — it said `cheeko-agent1` until 2026-08-17 and
+  cost two people time, because a load test against the wrong name creates rooms
+  no worker ever joins and reads as total failure:
+
+  ```bash
+  kubectl -n picoclaw-dev logs -l app=picoclaw-livekit --tail=200 | grep -oE "agent_name=[a-z0-9-]+" | sort -u
+  ```
 
 The 2026-06-13 real-audio canary test on one isolated `c6a.large` pod passed `18` rooms cleanly through dispatch, join, STT, VAD, LLM, cleanup, and quality summaries with low memory usage and no pod restarts. At `19` rooms, all rooms joined, but only `18` reached STT/VAD and `17` reached LLM/quality summaries. The balanced production setting is therefore `PICOCLAW_LIVEKIT_MAX_SESSIONS=15` with the HPA session-load target set to `60`.
 
