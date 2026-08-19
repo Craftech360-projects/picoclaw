@@ -81,17 +81,26 @@ the 25 s agent-timeout on 28 of 60 sessions *despite free agent slots*, because 
 event loop could not absorb ~1 arrival/sec while relaying audio. Four loops show
 zero timeouts through 150.
 
-**Open design question.** `docs/plans/2026-03-07-mqtt-gateway-scaling-design.md`
-(approved) specifies EMQX shared subscriptions (`$share/gateway/device-server`)
-rather than MAC-hash sharding. That plan predates a topology change: the gateway
-no longer subscribes to `device-server` but to `internal/server-ingest`, fed by an
-EMQX republish rule. Naive `$share` would round-robin a single device's messages
-across instances and break its session; `hash_clientid` cannot fix it because the
-publisher on that topic is the rule engine, not the device. MAC-hash was chosen
-for the current topology. The cost is 4x MQTT fan-out (every instance receives
-every message, three discard). The synthesis — a shard-aware republish rule
-emitting `internal/server-ingest/0..3` — gives 1x delivery *and* per-device
-affinity, and is the recommended optimization when fan-out actually bites.
+**Decided 2026-08-19: MAC-hash, not EMQX shared subscriptions.** The approved March
+plan specified `$share/gateway/device-server`, but that predates a topology change —
+the gateway now subscribes to `internal/server-ingest` via a republish rule, and
+`$share` would scatter one device's messages across instances and break its session.
+Full reasoning, consequences, and the upgrade path are in
+`docs/plans/2026-08-19-gateway-sharding-decision.md` in the cheeko-backend repo.
+
+Two things that decision obliges you to know:
+
+- The hash is a **cross-service contract** with manager-api. Changing the hash, the
+  normalization, or `GATEWAY_SHARD_COUNT` remaps every device and requires a
+  coordinated redeploy of both sides, not a rolling restart.
+- A dead instance **strands its shard** until pm2 restarts it, rather than
+  rebalancing. Accepted trade: blast radius is 1/N of devices and pm2 restarts are
+  fast. `$share` would have failed over automatically.
+
+The cost is 4x MQTT fan-out (every instance receives every message, three discard),
+immaterial at current scale. When it bites, make the EMQX rule shard-aware —
+republish to `internal/server-ingest/0..3` by hashing the MAC in the rule SQL — for
+1x delivery *and* per-device affinity.
 
 ## Current production shape
 
