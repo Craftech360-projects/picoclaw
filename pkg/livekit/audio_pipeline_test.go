@@ -103,6 +103,13 @@ func TestSynthesizeAndPlayLogsTTSProviderType(t *testing.T) {
 	}
 	t.Cleanup(logger.DisableFileLogging)
 
+	// The line under test is logged at DEBUG, and the package default is INFO —
+	// without this the log file is empty and the failure reads as "the log line
+	// is gone" rather than "the level filtered it".
+	previousLevel := logger.GetLevel()
+	logger.SetLevel(logger.DEBUG)
+	t.Cleanup(func() { logger.SetLevel(previousLevel) })
+
 	localTrack, err := lkmedia.NewPCMLocalTrack(24000, 1, protoLogger.GetLogger())
 	if err != nil {
 		t.Fatalf("NewPCMLocalTrack error = %v", err)

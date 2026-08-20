@@ -139,14 +139,22 @@ func TestLedgers(t *testing.T) {
 	dir := t.TempDir()
 	sdir := filepath.Join(dir, "memory", "state")
 
+	// Dates are RELATIVE to now, never hardcoded: both ledgers prune by age
+	// (story 30 days, quiz 14), so a literal date silently rots into a failure
+	// once the calendar passes it. This test began failing on 2026-08-16 for
+	// exactly that reason — its quiz date was 14 days old and the line it
+	// asserted on was pruned the moment it was written.
+	today := time.Now().Format("2006-01-02")
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+
 	// incomplete story -> no ledger entry
-	maybePersistQuizState(dir, "MEMO: type=story | date=2026-08-01 | story_key=moon_robot | title=Moon Robot | theme=sharing | completed=false")
+	maybePersistQuizState(dir, "MEMO: type=story | date="+yesterday+" | story_key=moon_robot | title=Moon Robot | theme=sharing | completed=false")
 	if _, err := os.Stat(filepath.Join(sdir, storyLedgerFile)); !os.IsNotExist(err) {
 		t.Fatal("incomplete story wrote ledger")
 	}
 
 	// completed story -> ledger entry; re-persisting same key -> no duplicate
-	done := "MEMO: type=story | date=2026-08-01 | story_key=moon_robot | title=Moon Robot | theme=sharing | completed=true"
+	done := "MEMO: type=story | date=" + yesterday + " | story_key=moon_robot | title=Moon Robot | theme=sharing | completed=true"
 	maybePersistQuizState(dir, done)
 	maybePersistQuizState(dir, done)
 	data, err := os.ReadFile(filepath.Join(sdir, storyLedgerFile))
@@ -155,11 +163,36 @@ func TestLedgers(t *testing.T) {
 	}
 
 	// quiz ledger: same-date line upserted, not appended
-	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date=2026-08-02 | asked_keys=k1")
-	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date=2026-08-02 | asked_keys=k1,k2")
+	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+today+" | asked_keys=k1")
+	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+today+" | asked_keys=k1,k2")
 	data, err = os.ReadFile(filepath.Join(sdir, questionLedgerFile))
-	if err != nil || strings.Count(string(data), "2026-08-02") != 1 || !strings.Contains(string(data), "k1,k2") {
+	if err != nil || strings.Count(string(data), today) != 1 || !strings.Contains(string(data), "k1,k2") {
 		t.Fatalf("quiz ledger wrong: %v %s", err, data)
+	}
+}
+
+// A ledger line older than its bank's window must be pruned, and one inside it
+// kept. This is what the rotted dates above were accidentally testing; pinning
+// it deliberately means the relative dates cannot drift back into that hole.
+func TestLedgerPrunesByAge(t *testing.T) {
+	dir := t.TempDir()
+	sdir := filepath.Join(dir, "memory", "state")
+
+	stale := time.Now().AddDate(0, 0, -20).Format("2006-01-02") // > 14d quiz window
+	fresh := time.Now().AddDate(0, 0, -2).Format("2006-01-02")
+
+	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+stale+" | asked_keys=old")
+	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+fresh+" | asked_keys=new")
+
+	data, err := os.ReadFile(filepath.Join(sdir, questionLedgerFile))
+	if err != nil {
+		t.Fatalf("no quiz ledger: %v", err)
+	}
+	if strings.Contains(string(data), "old") {
+		t.Errorf("a line past the 14-day window survived: %s", data)
+	}
+	if !strings.Contains(string(data), "new") {
+		t.Errorf("a line inside the window was pruned: %s", data)
 	}
 }
 
