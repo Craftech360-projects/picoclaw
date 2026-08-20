@@ -80,7 +80,9 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		// bootstrap restore re-materializes it after the 48h state prune.
 		if bridge.agentInstance != nil && strings.TrimSpace(bridge.agentInstance.Workspace) != "" {
 			progressCtx, progressCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := rs.sendCharacterProgress(progressCtx, bridge.agentInstance.Workspace, bridge.contentBank); err != nil {
+			if err := rs.sendCharacterProgress(
+				progressCtx, bridge.agentInstance.Workspace, bridge.contentBank, messages,
+			); err != nil {
 				logger.WarnCF("livekit", "Failed to persist character progress", map[string]any{
 					"room":  rs.roomName(),
 					"error": err.Error(),

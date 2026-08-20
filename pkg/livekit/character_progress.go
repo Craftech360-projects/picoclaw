@@ -83,7 +83,9 @@ func CollectStateMemos(workspace string) []StateMemo {
 // Reporting the served codes at CLOSE rather than at serve time is what stops a
 // child who connects and immediately drops from burning through the bank: a
 // session that never ran reports nothing.
-func (rs *RoomSession) sendCharacterProgress(ctx context.Context, workspace string, content *ContentPayload) error {
+func (rs *RoomSession) sendCharacterProgress(
+	ctx context.Context, workspace string, content *ContentPayload, transcript []PersistedChatMessage,
+) error {
 	memos := CollectStateMemos(workspace)
 	if len(memos) == 0 && content == nil {
 		return nil
@@ -95,15 +97,17 @@ func (rs *RoomSession) sendCharacterProgress(ctx context.Context, workspace stri
 		"memos":      memos,
 	}
 	if content != nil && len(content.Items) > 0 {
-		codes := make([]string, 0, len(content.Items))
-		for _, item := range content.Items {
-			if code := strings.TrimSpace(fmt.Sprintf("%v", item["code"])); code != "" {
-				codes = append(codes, code)
-			}
-		}
+		// Only what the transcript shows was actually delivered — a served item
+		// the session never reached must stay unheard, not be burned.
+		codes := DeliveredCodes(content, transcript)
 		if len(codes) > 0 {
 			payload["content"] = map[string]any{"bank": content.Bank, "codes": codes}
 		}
+		logger.InfoCF("livekit", "Content delivery accounted", map[string]any{
+			"bank":      content.Bank,
+			"served":    len(content.Items),
+			"delivered": len(codes),
+		})
 	}
 	status, body, err := postJSON(ctx, endpoint, payload, managerAPIServiceHeaders(rs.managerAPISecret))
 	if err != nil {
