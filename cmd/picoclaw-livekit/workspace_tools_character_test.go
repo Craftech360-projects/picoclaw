@@ -14,7 +14,8 @@ func TestLiveKitCharacterToolGate(t *testing.T) {
 		{"quizzy", false},
 		{"Quizzy", false}, // character name arrives from room metadata, casing not guaranteed
 		{" quizzy ", false},
-		{"riddler", false},
+		{"bujho", false},
+		{"riddler", true}, // pre-2026-08-20 display name; renamed, so no longer matched
 		{"cheeko", false}, // 2026-08-20 pack persona: "Never call tools"
 		{"Tara", false},
 		{"nani", false},

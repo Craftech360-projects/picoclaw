@@ -382,7 +382,10 @@ func liveKitVoiceToolAllowlist() []string {
 // toolless Cheeko/Chanda cannot fetch live weather/time; the scaffold's
 // honesty rule makes them say they could not find out.
 var liveKitToollessCharacters = []string{
-	"quizzy", "riddler", "cheeko", "chanda", "masti", "tara", "nani", "mitthu",
+	// Matched against agent_name, so a display-name rename must land here too:
+	// "riddler" became "bujho" on 2026-08-20 and a stale entry here silently
+	// hands the character the tools its prompt forbids.
+	"quizzy", "bujho", "cheeko", "chanda", "masti", "tara", "nani", "mitthu",
 	"ginti", "tikku",
 }
 
