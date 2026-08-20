@@ -449,13 +449,27 @@ func injectTurnEvent(events chan interface{}, sessionKey string, evt vad.VADEven
 }
 
 // resetPTTBuffer discards whatever audio the active sarvam_rest stream has
-// buffered — used on a fresh press (a new utterance must not inherit the
-// last one) and on Cancel Turn (discard, stay silent). A no-op for providers
-// that don't buffer per-utterance.
+// buffered — used on a fresh press: a new utterance must not inherit the last
+// one. A no-op for providers that don't buffer per-utterance.
 func resetPTTBuffer(stream stt.TranscriptionStream) {
 	if resettable, ok := stream.(interface{ ResetBuffer() }); ok {
 		resettable.ResetBuffer()
 	}
+}
+
+// cancelPTTTurn discards the buffer AND marks the coming Finalize as deliberate
+// silence. Distinct from resetPTTBuffer because an empty Finalize is now
+// answered with "I didn't hear you" — correct for a turn that captured nothing,
+// wrong for one the child cancelled on purpose.
+//
+// Falls back to a plain reset for providers that predate CancelTurn, keeping
+// their old behaviour rather than announcing at them.
+func cancelPTTTurn(stream stt.TranscriptionStream) {
+	if cancellable, ok := stream.(interface{ CancelTurn() }); ok {
+		cancellable.CancelTurn()
+		return
+	}
+	resetPTTBuffer(stream)
 }
 
 // handleDataMessage processes data channel messages from the MQTT gateway.
@@ -538,10 +552,13 @@ func (rs *RoomSession) handleDataMessage(data []byte) {
 			// arriving on their own goroutine after the first reset, and
 			// transcribing that tail would answer a cancelled question.
 			pipeline.noteCancelTurn()
-			resetPTTBuffer(stream)
+			cancelPTTTurn(stream)
 			time.AfterFunc(pttSpeechEndGrace(), func() {
 				stream, events := ps.turnPlumbing()
-				resetPTTBuffer(stream)
+				// Second wipe re-arms the cancel flag: the first Finalize may
+				// already have consumed it, and the tail frames this reset
+				// exists to discard must not be announced either.
+				cancelPTTTurn(stream)
 				injectTurnEvent(events, ps.sessionKey, vad.VADEvent{SpeechEnd: true})
 			})
 		}

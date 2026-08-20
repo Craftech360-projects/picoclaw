@@ -196,7 +196,14 @@ func TestSarvamRESTRetryThenFailLeavesStreamUsable(t *testing.T) {
 	}
 }
 
-// Finalize with nothing buffered must not POST at all — Cancel Turn is silent.
+// Finalize with nothing buffered must not POST at all, and a CANCELLED turn
+// must also stay silent.
+//
+// This test used to reach the silence by finalizing an empty buffer with no
+// cancel at all — conflating "nothing captured" with "child cancelled", which
+// is precisely the assumption that left a silent turn unanswered. It now says
+// cancel explicitly; the un-cancelled case is covered by
+// TestEmptyFinalizeAnnouncesUnlessCancelled.
 func TestSarvamRESTFinalizeWithNoAudioDoesNotCall(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +215,7 @@ func TestSarvamRESTFinalizeWithNoAudioDoesNotCall(t *testing.T) {
 	s := newTestAdapter(t, srv.URL)
 	var emptyCalls atomic.Int32
 	s.SetEmptyResultHandler(func() { emptyCalls.Add(1) })
+	s.CancelTurn()
 	if err := s.Finalize(); err != nil {
 		t.Fatalf("Finalize() error = %v", err)
 	}
@@ -367,4 +375,75 @@ func TestSarvamRESTOpenStreamRequiresKey(t *testing.T) {
 	if _, err := p.OpenStream(context.Background(), StreamOptions{}); err == nil {
 		t.Fatal("OpenStream() with no key succeeded, want error")
 	}
+}
+
+// An empty Finalize has two causes that want opposite endings, and only one of
+// them was served before: a cancelled turn stayed silent (correct), and a turn
+// that captured nothing ALSO stayed silent (a dead-looking toy). Observed
+// 2026-08-20: the log ended at "finalize with no audio buffered" and the
+// session never answered.
+func TestEmptyFinalizeAnnouncesUnlessCancelled(t *testing.T) {
+	t.Run("silent turn is announced", func(t *testing.T) {
+		s := newTestAdapter(t, "http://unused.invalid")
+		defer s.Close()
+		var empties atomic.Int32
+		s.SetEmptyResultHandler(func() { empties.Add(1) })
+
+		// The child tapped, said nothing, tapped again: press resets, no audio
+		// arrives, End Turn finalizes.
+		s.ResetBuffer()
+		if err := s.Finalize(); err != nil {
+			t.Fatalf("Finalize() error = %v", err)
+		}
+		if got := empties.Load(); got != 1 {
+			t.Errorf("empty-handler calls = %d, want 1 (the child must get a reply)", got)
+		}
+	})
+
+	t.Run("cancelled turn stays silent", func(t *testing.T) {
+		s := newTestAdapter(t, "http://unused.invalid")
+		defer s.Close()
+		var empties atomic.Int32
+		s.SetEmptyResultHandler(func() { empties.Add(1) })
+
+		_ = s.SendAudio(pcmOf(16000, 1))
+		s.CancelTurn()
+		if err := s.Finalize(); err != nil {
+			t.Fatalf("Finalize() error = %v", err)
+		}
+		if got := empties.Load(); got != 0 {
+			t.Errorf("empty-handler calls = %d, want 0 on a deliberate cancel", got)
+		}
+	})
+
+	t.Run("the cancel flag is one-shot", func(t *testing.T) {
+		s := newTestAdapter(t, "http://unused.invalid")
+		defer s.Close()
+		var empties atomic.Int32
+		s.SetEmptyResultHandler(func() { empties.Add(1) })
+
+		s.CancelTurn()
+		_ = s.Finalize() // consumes the flag, stays silent
+		// A LATER silent turn must not inherit the cancel and go quiet too.
+		_ = s.Finalize()
+		if got := empties.Load(); got != 1 {
+			t.Errorf("empty-handler calls = %d, want 1 (cancel must not persist)", got)
+		}
+	})
+
+	t.Run("a plain buffer reset does not suppress the announcement", func(t *testing.T) {
+		s := newTestAdapter(t, "http://unused.invalid")
+		defer s.Close()
+		var empties atomic.Int32
+		s.SetEmptyResultHandler(func() { empties.Add(1) })
+
+		// ResetBuffer is the fresh-press path; it must not be mistaken for a
+		// cancel, or every silent turn after a press would go unanswered.
+		_ = s.SendAudio(pcmOf(16000, 1))
+		s.ResetBuffer()
+		_ = s.Finalize()
+		if got := empties.Load(); got != 1 {
+			t.Errorf("empty-handler calls = %d, want 1 after a plain reset", got)
+		}
+	})
 }

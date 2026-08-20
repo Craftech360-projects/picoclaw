@@ -116,7 +116,13 @@ type sarvamRESTAdapter struct {
 	audioBuffer []byte
 	capWarned   bool
 	onEmpty     func()
-	inFlight    sync.WaitGroup
+	// Set by CancelTurn, cleared by the next Finalize. A cancelled turn and a
+	// silent one both reach Finalize with an empty buffer, and they want
+	// opposite things: the cancelled one stays silent, the silent one must be
+	// answered or the child gets no reply at all. Nothing else can tell them
+	// apart down here — the distinction is made by the caller.
+	cancelled bool
+	inFlight  sync.WaitGroup
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -169,12 +175,28 @@ func (s *sarvamRESTAdapter) SendAudio(pcm []byte) error {
 
 func (s *sarvamRESTAdapter) Results() <-chan TranscriptEvent { return s.resultChan }
 
-// ResetBuffer discards buffered audio. Called on a fresh press (a new utterance
-// must not inherit the last one) and on Cancel Turn (discard, stay silent).
+// ResetBuffer discards buffered audio. Called on a fresh press: a new utterance
+// must not inherit the last one.
 func (s *sarvamRESTAdapter) ResetBuffer() {
 	s.mu.Lock()
 	s.audioBuffer = nil
 	s.capWarned = false
+	s.mu.Unlock()
+}
+
+// CancelTurn discards buffered audio AND marks the coming Finalize as
+// deliberate silence, so it does not announce "I didn't hear you" at a child
+// who cancelled on purpose.
+//
+// Split from ResetBuffer because the two callers want opposite endings from an
+// empty buffer, and before this only one of them was served: a genuine End Turn
+// that buffered nothing returned silently, so a child who tapped, said nothing,
+// and tapped again got no reply at all and the toy looked dead.
+func (s *sarvamRESTAdapter) CancelTurn() {
+	s.mu.Lock()
+	s.audioBuffer = nil
+	s.capWarned = false
+	s.cancelled = true
 	s.mu.Unlock()
 }
 
@@ -208,16 +230,28 @@ func (s *sarvamRESTAdapter) Finalize() error {
 	utterance := s.audioBuffer
 	s.audioBuffer = nil
 	s.capWarned = false
+	// One-shot: this Finalize is the one the cancel was for.
+	cancelled := s.cancelled
+	s.cancelled = false
+	onEmpty := s.onEmpty
 	if len(utterance) > 0 {
 		s.inFlight.Add(1)
 	}
 	s.mu.Unlock()
 
 	if len(utterance) == 0 {
-		// Cancel Turn lands here: nothing buffered, nothing to do, no callback.
+		// Two ways to arrive here, and they end differently. A cancelled turn is
+		// deliberate silence. A turn that simply captured nothing — a mic that
+		// dropped, a child who tapped twice without speaking — must still be
+		// answered, or the toy goes quiet and looks broken with nothing in the
+		// log after this line (seen 2026-08-20).
 		logger.DebugCF("livekit", "Sarvam REST finalize with no audio buffered", map[string]any{
-			"provider": "sarvam_rest",
+			"provider":  "sarvam_rest",
+			"cancelled": cancelled,
 		})
+		if !cancelled && onEmpty != nil {
+			onEmpty()
+		}
 		return nil
 	}
 
