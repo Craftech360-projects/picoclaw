@@ -375,7 +375,16 @@ func liveKitVoiceToolAllowlist() []string {
 // Kept as a literal rather than an env override on purpose: this codebase has a
 // documented history of `env:` tags with no reader (docs/issues/013), and the
 // character set changes rarely enough that editing this line is honest.
-var liveKitToollessCharacters = []string{"quizzy"}
+//
+// 2026-08-20: the character-pack personas ALL carry the same "Never call tools"
+// sentence, so every pack character is listed (by agent_name — that is what the
+// room metadata carries and what EqualFold matches). Deliberate consequence:
+// toolless Cheeko/Chanda cannot fetch live weather/time; the scaffold's
+// honesty rule makes them say they could not find out.
+var liveKitToollessCharacters = []string{
+	"quizzy", "riddler", "cheeko", "chanda", "masti", "tara", "nani", "mitthu",
+	"ginti", "tikku",
+}
 
 // liveKitCharacterUsesTools reports whether a character should have the voice
 // tool set registered. Unknown or empty characters keep tools — losing them is

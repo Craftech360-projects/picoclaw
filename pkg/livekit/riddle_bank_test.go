@@ -25,12 +25,19 @@ func TestRiddlesPlaceholderRendersLikeQuizQuestions(t *testing.T) {
 
 	quiz := RenderQuizQuestions("Rules.\n{{QUIZ_QUESTIONS}}\nEnd.", batch)
 	riddle := RenderQuizQuestions("Rules.\n{{RIDDLES}}\nEnd.", batch)
+	math := RenderQuizQuestions("Rules.\n{{MATH_PROBLEMS}}\nEnd.", batch)
 
-	if quiz != riddle {
-		t.Errorf("placeholders must render identically:\nquiz=%q\nriddle=%q", quiz, riddle)
+	if quiz != riddle || quiz != math {
+		t.Errorf("placeholders must render identically:\nquiz=%q\nriddle=%q\nmath=%q", quiz, riddle, math)
 	}
 	if strings.Contains(riddle, "{{RIDDLES}}") {
 		t.Error("{{RIDDLES}} was not substituted")
+	}
+	if strings.Contains(math, "{{MATH_PROBLEMS}}") {
+		t.Error("{{MATH_PROBLEMS}} was not substituted")
+	}
+	if !PromptWantsQuizBatch("{{MATH_PROBLEMS}}") {
+		t.Error("PromptWantsQuizBatch must fetch for Ginti's placeholder")
 	}
 }
 

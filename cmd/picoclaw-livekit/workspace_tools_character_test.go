@@ -2,9 +2,10 @@ package main
 
 import "testing"
 
-// Both directions of this gate fail silently: Quizzy keeping its tools looks
-// like a normal session, and Cheeko losing them is an invisible capability
-// regression nobody notices until a child asks for the weather.
+// Both directions of this gate fail silently: a toolless character keeping its
+// tools looks like a normal session, and an unknown character losing them is an
+// invisible capability regression nobody notices until a child asks for the
+// weather.
 func TestLiveKitCharacterToolGate(t *testing.T) {
 	tests := []struct {
 		character string
@@ -13,11 +14,15 @@ func TestLiveKitCharacterToolGate(t *testing.T) {
 		{"quizzy", false},
 		{"Quizzy", false}, // character name arrives from room metadata, casing not guaranteed
 		{" quizzy ", false},
-		{"cheeko", true},
-		{"Cheeko German", true},
-		{"nani", true},
-		{"", true},           // unknown character must keep tools, never silently lose them
-		{"quizmaster", true}, // near-miss must not match
+		{"riddler", false},
+		{"cheeko", false}, // 2026-08-20 pack persona: "Never call tools"
+		{"Tara", false},
+		{"nani", false},
+		{"tikku", false},
+		{"Cheeko German", true}, // match is exact: a persona variant needs its own list entry
+		{"", true},              // unknown character must keep tools, never silently lose them
+		{"quizmaster", true},    // near-miss must not match
+		{"math tutor", true},    // future specialized character defaults to tools
 	}
 
 	for _, tt := range tests {
@@ -35,8 +40,8 @@ func TestToollessCharacterDeniedOnBothPaths(t *testing.T) {
 		if isLiveKitVoiceAllowedToolFor("quizzy", name) {
 			t.Errorf("quizzy was allowed tool %q via the allowlist path", name)
 		}
-		if !isLiveKitVoiceAllowedToolFor("cheeko", name) {
-			t.Errorf("cheeko was denied tool %q it should keep", name)
+		if !isLiveKitVoiceAllowedToolFor("quizmaster", name) {
+			t.Errorf("unknown character was denied tool %q it should keep", name)
 		}
 	}
 

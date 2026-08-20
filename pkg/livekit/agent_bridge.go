@@ -171,7 +171,9 @@ type AgentBridge struct {
 	greetingPrompt string
 	// quizBatch is this session's curated question set (nil = no scored quiz);
 	// quizAnswerReporter logs one verdict against the bank.
-	quizBatch          *QuizBatch
+	quizBatch *QuizBatch
+	// contentBank is the unscored characters' payload (nil = STARTER MODE).
+	contentBank        *ContentPayload
 	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
 	// quizAttemptReporter flushes tries for a question that never resolved.
 	quizAttemptReporter func(questionID int64, attempts []QuizAttempt)
@@ -249,6 +251,9 @@ type AgentBridgeConfig struct {
 	// QuizBatch is the curated question set pulled for this session; nil means
 	// the bank was unreachable or unused, and no scored quiz runs.
 	QuizBatch *QuizBatch
+	// ContentBank is the unscored content payload (jokes/wonders/words/story/
+	// spelling); nil means no content bank or unreachable — STARTER MODE.
+	ContentBank *ContentPayload
 	// QuizAnswerReporter logs one scored verdict against the bank, with the
 	// tries that led to it (empty when the child got it first time).
 	QuizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
@@ -311,6 +316,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		characterName:             cfg.CharacterName,
 		greetingPrompt:            strings.TrimSpace(cfg.GreetingPrompt),
 		quizBatch:                 cfg.QuizBatch,
+		contentBank:               cfg.ContentBank,
 		quizAnswerReporter:        cfg.QuizAnswerReporter,
 		quizAttemptReporter:       cfg.QuizAttemptReporter,
 		wonderQuestionReporter:    cfg.WonderQuestionReporter,
@@ -2071,6 +2077,9 @@ func (ab *AgentBridge) GenerateGreeting(ctx context.Context, sessionKey string, 
 	// explicit "no scored quiz" instruction instead of leaving the LLM free to
 	// invent one.
 	rendered = RenderQuizQuestions(rendered, ab.quizBatch)
+	// Unscored content replaces its placeholder the same way; a nil payload
+	// renders the explicit STARTER-MODE trigger instead of a raw {{TAG}}.
+	rendered = RenderContentBank(rendered, ab.contentBank)
 
 	// Restored chat history may belong to a different character (card switch);
 	// naming the current persona keeps the greeting from introducing itself as

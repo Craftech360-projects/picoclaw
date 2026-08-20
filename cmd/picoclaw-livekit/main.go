@@ -785,6 +785,20 @@ func main() {
 			quizFetchCancel() // abort the speculative fetch; nobody will read it
 		}
 
+		// Unscored content (jokes/wonders/words/story/spelling). Gated on the
+		// greeting's placeholder like the quiz batch; runs after the persona
+		// pull, so this is one extra sequential GET only for the five content
+		// characters. Failure = STARTER MODE, never a failed session.
+		var contentBankForSession *livekit.ContentPayload
+		if livekit.PromptWantsContentBank(personaGreeting) {
+			contentCtx, contentCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			contentBankForSession = livekit.FetchAndWriteContentBank(
+				contentCtx, lkCfg.ManagerAPI, managerAPIServiceKey(),
+				deviceMAC, characterName, workspace,
+			)
+			contentCancel()
+		}
+
 		// Per-character ElevenLabs voice (ai_agent_template.elevenlabs_voice_id).
 		// Sarvam gets its per-character speaker from room metadata before the TTS
 		// client is built, but the ElevenLabs id only arrives with the persona pull
@@ -909,6 +923,13 @@ func main() {
 					"removed": removed,
 				})
 			}
+			// Re-materialize durable character state (Tikku's ladder, Nani's
+			// unfinished story, ...) from the Manager DB — AFTER the prune, so
+			// what the prune removed comes back from the durable copy. Local
+			// files win; failures fall back to the prompts' STARTER MODE.
+			restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			livekit.RestoreCharacterState(restoreCtx, lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC, workspace)
+			restoreCancel()
 		}
 		// The Manager's stored USER.md wins over the metadata seed on every session
 		// after the first, so a portal profile edit only lands if we merge it back
@@ -1062,6 +1083,7 @@ func main() {
 			CharacterName:  characterName,
 			GreetingPrompt: personaGreeting,
 			QuizBatch:      quizBatchForSession,
+			ContentBank:    contentBankForSession,
 			QuizAnswerReporter: livekit.NewQuizAnswerReporter(
 				lkCfg.ManagerAPI,
 				managerAPIServiceKey(),

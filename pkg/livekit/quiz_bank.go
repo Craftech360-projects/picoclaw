@@ -30,6 +30,10 @@ const quizQuestionsPlaceholder = "{{QUIZ_QUESTIONS}}"
 // "quiz questions". Both substitute the same block.
 const riddlesPlaceholder = "{{RIDDLES}}"
 
+// mathProblemsPlaceholder: Ginti, same alias pattern as Riddler — identical
+// game, math bank, and a prompt that asks for "problems" not "questions".
+const mathProblemsPlaceholder = "{{MATH_PROBLEMS}}"
+
 // QuizQuestion is one curated question as served by GET /quiz/next-questions.
 // The API sends ids as strings (Postgres bigint); ID is the parsed form and is
 // what the MEMO channel validates verdicts against.
@@ -472,7 +476,8 @@ func NewQuizAnswerReporter(
 // written, and the child told the bank was unavailable.
 func PromptWantsQuizBatch(prompt string) bool {
 	return strings.Contains(prompt, quizQuestionsPlaceholder) ||
-		strings.Contains(prompt, riddlesPlaceholder)
+		strings.Contains(prompt, riddlesPlaceholder) ||
+		strings.Contains(prompt, mathProblemsPlaceholder)
 }
 
 func RenderQuizQuestions(prompt string, batch *QuizBatch) string {
@@ -481,7 +486,8 @@ func RenderQuizQuestions(prompt string, batch *QuizBatch) string {
 	}
 	block := quizQuestionsBlock(batch)
 	prompt = strings.ReplaceAll(prompt, quizQuestionsPlaceholder, block)
-	return strings.ReplaceAll(prompt, riddlesPlaceholder, block)
+	prompt = strings.ReplaceAll(prompt, riddlesPlaceholder, block)
+	return strings.ReplaceAll(prompt, mathProblemsPlaceholder, block)
 }
 
 func quizQuestionsBlock(batch *QuizBatch) string {
