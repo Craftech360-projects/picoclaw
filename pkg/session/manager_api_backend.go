@@ -85,7 +85,13 @@ func (b *ManagerAPIBackend) AddFullMessage(sessionKey string, msg providers.Mess
 	if chatType == 0 || strings.TrimSpace(msg.Content) == "" {
 		return
 	}
-	if err := b.reportMessage(context.Background(), chatType, msg.Content); err != nil {
+	// The local copy keeps the raw turn — it is what the model reads back — but
+	// what reaches the store is what the CHILD heard. See SanitizeSpokenContent.
+	reported := SanitizeSpokenContent(msg.Content)
+	if strings.TrimSpace(reported) == "" {
+		return
+	}
+	if err := b.reportMessage(context.Background(), chatType, reported); err != nil {
 		log.Printf("session: manager api report message: %v", err)
 	}
 }

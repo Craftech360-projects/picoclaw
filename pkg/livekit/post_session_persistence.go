@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 const defaultManagerAPIURL = "http://localhost:8002/toy"
@@ -416,6 +417,9 @@ func (rs *RoomSession) sendSessionEnd(ctx context.Context, messageCount int) err
 }
 
 func (rs *RoomSession) sendChatHistory(ctx context.Context, messages []PersistedChatMessage) error {
+	// Sanitized inside the sender rather than at the call site, so no future
+	// caller can post raw turns carrying tags and MEMO lines.
+	messages = sanitizeHistoryForStorage(messages)
 	if len(messages) == 0 {
 		return nil
 	}
@@ -694,4 +698,61 @@ func normalizeMAC(raw string) string {
 	}
 	return fmt.Sprintf("%s:%s:%s:%s:%s:%s",
 		clean[0:2], clean[2:4], clean[4:6], clean[6:8], clean[8:10], clean[10:12])
+}
+
+// sanitizeHistoryForStorage strips what the child never heard from the messages
+// that reach the chat-history store: the square-bracket expression tags that
+// drive the face, and the hidden MEMO line.
+//
+// Both are machine channels that happen to travel inside the assistant's text.
+// TTS already strips the tags before speech and the MEMO is never spoken, so
+// storing them puts "[excited]" and a metadata line into what the parent app
+// shows as the conversation.
+//
+// Applied HERE, at the persistence boundary, and not at recordTranscript: the
+// in-session history the model reads is deliberately left intact, because the
+// MEMO is how a character recovers its own state mid-session and the tags are
+// the pattern it is imitating.
+func sanitizeHistoryForStorage(messages []PersistedChatMessage) []PersistedChatMessage {
+	out := make([]PersistedChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.ChatType != chatTypeUser {
+			var kept []string
+			for _, line := range strings.Split(msg.Content, "\n") {
+				stripped := strings.TrimSpace(voiceExpressionTagRE.ReplaceAllString(line, " "))
+				// Drop the MEMO line itself, and the truncated "MEMO: type=" tails
+				// a cut-off reply leaves behind.
+				if len(stripped) >= 5 && strings.EqualFold(stripped[:5], "memo:") {
+					continue
+				}
+				if stripped != "" {
+					kept = append(kept, stripped)
+				}
+			}
+			msg.Content = strings.TrimSpace(strings.Join(kept, "\n"))
+		}
+		// A turn that was ONLY a tag and a MEMO leaves nothing worth storing.
+		if strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+// sanitizeBatchHistory applies the same rule the realtime path uses
+// (session.SanitizeSpokenContent): only what the child heard is stored. User
+// turns are already plain speech and pass through untouched.
+func sanitizeBatchHistory(messages []PersistedChatMessage) []PersistedChatMessage {
+	out := make([]PersistedChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.ChatType != chatTypeUser {
+			msg.Content = session.SanitizeSpokenContent(msg.Content)
+		}
+		if strings.TrimSpace(msg.Content) == "" {
+			continue // a turn that was only a tag and a MEMO
+		}
+		out = append(out, msg)
+	}
+	return out
 }
