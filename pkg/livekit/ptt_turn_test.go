@@ -19,6 +19,7 @@ import (
 type fakePTTStream struct {
 	mu              sync.Mutex
 	resetCalls      int
+	cancelCalls     int
 	audioSinceReset bool
 	emptyResult     func()
 }
@@ -35,6 +36,25 @@ func (f *fakePTTStream) ResetBuffer() {
 	f.resetCalls++
 	f.audioSinceReset = false
 	f.mu.Unlock()
+}
+
+// CancelTurn discards like ResetBuffer and additionally marks the turn as
+// deliberately abandoned. Counted separately because the whole point of the
+// split is that the cancel path must reach THIS and the press path must not —
+// without it here, cancelPTTTurn's type assertion falls through to ResetBuffer
+// and every test below passes while proving nothing.
+func (f *fakePTTStream) CancelTurn() {
+	f.mu.Lock()
+	f.resetCalls++
+	f.cancelCalls++
+	f.audioSinceReset = false
+	f.mu.Unlock()
+}
+
+func (f *fakePTTStream) cancels() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancelCalls
 }
 
 func (f *fakePTTStream) SetEmptyResultHandler(fn func()) {
@@ -434,4 +454,61 @@ func TestSpeakDidntHearFallbackSuppressedWhileTurnActive(t *testing.T) {
 	if got := ttsProvider.LastText(); got != "" {
 		t.Fatalf("spoke %q while a turn was active, want silence", got)
 	}
+}
+
+// The two paths that empty the buffer must stay distinguishable all the way
+// down to the provider, because an empty Finalize now ends differently for
+// each: a cancelled turn stays silent, a turn that captured nothing is
+// answered with "I didn't hear you".
+//
+// Asserted through the real handleDataMessage rather than by calling
+// cancelPTTTurn directly: the wiring is a type assertion, so a provider that
+// grew CancelTurn while the call site still said ResetBuffer would look
+// perfectly correct in isolation and be silently wrong here.
+func TestPTTCancelUsesCancelTurnAndPressDoesNot(t *testing.T) {
+	t.Run("press resets without cancelling", func(t *testing.T) {
+		rs, stream := newPTTTestSession(t, "sarvam_rest")
+		rs.handleDataMessage(pressMsg())
+
+		if stream.resets() != 1 {
+			t.Errorf("ResetBuffer calls = %d, want 1", stream.resets())
+		}
+		// A press that suppressed the announcement would silence every empty
+		// turn that followed it — which is the bug, not the fix.
+		if stream.cancels() != 0 {
+			t.Errorf("CancelTurn calls = %d on a press, want 0", stream.cancels())
+		}
+	})
+
+	t.Run("release cancels on both wipes", func(t *testing.T) {
+		rs, stream := newPTTTestSession(t, "sarvam_rest")
+		rs.handleDataMessage(releaseMsg())
+
+		if _, ok := recvTurnEvent(t, rs.participant.turnEvents, 2*time.Second); !ok {
+			t.Fatal("no turn event injected for release")
+		}
+		// Both wipes must cancel, not just the first: the flag is one-shot, so
+		// if the post-grace wipe only reset, the tail frames it exists to
+		// discard would be announced instead of silently dropped.
+		if stream.cancels() != 2 {
+			t.Errorf("CancelTurn calls = %d, want 2 (arrival and post-grace)", stream.cancels())
+		}
+	})
+
+	t.Run("end turn never cancels", func(t *testing.T) {
+		rs, stream := newPTTTestSession(t, "sarvam_rest")
+		rs.handleDataMessage([]byte(`{"type":"speech_end"}`))
+
+		if _, ok := recvTurnEvent(t, rs.participant.turnEvents, 2*time.Second); !ok {
+			t.Fatal("no turn event injected for speech_end")
+		}
+		// End Turn is the path that must reach the child: it neither discards
+		// the utterance nor suppresses the empty-tap announcement.
+		if stream.cancels() != 0 {
+			t.Errorf("CancelTurn calls = %d on End Turn, want 0", stream.cancels())
+		}
+		if stream.resets() != 0 {
+			t.Errorf("ResetBuffer calls = %d on End Turn, want 0", stream.resets())
+		}
+	})
 }
