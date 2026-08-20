@@ -7,13 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 )
-
-func timeDaysAgo(days int) time.Time { return time.Now().Add(-time.Duration(days) * 24 * time.Hour) }
-func timeHour() time.Duration        { return time.Hour }
 
 // Progress travels as MEMO lines: only real MEMOs go up, and the restore only
 // fills gaps — a local file is always fresher than the last session's upload.
@@ -37,7 +33,10 @@ func TestCollectStateMemosOnlyTakesMemoFiles(t *testing.T) {
 		}
 	}
 
-	memos := CollectStateMemos(ws)
+	// Both types written this session: ledgers, the bank file and the truncated
+	// fragment still stay home.
+	all := map[string]bool{"spell_bee": true, "daily_quiz": true}
+	memos := CollectStateMemos(ws, all)
 	got := map[string]bool{}
 	for _, m := range memos {
 		got[m.Type] = true
@@ -46,23 +45,19 @@ func TestCollectStateMemosOnlyTakesMemoFiles(t *testing.T) {
 		t.Errorf("collected %v, want exactly spell_bee and daily_quiz", memos)
 	}
 
-	// With a session marker, only files touched AFTER it travel: a restored
-	// ladder from another character's session must not be re-uploaded.
-	marker := filepath.Join(dir, sessionMarkerFile)
-	if err := os.WriteFile(marker, []byte("x\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	past := timeDaysAgo(3)
-	if err := os.Chtimes(filepath.Join(dir, "spell_bee.md"), past, past); err != nil {
-		t.Fatal(err)
-	}
-	future := timeDaysAgo(0).Add(timeHour())
-	if err := os.Chtimes(filepath.Join(dir, "daily_quiz.md"), future, future); err != nil {
-		t.Fatal(err)
-	}
-	memos = CollectStateMemos(ws)
+	// The 2026-08-20 bug: the workspace is per-CHILD, so this directory holds
+	// every character the child has played. A Quizzy session collected all of
+	// them and relabelled six other characters' state as its own. Only what
+	// this session wrote may travel.
+	memos = CollectStateMemos(ws, map[string]bool{"daily_quiz": true})
 	if len(memos) != 1 || memos[0].Type != "daily_quiz" {
-		t.Errorf("marker filter: collected %v, want only daily_quiz", memos)
+		t.Errorf("collected %v, want only daily_quiz — spell_bee belongs to Tikku", memos)
+	}
+
+	// A session that persisted no MEMO reports nothing. Falling back to the
+	// directory here is exactly what caused the mislabelling.
+	if memos = CollectStateMemos(ws, nil); len(memos) != 0 {
+		t.Errorf("collected %v with an empty written set, want none", memos)
 	}
 }
 

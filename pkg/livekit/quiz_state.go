@@ -325,31 +325,34 @@ func parseQuizVerdict(memo string, batch *QuizBatch, reported map[int64]bool) (i
 
 // maybePersistQuizState is the per-turn hook: extract the MEMO from a finished
 // assistant reply and save it to its per-type state file. Never fails the turn.
-func maybePersistQuizState(workspace, assistantContent string) {
+// Returns the state type it wrote, or "" — the caller records it so session
+// close knows which MEMOs belong to THIS character rather than inspecting the
+// directory, which holds every character the child has played.
+func maybePersistQuizState(workspace, assistantContent string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
-		return
+		return ""
 	}
 	memo := extractQuizMemoLine(assistantContent)
 	if memo == "" {
-		return
+		return ""
 	}
 	stateType := stateTypeFromMemo(memo)
 	if stateType == "" {
 		logger.WarnCF("livekit", "MEMO has missing/empty type; not persisted (likely truncated)", map[string]any{
 			"memo_len": len(memo),
 		})
-		return
+		return ""
 	}
 	dir := stateDir(workspace)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		logger.WarnCF("livekit", "Failed to create state dir", map[string]any{"dir": dir, "error": err.Error()})
-		return
+		return ""
 	}
 	path := filepath.Join(dir, stateType+".md")
 	if err := os.WriteFile(path, []byte(memo+"\n"), 0o600); err != nil {
 		logger.WarnCF("livekit", "Failed to persist MEMO state", map[string]any{"path": path, "error": err.Error()})
-		return
+		return ""
 	}
 	logger.InfoCF("livekit", "Persisted quiz MEMO to MEMORY.md", map[string]any{
 		"path":     path,
@@ -357,6 +360,7 @@ func maybePersistQuizState(workspace, assistantContent string) {
 		"memo_len": len(memo),
 	})
 	updateLedgers(dir, stateType, memo)
+	return stateType
 }
 
 // updateLedgers maintains the long-horizon no-repeat ledgers that outlive the

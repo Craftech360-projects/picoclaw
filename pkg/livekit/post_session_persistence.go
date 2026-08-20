@@ -82,6 +82,7 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 			progressCtx, progressCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := rs.sendCharacterProgress(
 				progressCtx, bridge.agentInstance.Workspace, bridge.contentBank, messages,
+				bridge.StateTypesWritten(),
 			); err != nil {
 				logger.WarnCF("livekit", "Failed to persist character progress", map[string]any{
 					"room":  rs.roomName(),

@@ -173,7 +173,21 @@ type AgentBridge struct {
 	// quizAnswerReporter logs one verdict against the bank.
 	quizBatch *QuizBatch
 	// contentBank is the unscored characters' payload (nil = STARTER MODE).
-	contentBank        *ContentPayload
+	contentBank *ContentPayload
+	// stateTypesWritten records the MEMO types THIS session persisted.
+	//
+	// The workspace is per-child, not per-character, so memory/state/ holds a
+	// file for every character the child has ever played. Session close used to
+	// read that directory and report all of it under the current character's
+	// name — on 2026-08-20 a single Quizzy session relabelled Cheeko's,
+	// Chanda's, Masti's, Tara's, Tikku's and Nani's state as its own.
+	//
+	// A file-mtime guard was tried first and cannot work: hydrateWorkspaceArtifacts
+	// re-downloads every state file AFTER the session marker is stamped, so they
+	// all look freshly written. What this session actually wrote is only knowable
+	// from the writes themselves.
+	stateTypesWritten  map[string]bool
+	stateTypesMu       sync.Mutex
 	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
 	// quizAttemptReporter flushes tries for a question that never resolved.
 	quizAttemptReporter func(questionID int64, attempts []QuizAttempt)
@@ -864,7 +878,9 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		// MEMO lines, and canceled turns never reach this block — an unjudged
 		// answer must not advance the quiz state.
 		if ab.agentInstance != nil {
-			maybePersistQuizState(ab.agentInstance.Workspace, assistantMsg.Content)
+			if wrote := maybePersistQuizState(ab.agentInstance.Workspace, assistantMsg.Content); wrote != "" {
+				ab.noteStateTypeWritten(wrote)
+			}
 		}
 		ab.reportQuizVerdict(assistantMsg.Content)
 		if onDone != nil {

@@ -29,25 +29,30 @@ type StateMemo struct {
 	Memo string `json:"memo"`
 }
 
-// sessionMarkerFile's mtime records when this session's bootstrap ran. Restored
-// files are backdated to their server updated_at, so "modified after the
-// marker" means "this session actually played that character" — without it, a
-// Cheeko session would re-upload Tikku's restored ladder as Cheeko progress.
-const sessionMarkerFile = ".session_marker"
-
-// CollectStateMemos reads the workspace's per-type state files. Only real MEMO
-// lines travel: ledgers and the quiz_bank content file are local mechanics, and
-// the scored banks' progress already lives in the answer log. Files not touched
-// since the session marker (i.e. restored but never played) stay home.
-func CollectStateMemos(workspace string) []StateMemo {
+// CollectStateMemos reads the per-type state files THIS session wrote.
+//
+// `written` is the authority for which those are, because the workspace is
+// per-child rather than per-character: memory/state/ holds a file for every
+// character the child has ever played. Reading the whole directory reported all
+// of them under the current character's name — on 2026-08-20 one Quizzy session
+// relabelled six other characters' state as its own.
+//
+// A file-mtime marker was tried first and cannot work here:
+// hydrateWorkspaceArtifacts re-downloads every state file AFTER bootstrap, so
+// they all look freshly written no matter when the marker is stamped. Only the
+// writes themselves know what this session produced.
+//
+// An empty `written` set collects nothing: a session that persisted no MEMO has
+// no progress to report, and falling back to the directory is what caused the
+// mislabelling.
+func CollectStateMemos(workspace string, written map[string]bool) []StateMemo {
+	if len(written) == 0 {
+		return nil
+	}
 	dir := stateDir(workspace)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
-	}
-	var markerTime time.Time
-	if fi, err := os.Stat(filepath.Join(dir, sessionMarkerFile)); err == nil {
-		markerTime = fi.ModTime()
 	}
 	var memos []StateMemo
 	for _, e := range entries {
@@ -55,10 +60,8 @@ func CollectStateMemos(workspace string) []StateMemo {
 		if e.IsDir() || !strings.HasSuffix(name, ".md") || strings.HasSuffix(name, stateLedgerSfx) {
 			continue
 		}
-		if !markerTime.IsZero() {
-			if fi, err := e.Info(); err == nil && fi.ModTime().Before(markerTime) {
-				continue // restored from the DB, not touched this session
-			}
+		if !written[strings.TrimSuffix(name, ".md")] {
+			continue // another character's state, or restored but never played
 		}
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
@@ -85,8 +88,9 @@ func CollectStateMemos(workspace string) []StateMemo {
 // session that never ran reports nothing.
 func (rs *RoomSession) sendCharacterProgress(
 	ctx context.Context, workspace string, content *ContentPayload, transcript []PersistedChatMessage,
+	written map[string]bool,
 ) error {
-	memos := CollectStateMemos(workspace)
+	memos := CollectStateMemos(workspace, written)
 	if len(memos) == 0 && content == nil {
 		return nil
 	}
@@ -133,12 +137,6 @@ func RestoreCharacterState(ctx context.Context, cfg config.LiveKitServiceManager
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" || strings.TrimSpace(workspace) == "" {
 		return
-	}
-	// Stamp the session marker FIRST (even if the fetch below fails): files
-	// older than this at session close were not played this session.
-	if err := os.MkdirAll(stateDir(workspace), 0o755); err == nil {
-		markerPath := filepath.Join(stateDir(workspace), sessionMarkerFile)
-		_ = os.WriteFile(markerPath, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600)
 	}
 	endpoint := managerQuizBaseURL(cfg) + "/progress/state?device_mac=" + url.QueryEscape(deviceMac)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -188,13 +186,6 @@ func RestoreCharacterState(ctx context.Context, cfg config.LiveKitServiceManager
 			return
 		}
 		if err := os.WriteFile(path, []byte(memo+"\n"), 0o600); err == nil {
-			// Backdate to the server's timestamp: restored-but-not-played files
-			// must sit BEFORE the session marker so they are not re-uploaded.
-			when := s.UpdatedAt
-			if when.IsZero() {
-				when = time.Now().Add(-72 * time.Hour)
-			}
-			_ = os.Chtimes(path, when, when)
 			restored++
 		}
 	}
@@ -204,4 +195,31 @@ func RestoreCharacterState(ctx context.Context, cfg config.LiveKitServiceManager
 			"restored":   restored,
 		})
 	}
+}
+
+// noteStateTypeWritten records that this session persisted a MEMO of this type.
+func (ab *AgentBridge) noteStateTypeWritten(stateType string) {
+	if ab == nil || stateType == "" {
+		return
+	}
+	ab.stateTypesMu.Lock()
+	if ab.stateTypesWritten == nil {
+		ab.stateTypesWritten = map[string]bool{}
+	}
+	ab.stateTypesWritten[stateType] = true
+	ab.stateTypesMu.Unlock()
+}
+
+// StateTypesWritten returns the MEMO types this session persisted.
+func (ab *AgentBridge) StateTypesWritten() map[string]bool {
+	if ab == nil {
+		return nil
+	}
+	ab.stateTypesMu.Lock()
+	defer ab.stateTypesMu.Unlock()
+	out := make(map[string]bool, len(ab.stateTypesWritten))
+	for k := range ab.stateTypesWritten {
+		out[k] = true
+	}
+	return out
 }
