@@ -75,11 +75,17 @@ func CollectStateMemos(workspace string) []StateMemo {
 	return memos
 }
 
-// sendCharacterProgress POSTs the session's final MEMO per type. Best-effort:
-// progress persistence must never fail a session teardown.
-func (rs *RoomSession) sendCharacterProgress(ctx context.Context, workspace string) error {
+// sendCharacterProgress POSTs the session's final MEMO per type, plus the
+// content this session was served so the server can mark it as given (the
+// no-repeat ledger). Best-effort: progress persistence must never fail a
+// session teardown.
+//
+// Reporting the served codes at CLOSE rather than at serve time is what stops a
+// child who connects and immediately drops from burning through the bank: a
+// session that never ran reports nothing.
+func (rs *RoomSession) sendCharacterProgress(ctx context.Context, workspace string, content *ContentPayload) error {
 	memos := CollectStateMemos(workspace)
-	if len(memos) == 0 {
+	if len(memos) == 0 && content == nil {
 		return nil
 	}
 	endpoint := strings.TrimRight(rs.managerAPIURL, "/") + "/progress/session"
@@ -87,6 +93,17 @@ func (rs *RoomSession) sendCharacterProgress(ctx context.Context, workspace stri
 		"device_mac": rs.deviceMAC,
 		"character":  rs.characterName,
 		"memos":      memos,
+	}
+	if content != nil && len(content.Items) > 0 {
+		codes := make([]string, 0, len(content.Items))
+		for _, item := range content.Items {
+			if code := strings.TrimSpace(fmt.Sprintf("%v", item["code"])); code != "" {
+				codes = append(codes, code)
+			}
+		}
+		if len(codes) > 0 {
+			payload["content"] = map[string]any{"bank": content.Bank, "codes": codes}
+		}
 	}
 	status, body, err := postJSON(ctx, endpoint, payload, managerAPIServiceHeaders(rs.managerAPISecret))
 	if err != nil {
