@@ -25,10 +25,8 @@ const (
 	stateLedgerSfx  = "-ledger.md"
 	quizStateMaxAge = 48 * time.Hour // ponytail: tz-blind bound; per-device timezone if parents complain
 
-	storyLedgerFile    = "story-ledger.md"
-	questionLedgerFile = "question-ledger.md"
-	storyLedgerMaxAge  = 30 * 24 * time.Hour // prompt's "do not repeat within thirty days"
-	quizLedgerMaxAge   = 14 * 24 * time.Hour // prompt's "within fourteen days"
+	storyLedgerFile   = "story-ledger.md"
+	storyLedgerMaxAge = 30 * 24 * time.Hour // prompt's "do not repeat within thirty days"
 )
 
 // Legacy single-section markers (pre per-type files). Kept for migration only.
@@ -76,31 +74,6 @@ var scoredMemoTypes = map[string]bool{
 	"daily_quiz":   true, // Quizzy, and any prompt not yet migrated
 	"daily_riddle": true, // Bujho
 	"daily_math":   true, // Ginti
-}
-
-// questionLedgerFor names the asked_keys no-repeat ledger for a scored type.
-//
-// Per type for the same reason as the scoreboard: one file upserted by date
-// means the day's second bank overwrites the first bank's asked_keys, and the
-// no-repeat guarantee the prompt promises quietly stops holding. daily_quiz
-// keeps the original filename so Quizzy's existing fourteen days survive.
-func questionLedgerFor(stateType string) string {
-	if stateType == "daily_quiz" {
-		return questionLedgerFile
-	}
-	return stateType + stateLedgerSfx
-}
-
-// isQuestionLedger reports whether a ledger filename is a scored bank's
-// asked_keys ledger, which ages out at fourteen days rather than the story
-// ledger's window.
-func isQuestionLedger(name string) bool {
-	for t := range scoredMemoTypes {
-		if strings.EqualFold(name, questionLedgerFor(t)) {
-			return true
-		}
-	}
-	return false
 }
 
 var quizBankBankRE = regexp.MustCompile(`(?i)\bbank\s*=\s*([a-z_]+)`)
@@ -424,19 +397,6 @@ func updateLedgers(dir, stateType, memo string) {
 		}
 		line := fmt.Sprintf("%s | %s | %s | %s", date, key, memoField(memo, "title"), memoField(memo, "theme"))
 		appendLedgerLine(filepath.Join(dir, storyLedgerFile), line, key, storyLedgerMaxAge)
-	default:
-		// Every scored bank keeps its asked_keys ledger, so this reads the set
-		// rather than one literal — a character added to scoredMemoTypes must
-		// not silently lose its no-repeat ledger here.
-		if !scoredMemoTypes[stateType] {
-			return
-		}
-		keys := memoField(memo, "asked_keys")
-		if keys == "" {
-			return
-		}
-		line := fmt.Sprintf("%s | asked_keys=%s", date, keys)
-		upsertLedgerLineByDate(filepath.Join(dir, questionLedgerFor(stateType)), date, line, quizLedgerMaxAge)
 	}
 }
 
@@ -570,12 +530,8 @@ func PruneStaleStateFiles(workspace string, now time.Time) (removed int, err err
 		}
 		path := filepath.Join(dir, e.Name())
 		if strings.HasSuffix(strings.ToLower(e.Name()), stateLedgerSfx) {
-			maxAge := storyLedgerMaxAge
-			if isQuestionLedger(e.Name()) {
-				maxAge = quizLedgerMaxAge
-			}
 			if data, err := os.ReadFile(path); err == nil {
-				writeLedger(path, pruneLedgerLines(nonEmptyLines(string(data)), now, maxAge))
+				writeLedger(path, pruneLedgerLines(nonEmptyLines(string(data)), now, storyLedgerMaxAge))
 			}
 			continue
 		}

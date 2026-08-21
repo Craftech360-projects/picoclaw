@@ -139,12 +139,11 @@ func TestLedgers(t *testing.T) {
 	dir := t.TempDir()
 	sdir := filepath.Join(dir, "memory", "state")
 
-	// Dates are RELATIVE to now, never hardcoded: both ledgers prune by age
-	// (story 30 days, quiz 14), so a literal date silently rots into a failure
-	// once the calendar passes it. This test began failing on 2026-08-16 for
-	// exactly that reason — its quiz date was 14 days old and the line it
-	// asserted on was pruned the moment it was written.
-	today := time.Now().Format("2006-01-02")
+	// Dates are RELATIVE to now, never hardcoded: the ledger prunes by age
+	// (30 days), so a literal date silently rots into a failure once the
+	// calendar passes it. This test began failing on 2026-08-16 for exactly
+	// that reason — a date had aged out and the line it asserted on was
+	// pruned the moment it was written.
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 
 	// incomplete story -> no ledger entry
@@ -161,14 +160,6 @@ func TestLedgers(t *testing.T) {
 	if err != nil || strings.Count(string(data), "moon_robot") != 1 {
 		t.Fatalf("story ledger wrong: %v %s", err, data)
 	}
-
-	// quiz ledger: same-date line upserted, not appended
-	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+today+" | asked_keys=k1")
-	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+today+" | asked_keys=k1,k2")
-	data, err = os.ReadFile(filepath.Join(sdir, questionLedgerFile))
-	if err != nil || strings.Count(string(data), today) != 1 || !strings.Contains(string(data), "k1,k2") {
-		t.Fatalf("quiz ledger wrong: %v %s", err, data)
-	}
 }
 
 // A ledger line older than its bank's window must be pruned, and one inside it
@@ -178,18 +169,18 @@ func TestLedgerPrunesByAge(t *testing.T) {
 	dir := t.TempDir()
 	sdir := filepath.Join(dir, "memory", "state")
 
-	stale := time.Now().AddDate(0, 0, -20).Format("2006-01-02") // > 14d quiz window
+	stale := time.Now().AddDate(0, 0, -40).Format("2006-01-02") // > 30d story window
 	fresh := time.Now().AddDate(0, 0, -2).Format("2006-01-02")
 
-	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+stale+" | asked_keys=old")
-	maybePersistQuizState(dir, "MEMO: type=daily_quiz | date="+fresh+" | asked_keys=new")
+	maybePersistQuizState(dir, "MEMO: type=story | date="+stale+" | story_key=old | completed=true")
+	maybePersistQuizState(dir, "MEMO: type=story | date="+fresh+" | story_key=new | completed=true")
 
-	data, err := os.ReadFile(filepath.Join(sdir, questionLedgerFile))
+	data, err := os.ReadFile(filepath.Join(sdir, storyLedgerFile))
 	if err != nil {
-		t.Fatalf("no quiz ledger: %v", err)
+		t.Fatalf("no story ledger: %v", err)
 	}
 	if strings.Contains(string(data), "old") {
-		t.Errorf("a line past the 14-day window survived: %s", data)
+		t.Errorf("a line past the 30-day window survived: %s", data)
 	}
 	if !strings.Contains(string(data), "new") {
 		t.Errorf("a line inside the window was pruned: %s", data)
@@ -248,7 +239,6 @@ func TestPruneStaleStateFiles(t *testing.T) {
 	write("story.md", "MEMO: type=story | date=2026-08-01 | completed=false\n")                        // stale -> removed
 	write("nodate.md", "MEMO: type=nodate | answered=1\n")                                             // no date -> kept (fail-open)
 	write(storyLedgerFile, "2026-06-01 | old_key | Old | theme\n2026-08-01 | new_key | New | theme\n") // 30d prune
-	write(questionLedgerFile, "2026-07-20 | asked_keys=old\n2026-08-09 | asked_keys=new\n")            // 14d prune
 
 	removed, err := PruneStaleStateFiles(dir, now)
 	if err != nil || removed != 1 {
@@ -266,10 +256,6 @@ func TestPruneStaleStateFiles(t *testing.T) {
 	sl, _ := os.ReadFile(filepath.Join(sdir, storyLedgerFile))
 	if strings.Contains(string(sl), "old_key") || !strings.Contains(string(sl), "new_key") {
 		t.Fatalf("story ledger prune wrong: %s", sl)
-	}
-	ql, _ := os.ReadFile(filepath.Join(sdir, questionLedgerFile))
-	if strings.Contains(string(ql), "old") || !strings.Contains(string(ql), "new") {
-		t.Fatalf("question ledger prune wrong: %s", ql)
 	}
 
 	// missing dir -> no-op
@@ -466,7 +452,7 @@ func TestVerdictMatchesClaimedQuestion(t *testing.T) {
 }
 
 // TestScoredMemoTypesSeparateTheBanks pins the per-character split: each scored
-// bank must score under its own type= label and keep its own asked_keys ledger.
+// bank must score under its own type= label.
 // Sharing daily_quiz let Quizzy, Bujho and Ginti overwrite each other's daily
 // scoreboard and resume at another bank's question id.
 func TestScoredMemoTypesSeparateTheBanks(t *testing.T) {
@@ -483,23 +469,5 @@ func TestScoredMemoTypesSeparateTheBanks(t *testing.T) {
 	// An unscored type must not reach the answer log.
 	if _, _, ok := parseQuizVerdict("MEMO: type=story | scored_q=1 | result=correct", batch, map[int64]bool{}); ok {
 		t.Error("story memo scored; only scoredMemoTypes may reach the answer log")
-	}
-
-	// One ledger per bank, or the day's second bank overwrites the first's
-	// asked_keys and the no-repeat promise stops holding.
-	seen := map[string]string{}
-	for typ := range scoredMemoTypes {
-		name := questionLedgerFor(typ)
-		if prev, dup := seen[name]; dup {
-			t.Errorf("%s and %s share ledger %q", prev, typ, name)
-		}
-		seen[name] = typ
-		if !isQuestionLedger(name) {
-			t.Errorf("%s: ledger %q not recognised, so it would age out at the story window", typ, name)
-		}
-	}
-	// Quizzy's existing fourteen days must survive the rename.
-	if got := questionLedgerFor("daily_quiz"); got != questionLedgerFile {
-		t.Errorf("daily_quiz ledger = %q, want %q — renaming it discards Quizzy's history", got, questionLedgerFile)
 	}
 }
