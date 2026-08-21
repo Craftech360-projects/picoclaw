@@ -425,6 +425,47 @@ SELECT count(*) FROM quiz_question;
 
 Expect one row per character, distinct voices, and non-zero bank counts.
 
+### Alternative: clone the data from an existing environment
+
+Instead of installing the pack, you can copy the content straight out of a
+working environment. Faster, and it guarantees the new environment matches one
+that already runs.
+
+**STOP — ASK THE HUMAN** for the source connection string. Never hard-code one
+in a file that gets committed: this repository is public, so a connection string
+in a document is a published credential.
+
+```bash
+export SRC="postgresql://USER:PASSWORD@HOST:PORT/DATABASE"   # from the human
+export DST="postgresql://USER:PASSWORD@HOST:PORT/DATABASE"   # your new database
+```
+
+**Copy only the content tables, not the child data.** The tables you need are
+the characters and the banks:
+
+```bash
+pg_dump "$SRC" --data-only --no-owner --no-privileges   -t ai_agent_template   -t quiz_question -t quiz_question_answer   -t riddle_question -t riddle_question_answer   -t math_question -t math_question_answer   -t story_bank -t spell_bank -t joke_bank -t why_bank -t word_bank   > content.sql
+
+psql "$DST" -f content.sql
+```
+
+Run this **after** `prisma migrate deploy`, so the schema already exists and only
+rows are being loaded.
+
+> **Do not `pg_dump` the whole database.** It carries `ai_device`,
+> `kid_character_state`, `kid_session_progress`, `voice_session_messages` and the
+> analytics rollups — real children's names, conversation transcripts and device
+> identifiers. Copying those into a development environment spreads personal data
+> that has no reason to be there, and every extra copy is one more thing to
+> protect and delete later. The content tables above are all a new environment
+> needs to hold a conversation.
+
+If you genuinely need a full copy — restoring a broken production, say — that is
+a different operation with different approvals, not a setup step.
+
+**Checkpoint:** the same as for the pack install — one row per character with
+distinct voices, and non-zero bank counts.
+
 ### The ordering rule
 
 > **Worker code before prompts. Never the reverse.**
