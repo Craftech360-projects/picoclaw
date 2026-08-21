@@ -55,10 +55,53 @@ func stateDir(workspace string) string {
 // while still numbering it correctly from the surviving scoreboard.
 const quizBankStateFile = "quiz_bank.md"
 
-// quizMemoStateFile is the MEMO scoreboard, written from the memo's own
-// type= field. Both Quizzy and Riddler emit type=daily_quiz — deliberately,
-// since that literal is what the parser matches — so they share this one file.
+// quizMemoStateFile is the scoreboard the scored characters shared while they
+// all emitted type=daily_quiz. It survives only for the bank-switch clear
+// below, which protects sessions whose prompt still carries the old literal.
 const quizMemoStateFile = "daily_quiz.md"
+
+// scoredMemoTypes is the set of MEMO type= labels the scoring path accepts.
+//
+// The label is also the scoreboard's filename and its kid_character_state
+// state_type, so one shared label means one shared row: Quizzy, Bujho and Ginti
+// overwrote each other's daily score and could resume at another bank's
+// question id. Giving each its own label separates all three at once, with no
+// schema change — (kid_id, daily_math) and (kid_id, daily_quiz) are already
+// distinct rows under the existing key.
+//
+// Accepting all four is what makes the rollout safe in either order: the new
+// labels score the moment a prompt starts emitting them, and daily_quiz keeps
+// scoring for every prompt that has not been updated yet.
+var scoredMemoTypes = map[string]bool{
+	"daily_quiz":   true, // Quizzy, and any prompt not yet migrated
+	"daily_riddle": true, // Bujho
+	"daily_math":   true, // Ginti
+}
+
+// questionLedgerFor names the asked_keys no-repeat ledger for a scored type.
+//
+// Per type for the same reason as the scoreboard: one file upserted by date
+// means the day's second bank overwrites the first bank's asked_keys, and the
+// no-repeat guarantee the prompt promises quietly stops holding. daily_quiz
+// keeps the original filename so Quizzy's existing fourteen days survive.
+func questionLedgerFor(stateType string) string {
+	if stateType == "daily_quiz" {
+		return questionLedgerFile
+	}
+	return stateType + stateLedgerSfx
+}
+
+// isQuestionLedger reports whether a ledger filename is a scored bank's
+// asked_keys ledger, which ages out at fourteen days rather than the story
+// ledger's window.
+func isQuestionLedger(name string) bool {
+	for t := range scoredMemoTypes {
+		if strings.EqualFold(name, questionLedgerFor(t)) {
+			return true
+		}
+	}
+	return false
+}
 
 var quizBankBankRE = regexp.MustCompile(`(?i)\bbank\s*=\s*([a-z_]+)`)
 
@@ -254,7 +297,7 @@ var quizVerdictResults = map[string]bool{"correct": true, "wrong": true, "reveal
 // and when only one question can possibly be meant there is nothing to confuse).
 // A nil batch means the fetch failed, so there is no scored quiz to report on.
 func parseQuizVerdict(memo string, batch *QuizBatch, reported map[int64]bool) (int64, string, bool) {
-	if batch == nil || stateTypeFromMemo(memo) != "daily_quiz" {
+	if batch == nil || !scoredMemoTypes[stateTypeFromMemo(memo)] {
 		return 0, "", false
 	}
 	result := strings.ToLower(memoField(memo, "result"))
@@ -381,13 +424,19 @@ func updateLedgers(dir, stateType, memo string) {
 		}
 		line := fmt.Sprintf("%s | %s | %s | %s", date, key, memoField(memo, "title"), memoField(memo, "theme"))
 		appendLedgerLine(filepath.Join(dir, storyLedgerFile), line, key, storyLedgerMaxAge)
-	case "daily_quiz":
+	default:
+		// Every scored bank keeps its asked_keys ledger, so this reads the set
+		// rather than one literal — a character added to scoredMemoTypes must
+		// not silently lose its no-repeat ledger here.
+		if !scoredMemoTypes[stateType] {
+			return
+		}
 		keys := memoField(memo, "asked_keys")
 		if keys == "" {
 			return
 		}
 		line := fmt.Sprintf("%s | asked_keys=%s", date, keys)
-		upsertLedgerLineByDate(filepath.Join(dir, questionLedgerFile), date, line, quizLedgerMaxAge)
+		upsertLedgerLineByDate(filepath.Join(dir, questionLedgerFor(stateType)), date, line, quizLedgerMaxAge)
 	}
 }
 
@@ -522,7 +571,7 @@ func PruneStaleStateFiles(workspace string, now time.Time) (removed int, err err
 		path := filepath.Join(dir, e.Name())
 		if strings.HasSuffix(strings.ToLower(e.Name()), stateLedgerSfx) {
 			maxAge := storyLedgerMaxAge
-			if strings.EqualFold(e.Name(), questionLedgerFile) {
+			if isQuestionLedger(e.Name()) {
 				maxAge = quizLedgerMaxAge
 			}
 			if data, err := os.ReadFile(path); err == nil {

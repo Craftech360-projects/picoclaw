@@ -464,3 +464,42 @@ func TestVerdictMatchesClaimedQuestion(t *testing.T) {
 		})
 	}
 }
+
+// TestScoredMemoTypesSeparateTheBanks pins the per-character split: each scored
+// bank must score under its own type= label and keep its own asked_keys ledger.
+// Sharing daily_quiz let Quizzy, Bujho and Ginti overwrite each other's daily
+// scoreboard and resume at another bank's question id.
+func TestScoredMemoTypesSeparateTheBanks(t *testing.T) {
+	batch := &QuizBatch{Questions: []QuizQuestion{{ID: 1}, {ID: 2}}}
+
+	// Every scored label scores. daily_quiz stays accepted so a prompt that has
+	// not been migrated yet keeps recording verdicts.
+	for _, typ := range []string{"daily_quiz", "daily_riddle", "daily_math"} {
+		memo := "MEMO: type=" + typ + " | scored_q=1 | result=correct"
+		if id, res, ok := parseQuizVerdict(memo, batch, map[int64]bool{}); !ok || id != 1 || res != "correct" {
+			t.Errorf("%s: got (%d,%q,%v), want (1,\"correct\",true)", typ, id, res, ok)
+		}
+	}
+	// An unscored type must not reach the answer log.
+	if _, _, ok := parseQuizVerdict("MEMO: type=story | scored_q=1 | result=correct", batch, map[int64]bool{}); ok {
+		t.Error("story memo scored; only scoredMemoTypes may reach the answer log")
+	}
+
+	// One ledger per bank, or the day's second bank overwrites the first's
+	// asked_keys and the no-repeat promise stops holding.
+	seen := map[string]string{}
+	for typ := range scoredMemoTypes {
+		name := questionLedgerFor(typ)
+		if prev, dup := seen[name]; dup {
+			t.Errorf("%s and %s share ledger %q", prev, typ, name)
+		}
+		seen[name] = typ
+		if !isQuestionLedger(name) {
+			t.Errorf("%s: ledger %q not recognised, so it would age out at the story window", typ, name)
+		}
+	}
+	// Quizzy's existing fourteen days must survive the rename.
+	if got := questionLedgerFor("daily_quiz"); got != questionLedgerFile {
+		t.Errorf("daily_quiz ledger = %q, want %q — renaming it discards Quizzy's history", got, questionLedgerFile)
+	}
+}
