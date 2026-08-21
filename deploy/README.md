@@ -6,6 +6,11 @@ This folder contains the deployment entry point for the Picoclaw LiveKit voice a
 
 For the longer operational runbook, see `../docs/picoclaw-livekit-aws-eks-runbook.md`.
 
+**Setting up a brand-new environment from nothing?** Start with
+[../docs/setup-from-scratch.md](../docs/setup-from-scratch.md) — clone, database,
+manager API, gateway, worker, characters. The documents here assume the
+environment already exists.
+
 This README covers the **EKS voice worker only**. The other two environments have
 their own documents, because neither runs on Kubernetes:
 
