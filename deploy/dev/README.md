@@ -5,8 +5,8 @@ MQTT gateways and the dashboards — on one host under pm2. It serves
 `otadev.cheekoai.in`.
 
 This is the only environment an agent may deploy to without asking. Production
-(`ota.cheekoai.in` → 139.59.7.72, see [prod-box-backend.md](prod-box-backend.md))
-and EKS (see [k8s/](k8s/) and [README.md](README.md)) each need an explicit
+(`ota.cheekoai.in` → 139.59.7.72, see [prod/](../prod/))
+and EKS (see [../k8s/](../k8s/) and [../README.md](../README.md)) each need an explicit
 per-deploy grant.
 
 ## Current Target

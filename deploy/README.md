@@ -9,10 +9,10 @@ For the longer operational runbook, see `../docs/picoclaw-livekit-aws-eks-runboo
 This README covers the **EKS voice worker only**. The other two environments have
 their own documents, because neither runs on Kubernetes:
 
-- [dev-box.md](dev-box.md) — the whole stack on one DigitalOcean host
+- [dev/](dev/) — the whole stack on one DigitalOcean host
   (`64.227.170.31`, `otadev.cheekoai.in`): voice worker, manager API, gateways,
   dashboards, all under pm2.
-- [prod-box-backend.md](prod-box-backend.md) — the production **backend**
+- [prod/](prod/) — the production **backend**
   (`139.59.7.72`, `ota.cheekoai.in`): manager API, gateways, dashboards. The
   production voice worker is the EKS deployment described here, so a backend
   release and a worker release are separate deploys.

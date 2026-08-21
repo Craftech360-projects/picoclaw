@@ -3,19 +3,19 @@
 The production backend box runs the manager API, the MQTT gateways and the
 dashboards. It serves `ota.cheekoai.in`.
 
-> **This file is mirrored in two repos** — `picoclaw/deploy/prod-box-backend.md`
+> **This file is mirrored in two repos** — `picoclaw/deploy/prod/README.md`
 > and `cheeko-backend/deploy/prod-box-backend.md`. It documents backend code that
 > lives in cheeko-backend but sits beside the EKS and dev-box docs in picoclaw,
 > so the three environments are findable from one place. **Edit both copies**, or
 > the one you did not touch becomes a confident lie.
 
 **The voice worker does not run here.** `picoclaw-livekit` runs on EKS — see
-[README.md](README.md) and [k8s/](k8s/). A backend release and a worker release
+[../README.md](../README.md) and [../k8s/](../k8s/). A backend release and a worker release
 are separate deploys with separate rollbacks.
 
 > Production deploys require an **explicit per-deploy grant**. A grant covers
 > one deploy; it does not carry to the next one. The dev box
-> ([dev-box.md](dev-box.md)) is the only standing permission.
+> ([dev/](../dev/)) is the only standing permission.
 
 ## Current Target
 
