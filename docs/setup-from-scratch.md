@@ -201,6 +201,51 @@ MANAGER_API_SECRET=<same SERVICE_SECRET_KEY as above>
 `AWS_*` and recording flags are optional; leave `AUDIO_RECORDING_ENABLED=false`
 for a first run.
 
+### 5.1 `config/mqtt.json` — required, and NOT in the repo
+
+The gateway also reads `config/mqtt.json`, loaded at
+[`app.js:26`](../../cheeko-backend/main/mqtt-gateway/app.js) via
+`new ConfigManager('mqtt.json')`. **This file is gitignored and no template
+ships with the repo**, so a fresh clone has nothing to load and the gateway will
+not start until you create it:
+
+```bash
+mkdir -p config
+cat > config/mqtt.json <<'JSON'
+{
+  "debug": false,
+  "mqtt_broker": {
+    "host": "<broker host or IP>",
+    "port": 1883,
+    "protocol": "mqtt",
+    "keepalive": 60,
+    "clean": true,
+    "reconnectPeriod": 1000,
+    "connectTimeout": 30000
+  },
+  "livekit": {
+    "url": "wss://<your-project>.livekit.cloud",
+    "api_key": "<LiveKit API key>",
+    "api_secret": "<LiveKit API secret>"
+  }
+}
+JSON
+```
+
+**STOP — ASK THE HUMAN** for the broker host and the LiveKit credentials.
+
+Two things to get right:
+
+- **The LiveKit credentials appear twice** — here and in the worker's
+  `~/.picoclaw/.security.yml`. They must be the same project, or the gateway
+  creates rooms the worker never joins and sessions hang with no error.
+- **`livekit.url` here is the gateway's own connection**, and `protocol`/`port`
+  must match the broker's listener (`mqtt`/1883 plain, `mqtts`/8883 TLS).
+
+The local-development defaults in an existing checkout — `ws://localhost:7880`
+with `api_key: devkey` — are LiveKit's stock dev-server values. They only work
+against a locally run LiveKit server, never LiveKit Cloud.
+
 ```bash
 node --check server.js && npm start
 ```
@@ -396,6 +441,65 @@ this ordering is always safe.
 
 ---
 
+## 7.5 Dashboards (optional, but the easiest way to test)
+
+Neither is required for a device to work, but **`admin-dashboard` is the
+fastest way to hold a session without a physical toy** — it joins a LiveKit room
+as a browser client, which is how most of the testing in this project is done.
+
+### admin-dashboard
+
+```bash
+cd cheeko-backend/main/admin-dashboard
+npm install
+cat > .env <<'ENV'
+PORT=4000
+MANAGER_URL=http://localhost:8002/toy
+MQTT_SIGNATURE_KEY=<same as the gateway>
+LIVEKIT_URL=wss://<your-project>.livekit.cloud
+LIVEKIT_PUBLIC_URL=wss://<your-project>.livekit.cloud
+LIVEKIT_API_KEY=<LiveKit API key>
+LIVEKIT_API_SECRET=<LiveKit API secret>
+ADMIN_PASSWORD=<choose one>
+ENV
+npm start
+```
+
+**Checkpoint:** open `http://localhost:4000`, log in with `ADMIN_PASSWORD`, and
+start a session. In the worker log you should see `Job assignment received`
+followed by `Audio track subscribed` with a `participant=dashboard-…` name.
+
+That participant prefix is worth remembering: `dashboard-…` in the logs means a
+browser test client, while a MAC address means a real device. They fail
+differently, and confusing the two wastes time when reading traces.
+
+### manager-web
+
+The parent/admin Vue app. It is a pure frontend — it needs the manager API
+running, nothing else.
+
+```bash
+cd cheeko-backend/main/manager-web
+npm install
+```
+
+`.env.development` needs:
+
+```
+VUE_APP_API_BASE_URL=http://localhost:8002/toy
+VUE_APP_TITLE=Cheeko
+```
+
+```bash
+npm run serve       # dev server
+npm run build       # production bundle into dist/
+```
+
+**Checkpoint:** the app loads and its network calls to
+`VUE_APP_API_BASE_URL` return 200 rather than CORS errors. If they are blocked,
+add the dev server's origin to `CORS_ORIGINS` in the manager API `.env` and
+restart it.
+
 ## 8. End-to-end verification
 
 With all four processes up and a device (or the admin dashboard) connected:
@@ -463,7 +567,6 @@ a commit rather than working around it on a server.
 
 - **Firmware and device provisioning** — pairing a physical toy.
 - **TLS, domains, reverse proxy** — everything here binds to localhost.
-- **The dashboards** — `admin-dashboard`, `manager-web`,
-  `founder-dashboard-web` each have their own `npm install && npm start`.
+- **`founder-dashboard-web`** — its own `npm install && npm start`.
 - **Production hardening** — see [deploy/prod/](../deploy/prod/) and
   [deploy/k8s/capacity-and-hardening.md](../deploy/k8s/capacity-and-hardening.md).
