@@ -8,6 +8,11 @@ Production deploys require an explicit per-deploy grant from Rahul — see the
 standing rule in `cheeko-deploy-boundaries`. This document is the plan, not
 permission.
 
+> **Phase 0 ran on 2026-08-21 and changed the picture. Read
+> [Phase 0 results](#phase-0-results-2026-08-21) before acting on Phases 1-3:
+> prod is a platform generation behind, the bug this change fixes cannot occur
+> there yet, and Phase 1 carries a regression risk that did not exist on dev.**
+
 ## What ships
 
 | repo | commit | target |
@@ -163,3 +168,52 @@ Phase 2 late in the day minimises it.
 - Bujho has not been played end to end even on dev; only Ginti was
   (`math today 1/10`, 2026-08-21). Same code path, but untested is untested.
 - Prod has never been inspected for any of this.
+
+## Phase 0 results (2026-08-21)
+
+Read-only audit of the prod manager DB via `139.59.7.72`. No writes, no
+restarts. The prod DB is a distinct Postgres from dev DB1 (confirmed by ref).
+
+**Prod is a platform generation behind dev.** Its last applied migration is
+`20260817000000_drop_legacy_mac_uniques`, dated 2026-08-17. Everything from
+2026-08-18 onward is unapplied, and these tables simply do not exist:
+
+```
+MISSING  kid_character_state    kid_session_progress
+MISSING  story_bank  spell_bank  joke_bank  why_bank  word_bank
+MISSING  riddle_bank  math_bank
+present  quiz_question  quiz_question_answer  riddle_question  ai_agent_template
+```
+
+**Consequences that rewrite this plan:**
+
+1. **The bug this change fixes cannot occur on prod today.** The shared-row
+   collision needs `kid_character_state`; there is no such table, so no MEMO
+   state is persisted there at all. Shipping the state-type split to prod is a
+   no-op until the 2026-08-18+ migrations land. There is no urgency.
+2. **Phase 2 is not a two-character prompt edit.** Prod has 8 characters, not
+   11 — `math_master` (Ginti), `spell_master` (Tikku) and `forest_ranger`
+   (Vanya) have no rows. Ginti cannot be relabelled because Ginti is not there.
+3. **Prod prompts are older than the stale Downloads pack.** Five characters
+   share one identical `system_prompt` hash, i.e. a generic prompt rather than
+   their own. `quiz_master` and `riddle_master` match the *old* pack; Nani
+   matches nothing seen so far. Bringing prod to the current roster is a
+   content-platform upgrade, not this ticket.
+4. **Phase 1 alone carries a regression risk on prod.** `liveKitToollessCharacters`
+   ([workspace_tools.go:384](../../cmd/picoclaw-livekit/workspace_tools.go)) matches
+   on `agent_name` and contains `"bujho"`, not `"riddler"`. Prod's
+   `riddle_master` is still named **`riddler`**. Rolling `ec14877` (which sits on
+   top of the rename in `853aa65`) to EKS therefore drops the riddle character
+   out of the toolless list and hands it the tools its own prompt forbids —
+   silently, since the default for an unknown character is to keep tools.
+   **Fix before or with Phase 1:** rename prod's `agent_name` to `Bujho`, or add
+   `"riddler"` back to the list as a compatibility entry.
+
+**Recommendation:** do not run Phases 1-3 as written. The state-type split is
+dev-only value right now. If EKS is upgraded for other reasons, item 4 must be
+handled in the same release.
+
+**Still unanswered — needs Rahul.** Which Manager API do the EKS pods call, and
+which Postgres does it write? If they point at this prod DB, the worker's
+progress-persistence POSTs have no `kid_character_state` to write to and are
+presumably failing already; that is worth checking independently of this change.
