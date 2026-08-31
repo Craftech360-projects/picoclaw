@@ -1,0 +1,88 @@
+# Overlay for the existing `prometheus` release in ns `monitoring` (chart prometheus-29.7.0).
+#
+# Apply with (bot token passed at apply time so it never lands in git):
+#   helm upgrade prometheus prometheus-community/prometheus -n monitoring \
+#     --reuse-values -f prometheus-values.yaml --version 29.7.0 \
+#     --set-string alertmanager.config.receivers[1].telegram_configs[0].bot_token=$TOKEN
+#
+# STORAGE IS DELIBERATELY LEFT AS emptyDir.
+# The obvious change here is server.persistentVolume.enabled=true. Do not make it yet:
+# the EBS CSI driver is NOT installed on this cluster (only efs.csi.aws.com is registered),
+# and the `gp2` StorageClass uses the in-tree kubernetes.io/aws-ebs provisioner that was
+# removed in Kubernetes 1.31 — this cluster runs 1.35. A PVC would sit Pending forever,
+# Prometheus would go unschedulable, prometheus-adapter would lose its metric source, and
+# the picoclaw-livekit HPA would silently degrade to CPU-only.
+# Prerequisite: install the aws-ebs-csi-driver EKS addon with an IRSA role and add a gp3
+# StorageClass. That is a production IAM change and belongs in its own task.
+#
+# Consequence while emptyDir stands: all metric history is lost on every Prometheus restart.
+# Alert rules below therefore use short windows and absent() checks, which recover on their
+# own after a restart instead of silently never firing.
+
+alertmanager:
+  enabled: true
+  persistence:
+    enabled: false          # silences only; losing them on restart is acceptable
+  config:
+    route:
+      receiver: telegram
+      group_by: ['alertname']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h   # long enough not to train anyone to mute it
+      routes:
+        - matchers: [severity = "none"]
+          receiver: 'null'
+    receivers:
+      - name: 'null'
+      - name: telegram
+        telegram_configs:
+          - bot_token: REPLACED_AT_APPLY_TIME
+            chat_id: 445265582
+            parse_mode: ''
+            message: '[EKS] {{ .CommonLabels.severity }} {{ .CommonLabels.alertname }} - {{ .CommonAnnotations.summary }}'
+
+serverFiles:
+  alerting_rules.yml:
+    groups:
+      - name: picoclaw-livekit
+        rules:
+          # Restart detection without kube-state-metrics (not installed): cadvisor
+          # container start times. 30m window survives an emptyDir Prometheus restart
+          # because it refills from live scrapes within one interval.
+          - alert: PicoclawLivekitRestarting
+            expr: changes(container_start_time_seconds{namespace="picoclaw-dev",container="picoclaw-livekit"}[30m]) > 2
+            for: 5m
+            labels:
+              severity: warn
+            annotations:
+              summary: "picoclaw-livekit restarted more than twice in 30m"
+
+          # HPA minReplicas is 2. Fewer means capacity loss on the voice path.
+          - alert: PicoclawLivekitBelowMinReplicas
+            expr: count(up{job="kubernetes-pods", namespace="picoclaw-dev"} == 1) < 2
+            for: 5m
+            labels:
+              severity: page
+            annotations:
+              summary: "Fewer than 2 picoclaw-livekit pods are up"
+
+          # Per-pod ceiling is 15 sessions; HPA targets 60%. Sustained 85% means
+          # scaling is not keeping up with demand.
+          - alert: PicoclawLivekitSessionSaturation
+            expr: avg(picoclaw_livekit_session_load_percent) > 85
+            for: 10m
+            labels:
+              severity: warn
+            annotations:
+              summary: "Session load above 85% for 10m - HPA may not be keeping up"
+
+          # Not cosmetic: this metric feeds prometheus-adapter and the HPA. Losing the
+          # scrape target degrades autoscaling to CPU-only, silently.
+          - alert: PicoclawLivekitMetricMissing
+            expr: absent(picoclaw_livekit_session_load_percent)
+            for: 10m
+            labels:
+              severity: page
+            annotations:
+              summary: "Prometheus lost picoclaw_livekit_session_load_percent - HPA autoscaling is degraded"
