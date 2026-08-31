@@ -794,6 +794,29 @@ The alerts from this task will be noisy until the crash loops are fixed, and a p
 
 ## Task 8: Give Prometheus durable storage
 
+**Status: DEFERRED 2026-08-31 — this task as written would have broken production.**
+
+Pre-flight found two blockers the plan assumed away:
+
+- **No default StorageClass.** `gp2` carries no `is-default-class` annotation, so a PVC without an
+  explicit class stays `Pending` indefinitely.
+- **The EBS CSI driver is not installed.** Only `efs.csi.aws.com` is registered. `gp2` uses the
+  in-tree `kubernetes.io/aws-ebs` provisioner, **removed in Kubernetes 1.31**; this cluster runs
+  **1.35.6-eks**. That StorageClass cannot provision anything.
+
+Enabling `server.persistentVolume` would therefore have left Prometheus unschedulable, taking out
+`prometheus-adapter`'s metric source and silently degrading the `picoclaw-livekit` HPA to CPU-only —
+on the cluster serving live sessions.
+
+Doing it properly requires the `aws-ebs-csi-driver` EKS addon with an IRSA role plus a gp3
+StorageClass. That is a production IAM change and needs its own scoping, not a step inside a
+monitoring task.
+
+**Task 9 does not actually depend on this.** The original claim that it did was too strong:
+Alertmanager evaluates against recent data, and the rules were written with short windows and
+`absent()` checks so they recover on their own after a Prometheus restart. What is lost meanwhile is
+historical context and a blind window following any restart.
+
 `--storage.tsdb.retention.time=15d` is configured, but storage is an `emptyDir` with no PVC — every pod restart silently wipes all history. Trend alerting on a self-emptying database is worse than none, because it is believed.
 
 **Files:**
@@ -900,6 +923,26 @@ git -C D:/picoclaw commit -m "feat(monitoring): give Prometheus a PVC so history
 ---
 
 ## Task 9: Deploy Alertmanager and EKS alert rules
+
+**Status: COMPLETED 2026-08-31.** Helm release `prometheus` revision 2, chart pinned at 29.7.0.
+Four rules loaded and one Alertmanager discovered by Prometheus.
+
+Deviations:
+
+- **Alertmanager is a StatefulSet**, not a Deployment. `kubectl rollout status deploy/...` fails;
+  use `statefulset/prometheus-alertmanager`. Its container is named `alertmanager`, not
+  `prometheus-alertmanager`.
+- **Persistence left off** so it needs no PVC — see Task 8. Silences are lost on restart, which is
+  acceptable.
+- **The bot token is passed with `--set-string` at apply time**, never written to the values file.
+  It lives in the in-cluster Helm release secret; the committed file says `REPLACED_AT_APPLY_TIME`.
+- **The end-to-end test does NOT scale the deployment.** The plan said to drop `picoclaw-livekit` to
+  one replica to trip `PicoclawLivekitBelowMinReplicas`. That removes production voice capacity to
+  test a notification, and there were live child sessions on it. A synthetic alert POSTed to
+  Alertmanager's `/api/v2/alerts` exercises the same delivery path with no production impact;
+  Prometheus-to-Alertmanager is separately proven by `activeAlertmanagers` being non-empty.
+  Alertmanager logs notification *failures* only, so an empty error log after the test means
+  delivery succeeded.
 
 **Files:**
 - Modify: `deploy/k8s/monitoring/prometheus-values.yaml`
