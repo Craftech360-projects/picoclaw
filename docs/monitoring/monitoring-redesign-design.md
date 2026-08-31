@@ -35,7 +35,7 @@ Three layers, each matched to what it can actually see.
 
 | Layer | Question answered | Tool | Vantage point |
 |---|---|---|---|
-| Blackbox | Can a device reach the service? | Uptime Kuma | Outside all infra (EC2 `18.61.233.60`) |
+| Blackbox | Can a device reach the service? | Uptime Kuma | Outside all infra (EC2 `16.112.52.71`) |
 | Metrics | Is the system decaying internally? | Prometheus + Alertmanager | Inside EKS |
 | Process | Are the DO box services staying up? | Kuma push + cron script | On-box, outside the process |
 

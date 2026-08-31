@@ -6,13 +6,13 @@
 
 **Architecture:** Kuma shrinks to blackbox probing and a status page, targeting public hostnames rather than raw IPs. The Prometheus already running in EKS (currently only feeding the HPA) gains durable storage and Alertmanager, and takes over decay detection. DO-box process health uses Kuma push monitors driven by an on-box cron script, as a deliberate stopgap. All three notify one Telegram channel.
 
-**Tech Stack:** Uptime Kuma 2.5.3 (Docker, EC2 `18.61.233.60`), Prometheus v3.11.3 / Helm chart `prometheus-29.7.0` (EKS `picoclaw-eks`, ns `monitoring`), Alertmanager, bash + cron + jq on Ubuntu DO boxes, AWS CLI for security groups.
+**Tech Stack:** Uptime Kuma 2.5.3 (Docker, EC2 `16.112.52.71`), Prometheus v3.11.3 / Helm chart `prometheus-29.7.0` (EKS `picoclaw-eks`, ns `monitoring`), Alertmanager, bash + cron + jq on Ubuntu DO boxes, AWS CLI for security groups.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-monitoring-redesign-design.md`
 
 ## Global Constraints
 
-- **Kuma host:** `aws-kuma-production` = `18.61.233.60`, ap-south-2, instance `i-0c1d60b5df6d3220d`, SSH user `ec2-user`, key `~/.ssh/kuma-ap-south-2.pem`. SSH alias already in `~/.ssh/config`.
+- **Kuma host:** `aws-kuma-production` = `16.112.52.71`, ap-south-2, instance `i-0c1d60b5df6d3220d`, SSH user `ec2-user`, key `~/.ssh/kuma-ap-south-2.pem`. SSH alias already in `~/.ssh/config`.
 - **Kuma security group:** `sg-0ca72b10de2f2e764`.
 - **Kuma data dir on host:** `/opt/uptime-kuma/data`, bind-mounted to `/app/data` in the container. Compose file at `/opt/uptime-kuma/docker-compose.yml`.
 - **Root disk is 8 GB at 77% used (1.9 GB free).** Every task that pulls an image or writes a backup must check free space first. Do not let this fill.
@@ -30,9 +30,18 @@
 
 Nothing else in this plan is safe until there is a restorable backup and the box is off the public internet. API keys for the dependency probes (Task 6) land in `kuma.db` as plaintext, so the lockdown gates that work.
 
+**Status: COMPLETED 2026-08-31.** Deviations from the original plan, both discovered during execution:
+
+- **An Elastic IP was allocated first.** `18.61.233.60` was an auto-assigned public IP with no EIP
+  behind it, so a single instance stop/start would have silently broken every hardcoded reference
+  built in later tasks. Now `16.112.52.71` (`eipalloc-0f0a1b78be1cf3404`), permanent.
+- **systemd timer instead of cron.** `/etc/cron.d` exists on Amazon Linux 2023 but `cronie` is not
+  installed, so a cron entry would have been silently dead — a backup job that never runs is worse
+  than none. systemd was already running, so a timer needed no new package.
+
 **Files:**
 - Create: `/opt/uptime-kuma/backup.sh` (on `aws-kuma-production`)
-- Create: `/etc/cron.d/kuma-backup` (on `aws-kuma-production`)
+- Create: `/etc/systemd/system/kuma-backup.{service,timer}` (on `aws-kuma-production`)
 - Modify: security group `sg-0ca72b10de2f2e764` (AWS, not a file)
 
 **Interfaces:**
@@ -103,11 +112,52 @@ ssh aws-kuma-production 'sudo /opt/uptime-kuma/backup.sh && ls -la /opt/uptime-k
 
 Expected: a `.db.gz` file listed, then `ok`.
 
-- [ ] **Step 6: Schedule it nightly**
+- [x] **Step 6: Schedule it nightly via a systemd timer**
+
+Do **not** use `/etc/cron.d` on this host. The directories exist, but `cronie` is not installed on
+Amazon Linux 2023, so a cron entry is accepted and never runs.
 
 ```bash
-ssh aws-kuma-production 'echo "30 2 * * * root /opt/uptime-kuma/backup.sh >> /var/log/kuma-backup.log 2>&1" | sudo tee /etc/cron.d/kuma-backup && sudo chmod 644 /etc/cron.d/kuma-backup'
+ssh aws-kuma-production 'set -e
+sudo tee /etc/systemd/system/kuma-backup.service > /dev/null <<UNIT
+[Unit]
+Description=Uptime Kuma nightly backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/uptime-kuma/backup.sh
+UNIT
+sudo tee /etc/systemd/system/kuma-backup.timer > /dev/null <<UNIT
+[Unit]
+Description=Run Uptime Kuma backup nightly
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now kuma-backup.timer
+sudo systemctl list-timers kuma-backup.timer --no-pager'
 ```
+
+Expected: the timer listed with a NEXT time. Trigger it once with
+`sudo systemctl start kuma-backup.service` and confirm a new `.db.gz` appears — scheduling a job
+without ever running it is how backups turn out to be broken on the day they are needed.
+
+- [x] **Step 6b: Allocate an Elastic IP before locking down**
+
+The instance had no EIP, so its public address was temporary. Everything downstream hardcodes it.
+
+```bash
+ALLOC=$(aws ec2 allocate-address --region ap-south-2 --domain vpc --tag-specifications 'ResourceType=elastic-ip,Tags=[{Key=Name,Value=uptime-kuma}]' --query 'AllocationId' --output text)
+aws ec2 associate-address --region ap-south-2 --allocation-id "$ALLOC" --instance-id i-0c1d60b5df6d3220d
+aws ec2 describe-instances --region ap-south-2 --instance-ids i-0c1d60b5df6d3220d --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+```
+
+Then update `~/.ssh/config` to the new address and confirm SSH before touching the security group.
 
 - [ ] **Step 7: Restrict the security group to the admin CIDR**
 
@@ -120,7 +170,7 @@ aws ec2 authorize-security-group-ingress --region ap-south-2 --group-id sg-0ca72
 - [ ] **Step 8: Verify you still have access before revoking**
 
 ```bash
-ssh aws-kuma-production 'echo still-reachable' && curl -s -o /dev/null -w "%{http_code}\n" -m 10 http://18.61.233.60:3001
+ssh aws-kuma-production 'echo still-reachable' && curl -s -o /dev/null -w "%{http_code}\n" -m 10 http://16.112.52.71:3001
 ```
 
 Expected: `still-reachable` then `302` or `200`. **If either fails, stop — do not run Step 9.**
@@ -146,9 +196,9 @@ Update `D:/cheeko-backend/README_UPTIME_KUMA.md` — it currently describes the 
 ```markdown
 ## Uptime Kuma Runtime
 
-- Host: EC2 `18.61.233.60` (`aws-kuma-production`), ap-south-2, instance `i-0c1d60b5df6d3220d`
+- Host: EC2 `16.112.52.71` (`aws-kuma-production`), ap-south-2, instance `i-0c1d60b5df6d3220d`
 - Container name: `uptime-kuma`
-- UI: `http://18.61.233.60:3001` — reachable only from the admin CIDR
+- UI: `http://16.112.52.71:3001` — reachable only from the admin CIDR
 - Data dir: `/opt/uptime-kuma/data` (host) -> `/app/data` (container)
 - Backups: `/opt/uptime-kuma/backups`, nightly at 02:30 via `/etc/cron.d/kuma-backup`, 7-day retention
 ```
@@ -214,7 +264,7 @@ Expected: `"version": "2.5.3",`, monitor count `16`, a heartbeat count at or abo
 - [ ] **Step 6: Confirm the UI serves and monitors resumed**
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" -m 10 http://18.61.233.60:3001
+curl -s -o /dev/null -w "%{http_code}\n" -m 10 http://16.112.52.71:3001
 ssh aws-kuma-production 'sudo docker exec uptime-kuma sqlite3 /app/data/kuma.db "select datetime(max(time)) from heartbeat;"'
 ```
 
@@ -323,7 +373,7 @@ git -C D:/cheeko-backend commit -m "docs(monitoring): add monitor inventory as s
 ## Task 4: Build notification tiers and retire dead monitors
 
 **Files:**
-- No repo files. Kuma UI at `http://18.61.233.60:3001`.
+- No repo files. Kuma UI at `http://16.112.52.71:3001`.
 
 **Interfaces:**
 - Consumes: tier definitions from `docs/monitoring/monitor-inventory.md`.
@@ -519,7 +569,7 @@ ssh aws-kuma-production 'sudo docker exec uptime-kuma sqlite3 -column /app/data/
 The Task 1 lockdown restricted port 3001 to `${ADMIN_CIDR}`. The dev box is a different source IP and will be blocked.
 
 ```bash
-ssh 64.227.170.31 'curl -s -o /dev/null -w "%{http_code}\n" -m 10 http://18.61.233.60:3001'
+ssh 64.227.170.31 'curl -s -o /dev/null -w "%{http_code}\n" -m 10 http://16.112.52.71:3001'
 ```
 
 If this is not `200`/`302`, allow the dev box explicitly:
@@ -542,7 +592,7 @@ Write `D:/cheeko-backend/docs/monitoring/pm2-health.sh`:
 # become long-lived production, replace this with Prometheus, do not extend it.
 set -uo pipefail
 
-KUMA_URL="${KUMA_URL:?set KUMA_URL}"     # e.g. http://18.61.233.60:3001
+KUMA_URL="${KUMA_URL:?set KUMA_URL}"     # e.g. http://16.112.52.71:3001
 PUSH_TOKEN="${PUSH_TOKEN:?set PUSH_TOKEN}"
 STATE=/var/lib/kuma-pm2-state.json
 # Services that must be up. Others (line-art, visitors-register) are not on the voice path.
@@ -607,7 +657,7 @@ ssh 64.227.170.31 'mkdir -p /opt/kuma && chmod +x /opt/kuma/pm2-health.sh'
 - [ ] **Step 5: Run it once by hand and confirm Kuma receives the beat**
 
 ```bash
-ssh 64.227.170.31 'KUMA_URL=http://18.61.233.60:3001 PUSH_TOKEN=<token> /opt/kuma/pm2-health.sh; echo exit=$?; cat /var/lib/kuma-pm2-state.json'
+ssh 64.227.170.31 'KUMA_URL=http://16.112.52.71:3001 PUSH_TOKEN=<token> /opt/kuma/pm2-health.sh; echo exit=$?; cat /var/lib/kuma-pm2-state.json'
 ```
 
 Then confirm the beat landed:
@@ -622,7 +672,7 @@ Expected: a heartbeat from seconds ago. Given the current 699-restart situation,
 
 ```bash
 ssh 64.227.170.31 'pm2 stop manager-web'
-ssh 64.227.170.31 'KUMA_URL=http://18.61.233.60:3001 PUSH_TOKEN=<token> /opt/kuma/pm2-health.sh'
+ssh 64.227.170.31 'KUMA_URL=http://16.112.52.71:3001 PUSH_TOKEN=<token> /opt/kuma/pm2-health.sh'
 ```
 
 Expected: the monitor reports down with `manager-web:stopped`, and Telegram fires. Then:
@@ -637,7 +687,7 @@ The monitor's heartbeat interval is 300s, so a missed run is itself an alert —
 
 ```bash
 ssh 64.227.170.31 'cat > /etc/cron.d/kuma-pm2-health <<EOF
-KUMA_URL=http://18.61.233.60:3001
+KUMA_URL=http://16.112.52.71:3001
 PUSH_TOKEN=<token>
 */2 * * * * root /opt/kuma/pm2-health.sh >> /var/log/kuma-pm2-health.log 2>&1
 EOF
@@ -935,7 +985,7 @@ Status Pages → New. Add the `DEV *` monitors and the dependency monitors. Use 
 - [ ] **Step 3: Verify it renders**
 
 ```bash
-curl -s -m 10 -o /dev/null -w "%{http_code}\n" http://18.61.233.60:3001/status/<slug>
+curl -s -m 10 -o /dev/null -w "%{http_code}\n" http://16.112.52.71:3001/status/<slug>
 ```
 
 Expected: `200`. Note that the page is only reachable from `${ADMIN_CIDR}` after Task 1 — if it needs a wider audience, that is a network change to decide deliberately, not to bolt on here.
