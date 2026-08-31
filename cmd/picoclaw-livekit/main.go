@@ -1080,6 +1080,7 @@ func main() {
 			Config:         sessionCfg,
 			Provider:       sessionProvider,
 			ModelID:        sessionModelID,
+			APIBase:        resolvedModelAPIBase(sessionCfg, sessionCfg.Agents.Defaults.ModelName),
 			CharacterName:  characterName,
 			GreetingPrompt: personaGreeting,
 			QuizBatch:      quizBatchForSession,

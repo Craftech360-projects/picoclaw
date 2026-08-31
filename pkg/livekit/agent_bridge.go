@@ -132,6 +132,7 @@ type AgentBridge struct {
 	onClose              func()
 	onAfterClose         func()
 	modelID              string
+	apiBase              string
 	sessions             session.SessionStore
 	tools                *tools.ToolRegistry
 	contextBuilder       *agent.ContextBuilder
@@ -232,6 +233,10 @@ type AgentBridgeConfig struct {
 	Config               *config.Config
 	Provider             providers.LLMProvider
 	ModelID              string
+	// APIBase is the LLM endpoint this session resolved to. Logged per turn
+	// because ModelID cannot identify the provider: a slug's leading segment is
+	// the model's AUTHOR, not the host (google/gemma-4-31b-it went to openrouter.ai).
+	APIBase              string
 	AgentInstance        *agent.AgentInstance
 	PreserveWorkspace    bool
 	OnClose              func()
@@ -308,6 +313,7 @@ func NewAgentBridge(cfg AgentBridgeConfig) (*AgentBridge, error) {
 		cfg:                       cfg.Config,
 		provider:                  cfg.Provider,
 		modelID:                   cfg.ModelID,
+		apiBase:                   cfg.APIBase,
 		preserveWorkspace:         cfg.PreserveWorkspace,
 		onClose:                   cfg.OnClose,
 		onAfterClose:              cfg.OnAfterClose,
@@ -843,6 +849,7 @@ func (ab *AgentBridge) runIterationWithProfile(ctx context.Context, sessionKey s
 		"content_len":      len(resp.Content),
 		"content_redacted": !ab.logContentPolicy.enabledForSession(sessionKey),
 		"tool_call_count":  len(resp.ToolCalls),
+		"llm_api_base":     ab.apiBase,
 	})
 
 	normalized := normalizeToolCalls(resp.ToolCalls)
