@@ -457,6 +457,23 @@ Expected: monitors 16 and 18 show `0` notifications.
 
 ## Task 5: Rebuild dev monitors through the public hostname
 
+**Status: COMPLETED 2026-08-31.** Created by direct SQLite insert (ids 20-24), mirroring the exact
+column values of known-working monitors 9 (port) and 16 (http) rather than guessing at ~60 columns.
+
+The insert is only trustworthy because of the verification that followed:
+
+- All five produce correct heartbeats with plausible response times (26-215ms).
+- Monitor 21 reports  — Kuma confirming the keyword matched, not merely
+  that the status code was 200.
+- **Negative test on monitor 21:** keyword temporarily set to a string that cannot match. Result was
+   with  — red despite HTTP 200, which is exactly
+  the blind spot the old status-code-only DB monitor had. Keyword and timings then restored and
+  re-verified green.
+
+A monitor that has only ever been observed green is not a verified monitor. Repeat the negative test
+for any keyword monitor added later, including the prod ones in Task 12.
+
+
 Every current monitor hits a raw IP, bypassing Caddy — the component most likely to fail first, and the only one that can expire a TLS certificate.
 
 **Files:**
