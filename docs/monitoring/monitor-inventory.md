@@ -195,9 +195,10 @@ Production, Voice providers, Development, Informational.
 so the page is team-facing by construction. Making it genuinely public is a network change and
 would need TLS in front first — not a checkbox.
 
-Two **stale published pages** predate this work and should be deleted: `localsdev` (0 monitors —
-everything on it was removed in Task 4) and `production` (3 monitors, a misleading subset that
-implies prod is three services). Left in place pending confirmation that nothing links to them.
+Two stale published pages predated this work and were **deleted 2026-08-31**: `localsdev` (0
+monitors — everything on it was removed in Task 4) and `production` (3 monitors, a misleading
+subset that implied prod was three services). Both were `published=1` and would have shown a
+false picture to anyone who had the link. `cheeko` is now the only status page.
 
 ## Watching the watcher
 
