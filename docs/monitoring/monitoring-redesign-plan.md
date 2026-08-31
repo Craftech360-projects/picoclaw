@@ -524,6 +524,28 @@ Open the `DEV Manager API (public)` monitor in the UI. Expected: a certificate e
 
 ## Task 6: Replace port-443 theatre with an authenticated Sarvam probe
 
+**Status: COMPLETED 2026-08-31.** Monitor id 25.
+
+Key handling — the key was never printed into the operator's session:
+
+- Read from `/root/picoclaw/.env` on the dev box (`SARVAM_API_KEY`, 36 chars).
+- Validated there first with a real synthesis call: HTTP 200, response contained `audios`.
+- Piped host-to-host (`ssh dev '...' | ssh kuma 'cat > /tmp/sarvam.key'`) with `umask 077`.
+- Passed to the insert script as a *file path*, never as an argument, so it stayed out of `ps`
+  output and shell history. Shredded afterwards.
+
+**Negative test — the whole justification for this task.** The key inside the monitor's headers was
+corrupted in place by prefixing a character, using `replace()` with `char()` codes so the SQL never
+had to contain (or reveal) the key. Result: `Request failed with status code 403`, monitor red.
+Then un-prefixed and re-verified green.
+
+That 403 is the same class of failure as the ElevenLabs 401 that hid for twelve days behind a green
+`:443` port check. It is now detected.
+
+**Precondition, re-verified before inserting:** security group `sg-0ca72b10de2f2e764` allowed only
+the admin `/32` on ports 22 and 3001. This step writes a live credential into an unencrypted SQLite
+file; do not repeat it on a host reachable from the internet.
+
 A TCP connect to `:443` is what let a revoked ElevenLabs key hide for twelve days. Sarvam is now on the voice path and deserves a probe that would actually catch the same failure.
 
 **Files:**
