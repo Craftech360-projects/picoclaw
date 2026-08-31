@@ -119,7 +119,25 @@ monitored rather than trusted:
 | DEV provider config drift | ALERT | push | 3600 | Hashes the active rows of `llm_providers`, `stt_providers`, `tts_providers` and compares against a recorded baseline. Pushes down naming what changed. Does not prevent drift — makes it loud instead of silent. Update the baseline deliberately after an intended provider change |
 | LiveKit Cloud | ALERT | port | `cheeko-prod-68ib8ma4.livekit.cloud:443` | 60 | Voice transport |
 | CloudFront CDN | ALERT | port | `dsmzc13oafp54.cloudfront.net:443` | 180 | `CLOUDFRONT_DOMAIN` is set on dev |
-| ElevenLabs API | INFO | http | `https://otadev.cheekoai.in/toy/health/deps/elevenlabs` | 3600 | **Retired, returns later.** Currently 401 (billing). Dashboard only — no notification attached, so it stays visible without training anyone to mute Telegram |
+| ElevenLabs TTS (switch-back readiness) | INFO | keyword POST (inverted) | `https://api.elevenlabs.io/v1/text-to-speech/hO2yZ8lxM3axUxL8OeKX` | 21600 | **Retired, returns later.** Direct probe on the `tts_providers` key, `eleven_multilingual_v2`. Inverted keyword `payment_issue`. Dashboard only — no notification. Red today; **turning green is the signal that ElevenLabs can be switched back on** |
+
+**ElevenLabs status, tested 2026-08-31.** The key is valid — the blocker is billing, not credentials:
+
+```
+POST /v1/text-to-speech/... -> 401 payment_issue
+"Your subscription has a failed or incomplete payment. Complete the latest invoice to continue usage."
+```
+
+`/v1/user/subscription` also returns 401, but for an unrelated reason (`missing_permission: user_read`) —
+the key is TTS-scoped, which is normal. So switching back needs the **invoice settled**, not a new key;
+the key, voice id and model in `tts_providers` row 1 all remain usable.
+
+`capacity-and-hardening.md` records the same `payment_issue` on 2026-06-12, so this has been
+outstanding since June.
+
+This monitor deliberately replaced the old id-18 monitor, which went through `manager-api` on the
+**retired prod box** and tested manager-api's env key rather than the database key a switch-back
+would actually use — the same wrong-credential trap as the Sarvam monitor.
 | Gemini API | INFO | http | `https://otadev.cheekoai.in/toy/health/deps/gemini` | 3600 | Only guards `founderDashboard.service.js`, not the voice path |
 
 ## Retired on dev
