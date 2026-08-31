@@ -140,6 +140,65 @@ This monitor deliberately replaced the old id-18 monitor, which went through `ma
 would actually use — the same wrong-credential trap as the Sarvam monitor.
 | Gemini API | INFO | http | `https://otadev.cheekoai.in/toy/health/deps/gemini` | 3600 | Only guards `founderDashboard.service.js`, not the voice path |
 
+## Prod monitors (`ota.cheekoai.in`, box `139.59.7.72`)
+
+Prod is **not** a copy of dev — verified 2026-08-31, and the differences matter:
+
+| Name | Tier | Type | Target | Interval |
+|---|---|---|---|---:|
+| PROD Manager API (public) | ALERT | http | `https://ota.cheekoai.in/toy/health` | 60 |
+| PROD Manager API DB | ALERT | keyword | `https://ota.cheekoai.in/toy/health/db` — `"database":"connected"` | 120 |
+| PROD MQTT Gateway | ALERT | http | `http://139.59.7.72:8004/health` | 60 |
+| PROD EMQX MQTT | ALERT | port | `139.59.7.72:1883` | 60 |
+| PROD process health | ALERT | push | pm2: `manager-api manager-web gw-0..3` | 900 |
+| Mem0 API (authenticated) | ALERT | http | `https://api.mem0.ai/v1/memories/?user_id=healthcheck` + `Authorization: Token` | 300 |
+| Qdrant Cloud (reachability) | INFO | http | `.../collections` | 600 |
+
+Differences from dev:
+
+- **`MEM0_API_KEY`, `QDRANT_API_KEY`, `QDRANT_URL` are set on prod** and unset on dev. Retiring
+  those monitors on dev was right; retiring them on prod would have removed coverage of live
+  integrations. This is exactly why the plan required checking prod's env independently.
+- **No `picoclaw-livekit` on this box** — the voice agent runs on EKS and is covered by Prometheus
+  and Alertmanager, not Kuma. The pm2 watch list is adjusted accordingly.
+- `LOKI_*` unset here too, so Loki really is unused everywhere.
+
+### Qdrant is broken, and the old monitor said it was fine
+
+The retired `Qdrant Cloud Port 443` monitor was **green** the moment it was deleted. Measured from
+the prod box on 2026-08-31:
+
+| Check | Result |
+|---|---|
+| DNS | resolves, 3 addresses |
+| **TCP connect to 443** | **OPEN** — the entirety of what the old monitor tested |
+| TLS request | `Recv failure: Connection reset by peer` |
+
+The load balancer accepts the connection; the cluster behind it resets. Consistent with a suspended
+Qdrant Cloud cluster. Kuma now reports `read ECONNRESET`.
+
+This is the clearest evidence in the whole project for why TCP port checks are not monitoring: the
+service is unusable and the check was green. The RFID *admin* endpoints still work because they are
+Postgres-backed; no user-facing breakage has been demonstrated, only that Qdrant is unreachable and
+nothing said so.
+
+Left **INFO** deliberately — attaching a notification to an already-broken monitor is how the
+ElevenLabs alert got muted. Promote it to ALERT once Qdrant is fixed, or delete it if Qdrant is
+being dropped.
+
+## Watching the watcher
+
+`kuma-deadman.sh` on the dev box curls Kuma every 5 minutes and messages Telegram **directly**
+(bypassing Kuma entirely) after two consecutive failures, with a recovery message when it returns.
+
+Kuma cannot report its own death — if the instance stops or the disk fills, every monitor goes quiet,
+and quiet is indistinguishable from healthy. The dev box already had cron and the bot token, so this
+needed no new service and no new account. Dev watches Kuma; Kuma watches dev via monitors 20-24 and
+27. The accepted ceiling is that both hosts failing simultaneously is uncovered; a third-party check
+such as healthchecks.io would close that if it ever matters.
+
+`/etc/cron.d/kuma-monitoring` is mode `600` because it carries the bot token.
+
 ## Retired on dev
 
 Removed because the integration is code-present but runtime-off — `manager-api`'s `.env` on
