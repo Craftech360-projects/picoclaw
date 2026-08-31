@@ -186,6 +186,19 @@ Left **INFO** deliberately — attaching a notification to an already-broken mon
 ElevenLabs alert got muted. Promote it to ALERT once Qdrant is fixed, or delete it if Qdrant is
 being dropped.
 
+## Status page
+
+`http://16.112.52.71:3001/status/cheeko` — slug `cheeko`, all 20 monitors in four groups:
+Production, Voice providers, Development, Informational.
+
+`published=0` and `search_engine_index=0`. The whole instance already sits behind the admin CIDR,
+so the page is team-facing by construction. Making it genuinely public is a network change and
+would need TLS in front first — not a checkbox.
+
+Two **stale published pages** predate this work and should be deleted: `localsdev` (0 monitors —
+everything on it was removed in Task 4) and `production` (3 monitors, a misleading subset that
+implies prod is three services). Left in place pending confirmation that nothing links to them.
+
 ## Watching the watcher
 
 `kuma-deadman.sh` on the dev box curls Kuma every 5 minutes and messages Telegram **directly**
