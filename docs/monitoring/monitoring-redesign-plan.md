@@ -463,10 +463,10 @@ column values of known-working monitors 9 (port) and 16 (http) rather than guess
 The insert is only trustworthy because of the verification that followed:
 
 - All five produce correct heartbeats with plausible response times (26-215ms).
-- Monitor 21 reports  — Kuma confirming the keyword matched, not merely
+- Monitor 21 reports `200 - OK, keyword is found` — Kuma confirming the keyword matched, not merely
   that the status code was 200.
 - **Negative test on monitor 21:** keyword temporarily set to a string that cannot match. Result was
-   with  — red despite HTTP 200, which is exactly
+  `status=0` with `200 - OK, but keyword is not in [...]` — red despite HTTP 200, which is exactly
   the blind spot the old status-code-only DB monitor had. Keyword and timings then restored and
   re-verified green.
 
