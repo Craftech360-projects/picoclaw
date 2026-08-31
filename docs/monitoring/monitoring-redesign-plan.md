@@ -382,7 +382,23 @@ git -C D:/cheeko-backend commit -m "docs(monitoring): add monitor inventory as s
 
 ---
 
-## Task 4: Build notification tiers and retire dead monitors
+## Task 4: Retire dead monitors and stop the notification auto-attaching
+
+**Status: COMPLETED 2026-08-31.** Two deviations:
+
+- **The T1/T2 notification split was dropped before being built.** Both tiers pointed at the same
+  bot and chat, so they would have been two objects doing identical things. Replaced by
+  attached-vs-not-attached on the single existing notification. See the inventory for the reasoning.
+- **Applied by direct SQLite write, not the UI.** Kuma has no CRUD API and logging into the UI to
+  click through twelve deletions was not available to the agent. Safe here because every child table
+  (`heartbeat`, `monitor_notification`, `monitor_tag`, `stat_daily/hourly/minutely`) declares
+  `ON DELETE CASCADE`. Procedure: back up, stop the container, run the transaction with
+  `PRAGMA foreign_keys=ON` (it defaults to OFF in the CLI — without it the cascades silently do not
+  fire and you are left with orphan rows), restart, verify zero orphans.
+
+  Creating monitors this way is a different risk profile from deleting them and is not recommended
+  without verifying each new monitor actually produces correct heartbeats.
+
 
 **Files:**
 - No repo files. Kuma UI at `http://16.112.52.71:3001`.
