@@ -216,8 +216,20 @@ git -C D:/cheeko-backend commit -m "docs(monitoring): point Kuma runbook at the 
 
 The container tracks the floating `:2` tag but has never been re-pulled, so it has drifted four months behind. Pin an exact tag so the version is a decision rather than an accident.
 
+**Status: COMPLETED 2026-08-31.** Three deviations, all found by verifying rather than assuming:
+
+- **There is no `docker compose` on this host at all** — no v1 binary, no CLI plugin, and
+  `docker-compose-plugin` is not in the AL2023 repos. `/opt/uptime-kuma/docker-compose.yml` was
+  decorative; the container had been started by hand. Replaced it with `/opt/uptime-kuma/run.sh`,
+  which is the real definition and is what future upgrades should edit.
+- **8 GB root volume was too small.** The 2.5.x image bundles MariaDB and is 1.7 GB, so pulling the
+  new one alongside the old one ran out of space mid-extraction. Reclaimed 2.1 GB of leftover
+  `~/.vscode-server`, then grew the volume 8 GB → 16 GB.
+- **The filesystem is xfs, not ext4** — the grow is `growpart` + `xfs_growfs`, not `resize2fs`.
+
 **Files:**
-- Modify: `/opt/uptime-kuma/docker-compose.yml` (on `aws-kuma-production`)
+- Create: `/opt/uptime-kuma/run.sh` (on `aws-kuma-production`)
+- Delete: `/opt/uptime-kuma/docker-compose.yml` — misleading, nothing can run it
 
 **Interfaces:**
 - Consumes: a verified backup from Task 1.
