@@ -1002,7 +1002,7 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 		// until it was decided from the log instead of from the model. Here the
 		// server told us what the child was already left with, so a `wonder=`
 		// matching it is a quotation, not a new question.
-		if !sameWonderQuestion(wonder, ab.recalledWonderQuestion()) {
+		if !ab.alreadyWondered(wonder) {
 			ab.reportedQuizMu.Lock()
 			ab.pendingWonderQuestion = wonder
 			ab.reportedQuizMu.Unlock()
@@ -1059,13 +1059,25 @@ func (ab *AgentBridge) flushPendingQuizAttempts() {
 	ab.quizAttemptReporter(questionID, attempts)
 }
 
-// recalledWonderQuestion is the question the server said this child was already
-// left with — the one rendered as this session's opening beat, if any.
-func (ab *AgentBridge) recalledWonderQuestion() string {
+// alreadyWondered reports whether the model handed back a question this child
+// has already been left with — the one this session opened by recalling, or any
+// of the recent ones the server listed as off limits.
+//
+// Both come from the server, so this asks the record rather than the model: a
+// `wonder=` matching any of them is a quotation, not new curiosity.
+func (ab *AgentBridge) alreadyWondered(question string) bool {
 	if ab == nil || ab.quizBatch == nil {
-		return ""
+		return false
 	}
-	return ab.quizBatch.WonderQuestion
+	if sameWonderQuestion(question, ab.quizBatch.WonderQuestion) {
+		return true
+	}
+	for _, asked := range ab.quizBatch.RecentWonderQuestions {
+		if sameWonderQuestion(question, asked) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameWonderQuestion asks whether the model handed back the sentence it was

@@ -112,6 +112,12 @@ type QuizBatch struct {
 	// WonderQuestion is the open, unscored question the LAST session left this
 	// child with (M4). Empty for a child who has never been left one.
 	WonderQuestion string `json:"wonder_question"`
+	// RecentWonderQuestions is what this child has already been asked, newest
+	// first, including the one above. The model has no memory of its own here —
+	// chat history is trimmed and its session summaries are lossy — so without
+	// this list "leave them a different one" has nothing to be different from,
+	// and it hands back the same stock question in new words.
+	RecentWonderQuestions []string `json:"recent_wonder_questions"`
 }
 
 // managerQuizBaseURL resolves the Manager API base the same way the persona pull
@@ -490,6 +496,19 @@ func RenderQuizQuestions(prompt string, batch *QuizBatch) string {
 	return strings.ReplaceAll(prompt, mathProblemsPlaceholder, block)
 }
 
+// wonderHistoryList renders the already-asked questions as a quoted list, or ""
+// when there is nothing to list. Blank entries are dropped rather than rendered
+// as an empty pair of quotes, which reads to the model as a real question.
+func wonderHistoryList(questions []string) string {
+	quoted := make([]string, 0, len(questions))
+	for _, question := range questions {
+		if trimmed := strings.TrimSpace(question); trimmed != "" {
+			quoted = append(quoted, fmt.Sprintf("%q", trimmed))
+		}
+	}
+	return strings.Join(quoted, "; ")
+}
+
 func quizQuestionsBlock(batch *QuizBatch) string {
 	if batch == nil || len(batch.Questions) == 0 {
 		return "## Today's Quiz Questions\n" +
@@ -507,6 +526,16 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 			"Before the quiz, warmly remind the child of the question you left them with: %q. ", wonder))
 		b.WriteString("Ask if they thought any more about it, listen, and be delighted by whatever they say. ")
 		b.WriteString("There is no right answer and it is NOT scored. One short exchange, then start the quiz.\n\n")
+	}
+	// What has already been asked. The closing beat says "leave them a NEW
+	// question", which the model cannot obey without knowing the old ones: on dev
+	// it re-read its own summaries and asked the food-house question again with
+	// two words changed, three times across nine days.
+	if asked := wonderHistoryList(batch.RecentWonderQuestions); asked != "" {
+		b.WriteString("## Already Wondered\n")
+		b.WriteString("You have already left this child these questions: " + asked + ". ")
+		b.WriteString("Do not ask any of them again, or a reworded version of one. ")
+		b.WriteString("The question you leave them with today must be about something else.\n\n")
 	}
 	b.WriteString("## Today's Quiz Questions")
 	var scope []string

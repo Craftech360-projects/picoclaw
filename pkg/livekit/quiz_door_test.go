@@ -321,6 +321,66 @@ func TestWonderQuestionAppearsInTheBlock(t *testing.T) {
 	}
 }
 
+// The model cannot obey "leave them a NEW question" without knowing the old
+// ones. On dev it re-read its own session summaries and asked the food-house
+// question again with two words changed, nine days apart.
+func TestAlreadyWonderedListReachesTheBlock(t *testing.T) {
+	batch := &QuizBatch{
+		Level: 1, Questions: []QuizQuestion{{ID: 1, IDString: "1", Text: "Q?", Answer: "A"}},
+		RecentWonderQuestions: []string{"If you could fly like a bee, where would you go?", "  ", "Why do stars come out at night?"},
+	}
+	block := quizQuestionsBlock(batch)
+	for _, want := range []string{"Already Wondered", "fly like a bee", "stars come out", "must be about something else"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("block missing %q in: %s", want, block)
+		}
+	}
+	// A blank entry rendered as an empty pair of quotes reads as a real question.
+	if strings.Contains(block, `""`) {
+		t.Errorf("blank history entry reached the prompt: %q", block)
+	}
+	// Nothing asked yet means no section at all.
+	bare := quizQuestionsBlock(&QuizBatch{Level: 1, Questions: batch.Questions})
+	if strings.Contains(bare, "Already Wondered") {
+		t.Errorf("no history means no section: %q", bare)
+	}
+}
+
+// Storing a question the child has already been asked is how the loop restarts:
+// it becomes the newest row, and the next session recalls it as if it were new.
+func TestWonderQuestionEchoOfAnyRecentOneIsDropped(t *testing.T) {
+	newBridge := func() *AgentBridge {
+		return &AgentBridge{
+			quizBatch: &QuizBatch{
+				WonderQuestion:        "Where does the wind start?",
+				RecentWonderQuestions: []string{"Where does the wind start?", "If you could fly like a bee, where would you go?"},
+			},
+			reportedQuizIDs: map[int64]bool{},
+		}
+	}
+
+	// The one this session opened by recalling, re-punctuated.
+	ab := newBridge()
+	ab.reportQuizVerdict("a\nMEMO: type=daily_quiz | wonder=where does the wind start")
+	if ab.pendingWonderQuestion != "" {
+		t.Errorf("echo of the recalled question was captured: %q", ab.pendingWonderQuestion)
+	}
+
+	// An older one from the history list, which used to slip through.
+	ab = newBridge()
+	ab.reportQuizVerdict("b\nMEMO: type=daily_quiz | wonder=If you could fly like a bee, where would you go?")
+	if ab.pendingWonderQuestion != "" {
+		t.Errorf("echo of an older question was captured: %q", ab.pendingWonderQuestion)
+	}
+
+	// Genuinely new curiosity still gets through — this guard must not eat it.
+	ab = newBridge()
+	ab.reportQuizVerdict("c\nMEMO: type=daily_quiz | wonder=What do fish dream about?")
+	if ab.pendingWonderQuestion != "What do fish dream about?" {
+		t.Errorf("a new question must be kept, got %q", ab.pendingWonderQuestion)
+	}
+}
+
 // The ladder must END. DoorFor clamps at Door 3, so without a terminal state
 // every try past the third re-issued "ask again, do not say the answer" forever.
 // Observed live 2026-08-14: six wrong tries on one authored question, no verdict,
