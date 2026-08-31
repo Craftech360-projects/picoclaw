@@ -62,9 +62,47 @@ routing — the layers that fail first. All endpoints verified answering 200 on 
 Shared across environments. Authenticated probes, not TCP `:443` connects — a port check cannot
 detect a revoked key, which is the failure that actually happened.
 
+### The whole voice path is Sarvam, on one key
+
+Verified against the provider tables on 2026-08-31. **3 active providers out of 31 rows:**
+
+| Stage | Row | Model | Endpoint |
+|---|---|---|---|
+| LLM | `llm_providers` id 10, `sarvam-gemma4` | stored as `openai/gemma4`, sent as `gemma4` | `https://api.sarvam.ai/v2/chat/completions` |
+| STT | `stt_providers` id 2960, `sarvam_rest` | `saaras:v4` | `https://api.sarvam.ai/speech-to-text` |
+| TTS | `tts_providers` id 8, `sarvam` | `bulbul:v3` / `pooja` | `https://api.sarvam.ai/text-to-speech` |
+
+All three rows carry the **same API key**. OpenRouter (`google/gemma-4-31b-it`) was switched off on
+2026-08-31 08:00 and replaced by `sarvam-gemma4` in the same minute. Gemini, GPT-5-mini, Mistral,
+Deepgram, ElevenLabs, Cartesia, Azure, xAI: all `is_active=f`.
+
+**This is a single point of failure for the product.** One vendor and one credential sit behind
+every stage of a child's conversation. The monitors below cannot reduce that risk, only surface it
+quickly. A second provider on at least one stage is a resilience decision worth taking separately.
+
+### There are two Sarvam keys — use the database one
+
+| Source | md5 (first 12) | Used by |
+|---|---|---|
+| `llm_providers` / `stt_providers` / `tts_providers` (active rows) | `9e487d074aeb` | **the running agent** |
+| `/root/picoclaw/.env` `SARVAM_API_KEY` on the dev box | `0849ee410b45` | nothing that matters |
+
+The first version of monitor 25 was built from the `.env` key. It went green, and it was worthless:
+it exercised a credential the application never presents. Had the real key been revoked, the monitor
+would have stayed green through the outage.
+
+The two keys are not interchangeable — the `.env` one is rejected from `/v2/chat/completions` with
+*"This endpoint is currently in beta and not available"*, while the database one succeeds. That
+difference is what exposed the mistake.
+
+**Rule: probe the credential the application reads, not the one that is easiest to find.** When
+provider config lives in a database, `.env` is the wrong source.
+
 | Name | Tier | Type | Target | Interval | Notes |
 |---|---|---|---|---:|---|
 | Sarvam TTS (authenticated) | ALERT | keyword POST | `https://api.sarvam.ai/text-to-speech` | 3600 | Real synth probe, keyword `audios`. Minimum sample rate and 2-char text to keep cost negligible |
+| Sarvam LLM (authenticated) | ALERT | keyword POST | `https://api.sarvam.ai/v2/chat/completions` | 3600 | Real completion, `model: gemma4`, `max_tokens: 5`, keyword `choices` |
+| Sarvam STT | — | **not monitored** | `https://api.sarvam.ai/speech-to-text` | — | Requires a multipart WAV upload, which Kuma's HTTP monitor cannot send. The shared key means TTS/LLM failures still catch a dead credential; a Sarvam STT-specific outage would not be caught. Accepted gap |
 | LiveKit Cloud | ALERT | port | `cheeko-prod-68ib8ma4.livekit.cloud:443` | 60 | Voice transport |
 | CloudFront CDN | ALERT | port | `dsmzc13oafp54.cloudfront.net:443` | 180 | `CLOUDFRONT_DOMAIN` is set on dev |
 | ElevenLabs API | INFO | http | `https://otadev.cheekoai.in/toy/health/deps/elevenlabs` | 3600 | **Retired, returns later.** Currently 401 (billing). Dashboard only — no notification attached, so it stays visible without training anyone to mute Telegram |
