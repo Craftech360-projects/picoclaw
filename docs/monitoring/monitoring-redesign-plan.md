@@ -607,7 +607,15 @@ Expected: red on the bad key. If it stays green, the keyword match is wrong and 
 
 ## Task 7: Dev box process health via Kuma push
 
-`manager-api` restarted 699 times in 3 hours while every HTTP check stayed green, because pm2 restarts faster than a probe interval. The observer must sit outside the process.
+Nothing watches pm2 at all, and an HTTP probe cannot see a process that dies and is resurrected between checks. The observer must sit outside the process.
+
+**Status: COMPLETED 2026-08-31.** Grew to three push monitors (27-29) driven by two scripts, and corrected a misreading that had shaped the earlier drafts.
+
+- **`DEV process health` (27)** — alerts on the *delta* in pm2 restart counts between runs. Verified by stopping `manager-web` and seeing `unhealthy: manager-web:stopped`.
+- **`Sarvam STT (authenticated)` (28)** — the plan had written STT off as unmonitorable because Kuma cannot send multipart. It can be done from the script: a 0.25s silence WAV built by Python's `wave` module, success on `request_id` in the response. An empty transcript is expected.
+- **`DEV provider config drift` (29)** — new. The endpoint monitors hardcode Sarvam URLs and key, but provider selection lives in the database and changed once already on 2026-08-31 (OpenRouter to Sarvam). Without this, a provider switch leaves Kuma probing a provider nobody uses and reporting green through an outage. Compares active provider rows against a baseline file; a human refreshes the baseline after an intended change.
+
+**The misreading, recorded because it changed the design:** pm2's `restart_time` is a *cumulative lifetime* counter, and pm2's `uptime` column is time since the *last* restart, not a measurement window. "699 restarts in 3 hours" was wrong. Re-measured: `manager-api` 699 lifetime restarts with 363 minutes of continuous uptime; `picoclaw-livekit` 129 lifetime with 193 minutes. Both stable. Threshold was set to 30 to survive a crisis that was not happening; corrected to 3. The script alerts on deltas precisely because a cumulative counter cannot be read as a rate.
 
 **Files:**
 - Create: `/opt/kuma/pm2-health.sh` (on `64.227.170.31`)

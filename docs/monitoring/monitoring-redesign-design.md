@@ -11,8 +11,12 @@ The current Uptime Kuma setup produces alerts nobody acts on and misses the fail
 Evidence gathered 2026-08-31:
 
 - `ElevenLabs API Health` red since 2026-08-19 (12 days, 114 failed beats). Telegram fired; ignored.
-- `manager-api` on the dev box: 699 pm2 restarts in 3 hours. Every HTTP monitor stayed green.
-- `picoclaw-livekit` on the dev box: 129 restarts, 65m uptime. Invisible.
+- Dev box process health is invisible to every HTTP monitor — nothing watches pm2 at all.
+  (An early reading of "699 restarts in 3 hours" was a **misreading**: pm2's `restart_time` is a
+  cumulative lifetime counter, and its `uptime` column is time since the *last* restart, not a
+  measurement window. Re-measured 2026-08-31: `manager-api` 699 lifetime restarts with **363 minutes
+  of continuous uptime**, `picoclaw-livekit` 129 lifetime with 193 minutes up. Both stable. The
+  monitoring gap is real; the crisis was not.)
 - EKS prod (`picoclaw-dev/picoclaw-livekit`, 2 pods) has zero monitors.
 - 6 of 16 monitors are TCP `:443` connect checks that cannot detect auth or quota failure.
 - All monitors target raw IPs, bypassing `otadev.cheekoai.in` / Caddy — the path devices actually use.
@@ -101,11 +105,14 @@ Prometheus, not extended.
 
 ## Out of scope, tracked separately
 
-The 699 restarts are a **stability defect, not a monitoring gap**. This design makes them visible; it
-does not fix them. Building precise alerting around a service that crashes every ~15 seconds produces
-an alert stream that will be muted within a week — the exact failure mode that killed the ElevenLabs
-monitor. Fixing the crash loops is a prerequisite for the Layer 3 alerts to be useful, and is tracked
-as its own work item.
+An earlier draft treated the pm2 restart counts as an active crash loop and made "fix the crash loops"
+a prerequisite for this work. **Re-measurement withdrew that item**: the counters are cumulative and
+both services are currently stable.
+
+What survives the correction is the design consequence — a cumulative counter says nothing about
+current health, so Layer 3 alerts on the **delta between snapshots**, never the raw value. A monitor
+built on the raw number would have fired permanently and been muted within a week, which is the exact
+failure mode that killed the ElevenLabs monitor.
 
 ## Rollout
 
