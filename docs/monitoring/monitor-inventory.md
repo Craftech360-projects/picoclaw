@@ -62,6 +62,36 @@ routing — the layers that fail first. All endpoints verified answering 200 on 
 Shared across environments. Authenticated probes, not TCP `:443` connects — a port check cannot
 detect a revoked key, which is the failure that actually happened.
 
+### Provider monitors follow the database, they do not name a vendor
+
+`LLM provider (active)`, `STT provider (active)` and `TTS provider (active)` are **push** monitors
+driven by `provider-probe.sh`, which reads the active provider rows at runtime and dispatches to a
+per-vendor probe. Switching providers in the admin UI needs **no change in Kuma** — the probe
+follows. Messages name what was found, e.g. `tts ok (smallest/lightning_v3.1/liam, 38400B)`.
+
+This replaced `Sarvam LLM/STT (authenticated)` and `SmallestAI TTS (authenticated)`, each of which
+named a vendor and would have gone stale on the next switch — the failure that actually occurred
+within a day of building them.
+
+**An unknown vendor pushes DOWN, it does not pass silently:**
+
+```
+no probe implemented for TTS provider 'acme-newvendor' - add one to provider-probe.sh
+```
+
+Verified 2026-09-01 by forcing that branch. This is the part that must not be automated away: a
+vendor nobody has written a probe for is exactly when a human should be told.
+
+Probes implemented: LLM `sarvam*` (api-subscription-key) and `openrouter*`/`*gpt*`/`mistral*`
+(Bearer); STT `sarvam*`; TTS `smallest`, `sarvam`, `elevenlabs`. Adding a vendor is a few lines in
+the case statement. If the list grows past a handful, move this into the Go agent as a self-test
+endpoint rather than extending the script.
+
+**The drift monitor is now INFO** (no notification attached). Since the probes follow changes on
+their own, a provider switch no longer breaks monitoring, so drift is a record that configuration
+moved rather than a call to action. The baseline is still **never** auto-updated — automating that
+would mean never being told a provider changed at all.
+
 ### 2026-09-01: the drift monitor earned its place
 
 A dev deploy switched TTS from Sarvam to SmallestAI. The drift monitor caught it within the hour:
