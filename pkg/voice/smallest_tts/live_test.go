@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// TestLiveSmallestSynthesize hits the real smallest.ai Waves WebSocket to prove
+// TestLiveSmallestSynthesize hits the real smallest.ai Waves batch endpoint to prove
 // the provider actually synthesizes audio end-to-end. Gated on SMALLEST_API_KEY
 // so it never runs in CI without a key.
 //

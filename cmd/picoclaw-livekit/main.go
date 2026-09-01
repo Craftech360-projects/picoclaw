@@ -394,6 +394,13 @@ func main() {
 					strings.EqualFold(strings.TrimSpace(sessionCfg.LiveKitService.TTS.Provider), "sarvam") {
 					sessionCfg.LiveKitService.TTS.VoiceID = voice
 				}
+				// Same for the per-character SmallestAI Waves voice. Registered under
+				// two provider aliases, so match both.
+				if voice := strings.TrimSpace(bs.Metadata.SmallestVoiceID); voice != "" {
+					if prov := strings.ToLower(strings.TrimSpace(sessionCfg.LiveKitService.TTS.Provider)); prov == "smallest" || prov == "smallestai" {
+						sessionCfg.LiveKitService.TTS.VoiceID = voice
+					}
+				}
 			}
 		}
 		sessionTTSProvider, sessionTTSSampleRate := buildTTSProvider(sessionCfg, sessionCfg.LiveKitService)

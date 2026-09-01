@@ -1,8 +1,8 @@
 package smallest_tts
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +12,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gorilla/websocket"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/voice/tts"
 )
 
 const (
-	defaultBaseURL    = "https://api.smallest.ai"
+	defaultBaseURL    = "https://waves-api.smallest.ai"
 	defaultModelID    = "lightning_v3.1"
 	defaultSampleRate = 24000
 	// defaultVoiceID is a documented base-queue voice used only when no
@@ -34,10 +34,18 @@ var validSampleRates = map[int]bool{
 	44100: true,
 }
 
-// SmallestTTS streams audio from SmallestAI Waves text-to-speech.
+// SmallestTTS synthesizes audio via the SmallestAI Waves batch endpoint.
+//
+// The streaming `/waves/v1/tts/live` WebSocket was measured to deliver every
+// audio chunk within ~640ms and then hold the socket open for a further ~4s
+// before sending its `complete` frame — a per-sentence stall the listener hears
+// as a gap. No client-side end-signal shortens it (a plain flush, a separate
+// flush message, and `continue:false` all waited ~4s; closing early truncates
+// the audio). The batch endpoint returns the same PCM in ~880ms, so we use it
+// and adapt the buffer to the streaming interface.
 type SmallestTTS struct {
 	cfg    TTSConfig
-	dialer *websocket.Dialer
+	client *http.Client
 }
 
 // NewSmallestTTS creates a new SmallestAI TTS client.
@@ -53,11 +61,11 @@ func NewSmallestTTS(cfg TTSConfig) *SmallestTTS {
 	}
 	return &SmallestTTS{
 		cfg:    cfg,
-		dialer: websocket.DefaultDialer,
+		client: &http.Client{},
 	}
 }
 
-// Synthesize starts streaming audio for the given text.
+// Synthesize returns the full PCM for text as a single-buffer stream.
 func (t *SmallestTTS) Synthesize(ctx context.Context, text string) (AudioStream, error) {
 	if t == nil {
 		return nil, errors.New("smallest tts is nil")
@@ -66,7 +74,7 @@ func (t *SmallestTTS) Synthesize(ctx context.Context, text string) (AudioStream,
 		return nil, errors.New("smallest api key is empty")
 	}
 
-	endpoint, err := buildWebSocketURL(t.cfg)
+	endpoint, err := buildSpeechURL(t.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -79,121 +87,67 @@ func (t *SmallestTTS) Synthesize(ctx context.Context, text string) (AudioStream,
 		"tts_sample_rate_hz": sampleRate(t.cfg),
 	})
 
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+strings.TrimSpace(t.cfg.APIKey))
-	conn, resp, err := t.dialer.DialContext(ctx, endpoint, header)
+	payload, err := json.Marshal(map[string]any{
+		"text":          text,
+		"voice_id":      voiceID(t.cfg),
+		"sample_rate":   sampleRate(t.cfg),
+		"output_format": "pcm",
+		"speed":         1,
+	})
 	if err != nil {
-		if resp != nil && resp.Body != nil {
-			defer resp.Body.Close()
-			data, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("smallest websocket dial: %w (status=%s body=%s)", err, resp.Status, strings.TrimSpace(string(data)))
-		}
-		return nil, fmt.Errorf("smallest websocket dial: %w", err)
+		return nil, fmt.Errorf("smallest tts encode request: %w", err)
 	}
 
-	request := map[string]any{
-		"voice_id":    voiceID(t.cfg),
-		"text":        text,
-		"model":       modelID(t.cfg),
-		"sample_rate": sampleRate(t.cfg),
-		"flush":       true,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("smallest tts build request: %w", err)
 	}
-	if err := conn.WriteJSON(request); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("smallest websocket send text: %w", err)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(t.cfg.APIKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("smallest tts request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("smallest tts read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("smallest tts status %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if len(body) == 0 {
+		return nil, errors.New("smallest tts returned no audio")
 	}
 
-	return &smallestAudioStream{conn: conn}, nil
+	return tts.NewBufferStream(body), nil
 }
 
-type smallestAudioStream struct {
-	conn *websocket.Conn
-}
-
-type smallestFrame struct {
-	Status string `json:"status"`
-	Data   struct {
-		Audio string `json:"audio"`
-	} `json:"data"`
-	Message string `json:"message"`
-}
-
-func (s *smallestAudioStream) Read() ([]byte, error) {
-	if s.conn == nil {
-		return nil, io.EOF
-	}
-
-	for {
-		messageType, data, err := s.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				return nil, io.EOF
-			}
-			return nil, err
-		}
-		if messageType != websocket.TextMessage {
-			continue
-		}
-
-		var frame smallestFrame
-		if err := json.Unmarshal(data, &frame); err != nil {
-			return nil, fmt.Errorf("decode smallest tts message: %w", err)
-		}
-
-		switch frame.Status {
-		case "chunk":
-			if strings.TrimSpace(frame.Data.Audio) == "" {
-				continue
-			}
-			audio, err := base64.StdEncoding.DecodeString(frame.Data.Audio)
-			if err != nil {
-				return nil, fmt.Errorf("decode smallest tts audio: %w", err)
-			}
-			if len(audio) == 0 {
-				continue
-			}
-			return audio, nil
-		case "complete":
-			return nil, io.EOF
-		case "error":
-			if strings.TrimSpace(frame.Message) != "" {
-				return nil, fmt.Errorf("smallest tts stream error: %s", frame.Message)
-			}
-			return nil, fmt.Errorf("smallest tts stream error: %s", strings.TrimSpace(string(data)))
-		default:
-			// e.g. "word_timestamp" - not audio, keep reading.
-			continue
-		}
-	}
-}
-
-func (s *smallestAudioStream) Close() error {
-	if s.conn != nil {
-		return s.conn.Close()
-	}
-	return nil
-}
-
-func buildWebSocketURL(cfg TTSConfig) (string, error) {
+// buildSpeechURL returns {base}/api/v1/{model}/get_speech. The REST path spells
+// the model with hyphens (lightning-v3.1) while the request body and our config
+// use underscores (lightning_v3.1).
+func buildSpeechURL(cfg TTSConfig) (string, error) {
 	base := strings.TrimRight(cfg.BaseURL, "/")
+	if base == "" {
+		base = defaultBaseURL
+	}
 	switch {
-	case strings.HasPrefix(base, "https://"):
-		base = "wss://" + strings.TrimPrefix(base, "https://")
-	case strings.HasPrefix(base, "http://"):
-		base = "ws://" + strings.TrimPrefix(base, "http://")
-	case strings.HasPrefix(base, "wss://"), strings.HasPrefix(base, "ws://"):
+	case strings.HasPrefix(base, "https://"), strings.HasPrefix(base, "http://"):
+	case strings.HasPrefix(base, "wss://"):
+		base = "https://" + strings.TrimPrefix(base, "wss://")
+	case strings.HasPrefix(base, "ws://"):
+		base = "http://" + strings.TrimPrefix(base, "ws://")
 	default:
 		return "", fmt.Errorf("unsupported smallest base url scheme: %s", cfg.BaseURL)
 	}
 
-	parsed, err := url.Parse(base + "/waves/v1/tts/live")
+	pathModel := strings.ReplaceAll(modelID(cfg), "_", "-")
+	parsed, err := url.Parse(base + "/api/v1/" + pathModel + "/get_speech")
 	if err != nil {
 		return "", err
 	}
-
-	q := parsed.Query()
-	q.Set("timeout", "120")
-	parsed.RawQuery = q.Encode()
 	return parsed.String(), nil
 }
 

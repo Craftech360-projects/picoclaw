@@ -36,6 +36,9 @@ type roomMetadata struct {
 	// Per-character Sarvam speaker (ai_agent_template.sarvam_voice_id) — overrides the
 	// global TTS voice for this session when the provider is sarvam.
 	SarvamVoiceID string `json:"sarvam_voice_id"`
+	// Per-character SmallestAI Waves voice (ai_agent_template.smallest_voice_id) —
+	// overrides the global TTS voice for this session when the provider is smallest.
+	SmallestVoiceID string `json:"smallest_voice_id"`
 }
 
 type roomMetadataChildProfile struct {
@@ -149,6 +152,7 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	metadata.CharacterName = normalizeString(mustGetMapValue(payload, "character", "character_name", "characterName"))
 	metadata.Language = normalizeString(mustGetMapValue(payload, "language"))
 	metadata.SarvamVoiceID = normalizeString(mustGetMapValue(payload, "sarvam_voice_id", "sarvamVoiceId"))
+	metadata.SmallestVoiceID = normalizeString(mustGetMapValue(payload, "smallest_voice_id", "smallestVoiceId"))
 	metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "primary_language", "primaryLanguage"))
 	if metadata.PrimaryLanguage == "" {
 		metadata.PrimaryLanguage = metadata.SessionLanguageName
