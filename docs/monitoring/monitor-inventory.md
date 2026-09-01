@@ -103,9 +103,12 @@ LLM and STT are Sarvam and share one key; TTS moved to SmallestAI on 2026-09-01 
 2026-08-31 08:00 and replaced by `sarvam-gemma4` in the same minute. Gemini, GPT-5-mini, Mistral,
 Deepgram, ElevenLabs, Cartesia, Azure, xAI: all `is_active=f`.
 
-**This is a single point of failure for the product.** One vendor and one credential sit behind
-every stage of a child's conversation. The monitors below cannot reduce that risk, only surface it
-quickly. A second provider on at least one stage is a resilience decision worth taking separately.
+**Concentration risk, reduced but not gone.** Until 2026-09-01 a single vendor and a single
+credential sat behind every stage of a child's conversation. Moving TTS to SmallestAI splits that:
+a Sarvam outage or key revocation now costs LLM and STT, not the whole pipeline. Both remaining
+stages still share one Sarvam key, so that key is still a single point of failure for understanding
+and answering a child — only speech output survives it. The monitors surface this quickly; they
+cannot reduce it.
 
 ### There are two Sarvam keys — use the database one
 
