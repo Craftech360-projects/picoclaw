@@ -55,7 +55,10 @@ VALUES
     ('edge', '', 'en-US-AnaNeural', '', 'pcm_24000', 24000, FALSE, 50),
     -- Azure Speech: region/endpoint + key come from the worker env
     -- (AZURE_SPEECH_REGION / AZURE_SPEECH_KEY); api_key here is an optional override.
-    ('azure', '', 'en-US-AnaNeural', 'centralindia', 'pcm_24000', 24000, FALSE, 60)
+    ('azure', '', 'en-US-AnaNeural', 'centralindia', 'pcm_24000', 24000, FALSE, 60),
+    -- SmallestAI Waves: streaming WebSocket TTS. voice_id is a Waves voice
+    -- (e.g. 'liam'); sample_rate_hz must be one of 8000/16000/24000/44100.
+    ('smallest', '', 'liam', 'lightning_v3.1', 'pcm_24000', 24000, FALSE, 70)
 ON CONFLICT (provider_name) DO NOTHING;
 
 -- Activate Deepgram Aura-2 TTS:
