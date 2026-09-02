@@ -198,12 +198,12 @@ func (s *geminiStreamAdapter) Finalize() error {
 
 func (s *geminiStreamAdapter) Close() error {
 	s.closeOnce.Do(func() {
+		close(s.closed)
 		s.writeMu.Lock()
 		_ = s.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		s.writeMu.Unlock()
-		close(s.closed)
 		_ = s.conn.Close()
+		s.writeMu.Unlock()
 	})
 	return nil
 }
