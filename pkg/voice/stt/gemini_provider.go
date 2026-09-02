@@ -184,6 +184,13 @@ type geminiStreamAdapter struct {
 	// false until the first ResetBuffer and flips with every open/close.
 	activityOpen bool
 	turnGen      uint64
+	// turnAudioBytes counts PCM actually forwarded for the current turn, and
+	// sessionAudioBytes the running total. Billing is per audio-input token,
+	// so what we send IS the cost — sarvam_rest logs the same figure as
+	// audio_seconds per REST call, and without it the only place a Gemini
+	// session's audio cost existed was Google's own console.
+	turnAudioBytes    int64
+	sessionAudioBytes int64
 	// cancelledGen is the turn generation CancelTurn last marked, or 0 for
 	// none. Review round 1, finding 1: a bare bool cleared by ResetBuffer let
 	// a cancelled turn's late final leak out if the child pressed again before
@@ -237,6 +244,7 @@ func (s *geminiStreamAdapter) SendAudio(pcm []byte) error {
 		return nil
 	}
 	s.sawAudio = true
+	s.turnAudioBytes += int64(len(pcm))
 	s.turnMu.Unlock()
 
 	return s.writeJSON(map[string]any{
@@ -337,6 +345,18 @@ func geminiEmptyGrace() time.Duration {
 	return 3 * time.Second
 }
 
+// geminiAudioSeconds converts forwarded PCM to seconds of audio. The wire
+// format is fixed at 16 kHz mono 16-bit (two bytes per sample), so this is
+// exact rather than an estimate. Matches the audio_seconds figure
+// sarvam_rest_provider.go logs per REST call, so the two providers' costs
+// can be compared straight from the logs.
+func geminiAudioSeconds(pcmBytes int64) float64 {
+	if pcmBytes <= 0 {
+		return 0
+	}
+	return roundTo2(float64(pcmBytes/2) / 16000)
+}
+
 // geminiSessionTTL is how long a socket is used before it is retired. The Live
 // API hard-caps a transcription session at 10 minutes; retiring at 9 leaves
 // room for the pipeline to reopen without racing the server's own close.
@@ -409,6 +429,7 @@ func (s *geminiStreamAdapter) Finalize() error {
 		"realtimeInput": map[string]any{"activityEnd": map[string]any{}},
 	})
 	retireNow := false
+	turnAudio, sessionAudio := int64(0), int64(0)
 	if err == nil {
 		s.activityEnded = true
 		s.activityOpen = false
@@ -416,8 +437,21 @@ func (s *geminiStreamAdapter) Finalize() error {
 			s.cancelledGen = 0
 		}
 		retireNow = s.retirePending
+		turnAudio = s.turnAudioBytes
+		s.sessionAudioBytes += turnAudio
+		s.turnAudioBytes = 0
+		sessionAudio = s.sessionAudioBytes
 	}
 	s.turnMu.Unlock()
+
+	if err == nil {
+		logger.InfoCF("livekit", "Gemini STT turn audio sent", map[string]any{
+			"provider":              "gemini",
+			"audio_seconds":         geminiAudioSeconds(turnAudio),
+			"session_audio_seconds": geminiAudioSeconds(sessionAudio),
+			"cancelled":             cancelledNow,
+		})
+	}
 
 	if sawAudio && !cancelledNow {
 		go s.announceIfEmpty(gen, geminiEmptyGrace())
@@ -566,9 +600,16 @@ func (s *geminiStreamAdapter) Close() error {
 		// closes resultChan on the way out, and a session whose STT stream
 		// dies without being reopened is a toy that has gone deaf. Same
 		// diagnostic, and the same reasoning, as sarvam_provider.go:208-231.
+		s.turnMu.Lock()
+		// The unfinalized tail counts too: audio sent for a turn that never
+		// reached Finalize was still uploaded, and still billed.
+		sessionAudio := s.sessionAudioBytes + s.turnAudioBytes
+		s.turnMu.Unlock()
+
 		logger.WarnCF("livekit", "Gemini STT stream closing", map[string]any{
-			"provider":    "gemini",
-			"called_from": closeCallerOutsideAdapter("gemini_provider.go"),
+			"provider":              "gemini",
+			"called_from":           closeCallerOutsideAdapter("gemini_provider.go"),
+			"session_audio_seconds": geminiAudioSeconds(sessionAudio),
 		})
 
 		close(s.closed)

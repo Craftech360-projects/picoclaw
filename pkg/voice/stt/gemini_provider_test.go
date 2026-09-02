@@ -1324,3 +1324,19 @@ func TestGeminiSendAudioOnlyInsideActivityWindow(t *testing.T) {
 		t.Fatalf("server saw %d audio frames total after the turn closed, want 3", after)
 	}
 }
+
+func TestGeminiAudioSeconds(t *testing.T) {
+	cases := map[int64]float64{
+		0:      0,
+		-1:     0,
+		640:    0.02,   // one 20ms frame
+		32000:  1,      // one second of 16kHz mono s16le
+		470400: 14.7,   // the 14.7s device clip
+		960000: 30,
+	}
+	for in, want := range cases {
+		if got := geminiAudioSeconds(in); got != want {
+			t.Errorf("geminiAudioSeconds(%d) = %v, want %v", in, got, want)
+		}
+	}
+}
