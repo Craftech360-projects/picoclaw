@@ -216,11 +216,26 @@ func (s *geminiStreamAdapter) writeJSON(v any) error {
 	return s.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
+// SendAudio forwards a PCM frame, but only while a turn's activity window is
+// open. The LiveKit track delivers audio for the whole session — silence
+// between turns, room noise, and the agent's own TTS — and under manual
+// activity detection (ADR 0007) the service discards anything outside a
+// window anyway. Uploading it bought nothing and billed audio-input tokens
+// for the session's full wall-clock rather than the child's actual speech:
+// measured 53s uploaded for ~5s spoken. sarvam_rest has no equivalent problem
+// because it POSTs one clip per turn.
+//
+// Dropping the frame also keeps sawAudio honest — it must mean "this turn
+// carried speech", which is what the empty-tap reply keys on.
 func (s *geminiStreamAdapter) SendAudio(pcm []byte) error {
 	if len(pcm) == 0 {
 		return nil
 	}
 	s.turnMu.Lock()
+	if !s.activityOpen {
+		s.turnMu.Unlock()
+		return nil
+	}
 	s.sawAudio = true
 	s.turnMu.Unlock()
 

@@ -91,7 +91,16 @@ func TestGeminiProviderStreamingProtocol(t *testing.T) {
 			return
 		}
 
-		// 2. one audio frame
+		// 2. the turn opens, then one audio frame. Audio is only forwarded
+		// inside an activity window, so activityStart precedes it.
+		_, raw, err = conn.ReadMessage()
+		if err != nil {
+			errCh <- fmt.Errorf("read activityStart: %w", err)
+			return
+		}
+		if !strings.Contains(string(raw), `"activityStart"`) {
+			errCh <- fmt.Errorf("first post-setup message = %s, want activityStart", string(raw))
+		}
 		_, raw, err = conn.ReadMessage()
 		if err != nil {
 			errCh <- fmt.Errorf("read audio: %w", err)
@@ -149,6 +158,11 @@ func TestGeminiProviderStreamingProtocol(t *testing.T) {
 		t.Fatalf("OpenStream: %v", err)
 	}
 	defer stream.Close()
+
+	// Open the turn first, as a device tap does: SendAudio forwards nothing
+	// while no activity window is open, so audio outside a turn never reaches
+	// the service.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
 
 	if err := stream.SendAudio([]byte("PCMPCM")); err != nil {
 		t.Fatalf("SendAudio: %v", err)
@@ -1219,5 +1233,94 @@ func TestGeminiFinalizeRetriableAfterWriteFailure(t *testing.T) {
 	want := []string{"start", "end"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("wire sequence = %v, want %v — the retried activityEnd never landed", got, want)
+	}
+}
+
+// The LiveKit track delivers audio for the whole session, but only a turn's
+// own speech should ever reach the service: anything outside an activity
+// window is discarded server-side under manual activity detection, and
+// uploading it billed the session's wall-clock instead of the child's speech.
+func TestGeminiSendAudioOnlyInsideActivityWindow(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var mu sync.Mutex
+	audioFrames := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if strings.Contains(string(raw), `"audio"`) {
+				mu.Lock()
+				audioFrames++
+				mu.Unlock()
+			}
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "10s")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	// Before any press: the track is live but no turn is open.
+	for i := 0; i < 5; i++ {
+		if err := stream.SendAudio([]byte("PCMPCM")); err != nil {
+			t.Fatalf("SendAudio before press: %v", err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	before := audioFrames
+	mu.Unlock()
+	if before != 0 {
+		t.Fatalf("server saw %d audio frames before any press, want 0", before)
+	}
+
+	// Inside a turn: the child's speech must get through.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	for i := 0; i < 3; i++ {
+		if err := stream.SendAudio([]byte("PCMPCM")); err != nil {
+			t.Fatalf("SendAudio during turn: %v", err)
+		}
+	}
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	during := audioFrames
+	mu.Unlock()
+	if during != 3 {
+		t.Fatalf("server saw %d audio frames during the turn, want 3", during)
+	}
+
+	// After the turn ends: back to dropping.
+	for i := 0; i < 5; i++ {
+		if err := stream.SendAudio([]byte("PCMPCM")); err != nil {
+			t.Fatalf("SendAudio after turn: %v", err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	after := audioFrames
+	mu.Unlock()
+	if after != 3 {
+		t.Fatalf("server saw %d audio frames total after the turn closed, want 3", after)
 	}
 }
