@@ -26,6 +26,9 @@ jobs:
     # reference to std::__1::__vector_base_common".
     env:
       CGO_LDFLAGS: "-lc++ -lc++abi"
+      # go test runs the compiled binary out of /tmp, where the $ORIGIN-relative
+      # rpath baked in by pkg/voice/vad/ten_vad.go cannot resolve.
+      LD_LIBRARY_PATH: ${{ github.workspace }}/third_party/ten-vad/lib/Linux/x64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
