@@ -381,7 +381,12 @@ func (rs *RoomSession) leave() {
 // (ADR 0007), meaning TEN VAD must not run and ptt_event/speech_end drive
 // the turn instead.
 func isPTTDrivenProvider(name string) bool {
-	return strings.TrimSpace(name) == "sarvam_rest"
+	switch strings.TrimSpace(name) {
+	case "sarvam_rest", "gemini":
+		return true
+	default:
+		return false
+	}
 }
 
 // pttSpeechEndGrace absorbs audio frames still in flight on the LiveKit track
@@ -407,6 +412,24 @@ func wireEmptyResultAnnouncement(stream stt.TranscriptionStream, pipeline *Audio
 	emptyStream.SetEmptyResultHandler(func() {
 		go pipeline.speakDidntHearFallback()
 	})
+}
+
+// bindSTTStream builds the callback the pipeline runs after it reopens a dead
+// STT stream. Everything the pipeline itself uses follows sttHolder, but the
+// turn boundary does not: resetPTTBuffer/cancelPTTTurn reach the provider only
+// through ParticipantState.sttStream (turnPlumbing), and the empty-tap handler
+// is registered on one specific stream. Both have to follow the swap, or a
+// rotated session keeps sending presses and cancels to the dead adapter while
+// Finalize goes to the live one — a toy that has silently gone deaf.
+func bindSTTStream(ps *ParticipantState, pipeline *AudioPipeline) func(stt.TranscriptionStream) {
+	return func(stream stt.TranscriptionStream) {
+		if ps != nil {
+			ps.mu.Lock()
+			ps.sttStream = stream
+			ps.mu.Unlock()
+		}
+		wireEmptyResultAnnouncement(stream, pipeline)
+	}
 }
 
 // turnPlumbing reads the PTT-relevant fields under ps.mu, matching how every
@@ -933,6 +956,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	pipeline.reopenSTT = func() (stt.TranscriptionStream, error) {
 		return rs.stt.OpenStream(rs.ctx, sttOptions)
 	}
+	pipeline.rebindSTT = bindSTTStream(ps, pipeline)
 	wireEmptyResultAnnouncement(stream, pipeline)
 	rs.mu.Lock()
 	rs.activePipeline = pipeline

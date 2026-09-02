@@ -85,7 +85,7 @@ func TestParseMessageVadSpeechEndIsNotFinal(t *testing.T) {
 // a fixed skip depth. Whatever it returns, it must not be inside the stdlib sync
 // package or this file.
 func TestCloseCallerSkipsSyncAndAdapter(t *testing.T) {
-	got := closeCallerOutsideAdapter()
+	got := closeCallerOutsideAdapter("sarvam_provider.go")
 	if got == "unknown" {
 		t.Fatal("closeCallerOutsideAdapter() = unknown; attribution is broken")
 	}

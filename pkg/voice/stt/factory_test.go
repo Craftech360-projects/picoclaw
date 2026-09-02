@@ -145,3 +145,24 @@ func TestNewFactory_CreatesDatabaseFile(t *testing.T) {
 	// Skipping in unit tests; this is an integration test.
 	t.Skip("DB-specific test requires PostgreSQL connection")
 }
+
+func TestFactoryResolvesGeminiProvider(t *testing.T) {
+	f, err := NewFactoryFromProviders([]ProviderInfo{{
+		Name:     "gemini",
+		Model:    "gemini-3.5-transcribe-live",
+		Language: "hi-IN",
+		APIKey:   "k",
+		IsActive: true,
+		Priority: 1,
+	}})
+	if err != nil {
+		t.Fatalf("NewFactoryFromProviders: %v", err)
+	}
+	provider, err := f.GetActiveProvider()
+	if err != nil {
+		t.Fatalf("GetActiveProvider: %v", err)
+	}
+	if provider.Name() != "gemini" {
+		t.Fatalf("provider = %q, want gemini", provider.Name())
+	}
+}

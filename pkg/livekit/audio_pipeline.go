@@ -379,8 +379,12 @@ type AudioPipeline struct {
 	// Set by the room session when it subscribes the audio track. sttHolder is
 	// shared with the PCM writer so a reconnect swaps the stream for both;
 	// reopenSTT rebuilds one with the session's original StreamOptions.
+	// rebindSTT re-points everything OUTSIDE this pipeline at the replacement:
+	// ParticipantState.sttStream, which is the only route the PTT turn
+	// boundary has to a provider, and the empty-tap callback.
 	sttHolder            *sttStreamHolder
 	reopenSTT            func() (stt.TranscriptionStream, error)
+	rebindSTT            func(stt.TranscriptionStream)
 	session              *RoomSession
 	bridge               *AgentBridge
 	tts                  tts.Provider
@@ -754,6 +758,16 @@ func (ap *AudioPipeline) reopenSTTStream(ctx context.Context, sessionKey string)
 			// The caller that closed the old stream already released it; swapping
 			// only rebinds the writer goroutine to the live one.
 			ap.sttHolder.Swap(stream)
+			// The writer is not the only thing bound to the old stream. The
+			// PTT turn boundary reaches the provider through
+			// ParticipantState.sttStream, and the empty-tap callback is
+			// registered per stream: without this, every rotation left
+			// ResetBuffer/CancelTurn going to the dead adapter while Finalize
+			// went to the live one, so the toy went deaf for the rest of the
+			// session with nothing in the log.
+			if ap.rebindSTT != nil {
+				ap.rebindSTT(stream)
+			}
 			logger.InfoCF("livekit", "STT stream reopened after close", map[string]any{
 				"session": sessionKey,
 				"attempt": attempt,

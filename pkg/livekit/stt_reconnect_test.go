@@ -75,6 +75,48 @@ func TestReopenSTTStreamSwapsTheHolder(t *testing.T) {
 	}
 }
 
+// The rotation bug: a reopened stream was swapped into the holder but nothing
+// re-pointed ParticipantState.sttStream or re-registered the empty-tap
+// callback. With gemini's 9-minute TTL that turned a latent gap into a
+// scheduled every-session failure — ResetBuffer kept going to the dead adapter,
+// so the live socket never got an activityStart and, with manual activity
+// detection, ignored the child's audio outright.
+func TestReopenSTTStreamRebindsTurnPlumbing(t *testing.T) {
+	dead := &fakePTTStream{}
+	fresh := &fakePTTStream{}
+	ps := &ParticipantState{
+		identity:   "device-a",
+		sessionKey: "livekit:device:a",
+		sttStream:  dead,
+		turnEvents: make(chan interface{}, 10),
+	}
+	pipeline, _ := newFallbackTestPipeline(t)
+	pipeline.sttHolder = newSTTStreamHolder(dead)
+	pipeline.reopenSTT = func() (stt.TranscriptionStream, error) { return fresh, nil }
+	pipeline.rebindSTT = bindSTTStream(ps, pipeline)
+
+	if _, err := pipeline.reopenSTTStream(context.Background(), "s"); err != nil {
+		t.Fatalf("reopenSTTStream() error = %v", err)
+	}
+
+	// The press path, exactly as handleDataMessage drives it.
+	stream, _ := ps.turnPlumbing()
+	resetPTTBuffer(stream)
+	if fresh.resets() != 1 {
+		t.Fatalf("ResetBuffer calls on the reopened stream = %d, want 1", fresh.resets())
+	}
+	if dead.resets() != 0 {
+		t.Fatalf("ResetBuffer calls on the dead stream = %d, want 0 — the turn boundary never followed the swap", dead.resets())
+	}
+
+	fresh.mu.Lock()
+	handler := fresh.emptyResult
+	fresh.mu.Unlock()
+	if handler == nil {
+		t.Fatal("the reopened stream has no empty-result handler; \"I didn't hear you\" can never fire again")
+	}
+}
+
 // A provider rejecting us (bad key, quota) must fail the session rather than spin.
 func TestReopenSTTStreamGivesUpAfterRepeatedFailure(t *testing.T) {
 	holder := newSTTStreamHolder(newFakeSTTStream())

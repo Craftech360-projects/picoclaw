@@ -361,7 +361,8 @@ func (f *Factory) initDB() error {
 			('voxtral', '', 'voxtral-mini-latest', FALSE, 17),
 			('sarvam', '', 'saaras:v3', FALSE, 18),
 			('sarvam_rest', '', 'saaras:v4', FALSE, 20),
-			('xai', '', 'stt', FALSE, 19)
+			('xai', '', 'stt', FALSE, 19),
+			('gemini', '', 'gemini-3.5-transcribe-live', FALSE, 21)
 		ON CONFLICT (provider_name) DO NOTHING;
 	`
 
@@ -388,4 +389,5 @@ func (f *Factory) registerBuiltInProviders() {
 	f.providers["sarvam"] = NewSarvamProvider("", "")
 	f.providers["sarvam_rest"] = NewSarvamRESTProvider("", "")
 	f.providers["xai"] = NewXAIProvider("", "")
+	f.providers["gemini"] = NewGeminiProvider("", "")
 }
