@@ -79,10 +79,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # One pattern, not six: the action interpolates go-package as a single
+      # quoted argument, so a space-separated list arrives as one literal and
+      # govulncheck answers "no packages matched the provided patterns" (exit
+      # 2). This scan has therefore never run. ./... covers the six former
+      # patterns and the rest of the module.
       - name: Run Govulncheck
         uses: golang/govulncheck-action@v1
         with:
-          go-package: ./cmd/picoclaw-livekit/... ./pkg/livekit/... ./pkg/voice/... ./pkg/tools/... ./pkg/providers/... ./pkg/config/...
+          go-package: ./...
 
   test:
     name: Tests
