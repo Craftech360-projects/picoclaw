@@ -410,3 +410,258 @@ func TestGeminiResetBufferClearsCancel(t *testing.T) {
 		t.Fatal("no transcript on the turn after a cancel")
 	}
 }
+
+// Review round 1, finding 1: the mandated design says cancellation
+// "persists until the next press" so a cancelled utterance can never be
+// answered — but a bare bool cleared by ResetBuffer doesn't fully achieve
+// that. Google's final for a cancelled turn arrives asynchronously, well
+// after activityEnd; if the child presses again in that gap — the likeliest
+// thing to happen right after cancelling — the old implementation cleared
+// suppression on the fresh press, before the stale final landed, and let it
+// leak out. It also stamped that stale final's gotFinal onto the NEW turn,
+// silencing that turn's own legitimate "I didn't hear you" reply.
+//
+// This replays exactly that timing: cancel turn 1, press again for turn 2
+// before turn 1's stale final arrives, and confirm (a) the stale final is
+// never emitted, (b) turn 2's empty-tap reply still fires despite the stale
+// final's arrival, and (c) a normal turn 3 afterward still transcribes
+// correctly — suppression must not leak forward past turn 2 either.
+func TestGeminiFastPressAfterCancelSuppressesStaleFinal(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var mu sync.Mutex
+	activityEnds := 0
+	staleSent := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if !strings.Contains(string(raw), `"activityEnd"`) {
+				continue
+			}
+			mu.Lock()
+			activityEnds++
+			n := activityEnds
+			mu.Unlock()
+			switch n {
+			case 1:
+				// Turn 1's End (from the cancel). Its final is deliberately
+				// delayed until after the child has already pressed again —
+				// that delay is the vulnerable window this test targets.
+				go func() {
+					time.Sleep(150 * time.Millisecond)
+					_ = conn.WriteMessage(websocket.TextMessage,
+						[]byte(`{"serverContent":{"inputTranscription":{"text":"stale from turn one"}}}`))
+					close(staleSent)
+				}()
+			case 2:
+				// Turn 2's End: a genuine empty tap. No reply, ever.
+			case 3:
+				// Turn 3's End: a real transcript.
+				_ = conn.WriteMessage(websocket.TextMessage,
+					[]byte(`{"serverContent":{"inputTranscription":{"text":"turn three final"}}}`))
+			}
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "300ms")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	// A persistent drain, not a one-shot select: this test needs to prove a
+	// negative (the stale text never arrives) across the whole timeline, not
+	// just at one checkpoint.
+	var recvMu sync.Mutex
+	var received []string
+	turn3Final := make(chan struct{}, 1)
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for evt := range stream.Results() {
+			recvMu.Lock()
+			received = append(received, evt.Text)
+			recvMu.Unlock()
+			if evt.Text == "turn three final" {
+				select {
+				case turn3Final <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
+	emptyFired := make(chan struct{}, 1)
+	stream.(interface{ SetEmptyResultHandler(func()) }).SetEmptyResultHandler(func() {
+		select {
+		case emptyFired <- struct{}{}:
+		default:
+		}
+	})
+
+	// Turn 1: press, speak, cancel — the driver's real double-cancel sequence.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+	stream.(interface{ CancelTurn() }).CancelTurn()
+	stream.(interface{ CancelTurn() }).CancelTurn()
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize (turn 1): %v", err)
+	}
+
+	// Turn 2: the fast press, landing in the gap before turn 1's stale final
+	// arrives. Suppression must survive this press.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+
+	select {
+	case <-staleSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never sent the stale final")
+	}
+	// Give the stale final time to reach and be processed by readLoop before
+	// turn 2 ends — this is the exact window the finding describes.
+	time.Sleep(100 * time.Millisecond)
+
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize (turn 2): %v", err)
+	}
+
+	// (c) Turn 2 produced no real transcript; its empty-tap reply must still
+	// fire despite the stale final having arrived while cancellation was
+	// outstanding.
+	select {
+	case <-emptyFired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn 2's empty-result handler never fired: the stale final from the cancelled turn suppressed it")
+	}
+
+	// Turn 3: a normal turn after the cancel — must transcribe like nothing
+	// happened, proving suppression doesn't leak forward past turn 2 either.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize (turn 3): %v", err)
+	}
+
+	// (b) the new turn's own final IS emitted.
+	select {
+	case <-turn3Final:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn 3's own final was never emitted")
+	}
+
+	stream.Close()
+	<-drainDone
+
+	// (a) the stale final is NOT emitted, at any point across the whole run.
+	recvMu.Lock()
+	defer recvMu.Unlock()
+	for _, text := range received {
+		if text == "stale from turn one" {
+			t.Fatalf("stale final from the cancelled turn was emitted: %v", received)
+		}
+	}
+}
+
+// Review round 1, finding 2: Finalize goes to real trouble to send exactly
+// one activityEnd per generation, on the stated grounds that the Live API has
+// no open activity window to close twice — but ResetBuffer wrote
+// activityStart unconditionally, with no matching guard, so an unbalanced
+// open was reachable: two presses with no intervening Finalize
+// (room_session.go:541-544 resets the buffer on every press), among other
+// paths. This asserts the server never sees two activityStart messages
+// without an activityEnd between them, replaying the plain double-press case.
+func TestGeminiResetBufferClosesStaleActivityWindow(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var mu sync.Mutex
+	var sequence []string // "start" or "end", in wire arrival order
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			switch {
+			case strings.Contains(string(raw), `"activityStart"`):
+				sequence = append(sequence, "start")
+			case strings.Contains(string(raw), `"activityEnd"`):
+				sequence = append(sequence, "end")
+			}
+			mu.Unlock()
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "10s")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	reset := stream.(interface{ ResetBuffer() }).ResetBuffer
+	// Three presses with no Finalize between any of them — the real driver
+	// does exactly this on every "press" (room_session.go:541-544).
+	reset()
+	reset()
+	reset()
+
+	// A legitimate End Turn afterward must still work normally.
+	_ = stream.SendAudio([]byte("PCM"))
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	// Let the last activityEnd land on the server before inspecting the log.
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	seq := append([]string(nil), sequence...)
+	mu.Unlock()
+
+	open := false
+	starts := 0
+	for i, tok := range seq {
+		if tok == "start" {
+			if open {
+				t.Fatalf("two activityStart messages with no activityEnd between them at position %d: %v", i, seq)
+			}
+			open = true
+			starts++
+		} else {
+			open = false
+		}
+	}
+	if starts < 3 {
+		t.Fatalf("expected at least 3 activityStart messages (one per press), got %d: %v", starts, seq)
+	}
+}

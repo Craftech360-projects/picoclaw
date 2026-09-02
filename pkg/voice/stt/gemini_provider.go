@@ -158,10 +158,23 @@ type geminiStreamAdapter struct {
 	turnMu        sync.Mutex
 	emptyHandler  func()
 	sawAudio      bool
-	cancelled     bool
 	gotFinal      bool
 	activityEnded bool
-	turnGen       uint64
+	// activityOpen tracks whether an activityStart is currently outstanding on
+	// the wire, independent of turn generation — ResetBuffer is the only
+	// source of activityStart (OpenStream sends none at setup), so this is
+	// false until the first ResetBuffer and flips with every open/close.
+	activityOpen bool
+	turnGen      uint64
+	// cancelledGen is the turn generation CancelTurn last marked, or 0 for
+	// none. Review round 1, finding 1: a bare bool cleared by ResetBuffer let
+	// a cancelled turn's late final leak out if the child pressed again before
+	// it arrived. Keying suppression to the generation it belongs to, and
+	// clearing it only once a LATER generation's own Finalize has sent that
+	// generation's activityEnd, closes the window: everything received while
+	// a cancellation is outstanding is presumed to belong to the cancelled
+	// turn, right up until the next turn's own boundary is provably sent.
+	cancelledGen uint64
 }
 
 func (s *geminiStreamAdapter) writeJSON(v any) error {
@@ -199,16 +212,36 @@ func (s *geminiStreamAdapter) SendAudio(pcm []byte) error {
 
 func (s *geminiStreamAdapter) Results() <-chan TranscriptEvent { return s.resultChan }
 
-// ResetBuffer is a fresh press: open a new activity window and drop any
-// suppression left over from the previous turn.
+// ResetBuffer is a fresh press: open a new activity window. It deliberately
+// does NOT clear cancelledGen — see that field's comment; suppression from a
+// cancelled turn survives a fast press and is cleared only once THIS new
+// generation's own Finalize has sent its activityEnd.
+//
+// If the previous window was never closed — two presses with no Finalize
+// between them (room_session.go:541-544 resets on every press), or a press
+// landing inside the 200ms cancel grace before the deferred Finalize fires —
+// the Live API has no open activity window to accept a second activityStart
+// on, so the stale one is closed first (finding 2).
 func (s *geminiStreamAdapter) ResetBuffer() {
 	s.turnMu.Lock()
+	staleOpen := s.activityOpen
 	s.sawAudio = false
-	s.cancelled = false
 	s.gotFinal = false
 	s.activityEnded = false
+	s.activityOpen = true
 	s.turnGen++
 	s.turnMu.Unlock()
+
+	if staleOpen {
+		if err := s.writeJSON(map[string]any{
+			"realtimeInput": map[string]any{"activityEnd": map[string]any{}},
+		}); err != nil {
+			logger.DebugCF("livekit", "Gemini stale-window activityEnd failed", map[string]any{
+				"provider": "gemini",
+				"error":    err.Error(),
+			})
+		}
+	}
 
 	if err := s.writeJSON(map[string]any{
 		"realtimeInput": map[string]any{"activityStart": map[string]any{}},
@@ -225,10 +258,10 @@ func (s *geminiStreamAdapter) ResetBuffer() {
 //
 // Deliberately sends nothing: room_session.go:554-562 calls this twice per
 // cancel and then drives Finalize, and Finalize owns the single activityEnd.
-// Idempotent by construction.
+// Idempotent by construction: both calls record the same turnGen.
 func (s *geminiStreamAdapter) CancelTurn() {
 	s.turnMu.Lock()
-	s.cancelled = true
+	s.cancelledGen = s.turnGen
 	s.turnMu.Unlock()
 }
 
@@ -261,13 +294,22 @@ func geminiEmptyGrace() time.Duration {
 // more than one Finalize for a single turn — the cancel path calls CancelTurn
 // twice and then finalizes, and a 25s cap can race a speech_end — and the Live
 // API has no open activity window to close the second time.
+//
+// This is also where cancellation suppression gets released (finding 1): once
+// a generation LATER than the cancelled one sends its own activityEnd here,
+// any final arriving after this write on the wire is guaranteed to belong to
+// the new turn, not the cancelled one, so cancelledGen is cleared.
 func (s *geminiStreamAdapter) Finalize() error {
 	s.turnMu.Lock()
 	gen := s.turnGen
 	sawAudio := s.sawAudio
-	cancelled := s.cancelled
+	cancelledNow := s.cancelledGen != 0 && s.cancelledGen == gen
 	alreadyEnded := s.activityEnded
 	s.activityEnded = true
+	s.activityOpen = false
+	if s.cancelledGen != 0 && gen > s.cancelledGen {
+		s.cancelledGen = 0
+	}
 	s.turnMu.Unlock()
 
 	if alreadyEnded {
@@ -278,7 +320,7 @@ func (s *geminiStreamAdapter) Finalize() error {
 		"realtimeInput": map[string]any{"activityEnd": map[string]any{}},
 	})
 
-	if sawAudio && !cancelled {
+	if sawAudio && !cancelledNow {
 		go s.announceIfEmpty(gen, geminiEmptyGrace())
 	}
 	return err
@@ -286,7 +328,9 @@ func (s *geminiStreamAdapter) Finalize() error {
 
 // announceIfEmpty fires the empty-result handler when the grace window closes
 // with no final for this turn. Keyed on turnGen so a press landing during the
-// wait cancels the announcement for the turn it superseded.
+// wait cancels the announcement for the turn it superseded, and defensively
+// re-checks cancelledGen against this specific generation (Finalize already
+// gates spawning this goroutine on the turn not being the cancelled one).
 func (s *geminiStreamAdapter) announceIfEmpty(gen uint64, grace time.Duration) {
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
@@ -298,7 +342,7 @@ func (s *geminiStreamAdapter) announceIfEmpty(gen uint64, grace time.Duration) {
 
 	s.turnMu.Lock()
 	stale := s.turnGen != gen
-	quiet := !s.gotFinal && !s.cancelled
+	quiet := !s.gotFinal && s.cancelledGen != gen
 	handler := s.emptyHandler
 	s.turnMu.Unlock()
 
@@ -344,11 +388,15 @@ func (s *geminiStreamAdapter) readLoop() {
 			continue
 		}
 
+		// While a cancellation is outstanding (cancelledGen != 0), every event
+		// is presumed to belong to the cancelled turn and is dropped without
+		// updating gotFinal — a stale final must not silence the next turn's
+		// legitimate empty-tap reply (finding 1, symptom 2).
 		s.turnMu.Lock()
-		if evt.IsFinal {
+		suppressed := s.cancelledGen != 0
+		if evt.IsFinal && !suppressed {
 			s.gotFinal = true
 		}
-		suppressed := s.cancelled
 		s.turnMu.Unlock()
 		if suppressed {
 			continue
