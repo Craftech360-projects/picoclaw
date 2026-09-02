@@ -334,6 +334,20 @@ func geminiSessionTTL() time.Duration {
 	return 9 * time.Minute
 }
 
+// geminiRetireGrace is how long a deferred retirement waits at the turn
+// boundary before closing the socket.
+//
+// Derived from the empty grace rather than fixed, and that is the whole point:
+// Finalize spawns announceIfEmpty and retireAfterTurn together, and
+// announceIfEmpty returns early on <-s.closed. Given the SAME duration the two
+// race, and a Close that wins leaves an empty tap answered with silence instead
+// of "I didn't hear you". A bare constant would only hold that ordering at the
+// default GEMINI_STT_EMPTY_GRACE; doubling it holds at every setting, so the
+// announcement always resolves first. Still far inside the backstop.
+func geminiRetireGrace() time.Duration {
+	return 2 * geminiEmptyGrace()
+}
+
 // geminiRetireBackstop is how long past the TTL a deferred retirement waits for
 // a turn boundary before closing anyway. 45s past the 9m TTL lands at 9m45s,
 // still inside the server's own 10m cap — a window left open forever must not
@@ -394,11 +408,11 @@ func (s *geminiStreamAdapter) Finalize() error {
 		go s.announceIfEmpty(gen, geminiEmptyGrace())
 	}
 	if retireNow {
-		// The turn boundary the deferred retirement was waiting for. One empty
-		// grace of slack first: the final lands ~0.5s after activityEnd on the
-		// live endpoint, and closing the socket ahead of it would throw away
-		// the very utterance we just ended.
-		go s.retireAfterTurn(geminiEmptyGrace())
+		// The turn boundary the deferred retirement was waiting for. Grace
+		// first: the final lands ~0.5s after activityEnd on the live endpoint,
+		// and closing the socket ahead of it would throw away the very
+		// utterance we just ended.
+		go s.retireAfterTurn(gen, geminiRetireGrace())
 	}
 	return err
 }
@@ -452,28 +466,35 @@ func (s *geminiStreamAdapter) retireAtTTL(ttl, backstop time.Duration) {
 
 	s.turnMu.Lock()
 	open := s.activityOpen
+	gen := s.turnGen
 	s.retirePending = true
 	s.turnMu.Unlock()
 
-	if !open {
-		logger.InfoCF("livekit", "Retiring Gemini STT socket at session TTL", map[string]any{
+	if open {
+		logger.InfoCF("livekit", "Gemini STT session TTL reached mid-turn; retirement deferred", map[string]any{
+			"provider": "gemini",
+			"ttl":      ttl.String(),
+			"backstop": backstop.String(),
+		})
+	} else {
+		// No window open, but not closed on the spot either: the live endpoint
+		// delivers the final ~0.54s AFTER activityEnd, so a TTL landing in that
+		// gap would discard a completed utterance the child already spoke.
+		// Same grace-wait path as the deferred case, so both behave alike.
+		logger.InfoCF("livekit", "Retiring Gemini STT socket at session TTL after the final grace", map[string]any{
 			"provider": "gemini",
 			"ttl":      ttl.String(),
 		})
-		_ = s.Close()
-		return
+		go s.retireAfterTurn(gen, geminiRetireGrace())
 	}
 
-	logger.InfoCF("livekit", "Gemini STT session TTL reached mid-turn; retirement deferred", map[string]any{
-		"provider": "gemini",
-		"ttl":      ttl.String(),
-		"backstop": backstop.String(),
-	})
+	// Armed either way. retireAfterTurn declines to close on top of a live
+	// turn, so without this a session that keeps pressing would never retire.
 	deadline := time.NewTimer(backstop)
 	defer deadline.Stop()
 	select {
 	case <-deadline.C:
-		logger.WarnCF("livekit", "Retiring Gemini STT socket at the TTL backstop with a turn still open", map[string]any{
+		logger.WarnCF("livekit", "Retiring Gemini STT socket at the TTL backstop", map[string]any{
 			"provider": "gemini",
 			"ttl":      ttl.String(),
 			"backstop": backstop.String(),
@@ -485,7 +506,16 @@ func (s *geminiStreamAdapter) retireAtTTL(ttl, backstop time.Duration) {
 
 // retireAfterTurn takes a deferred retirement once the turn that deferred it
 // has had its grace to deliver a final.
-func (s *geminiStreamAdapter) retireAfterTurn(grace time.Duration) {
+//
+// Re-gated on turn state at the moment it fires, not just when it was spawned.
+// Nothing cancels this goroutine, so a press landing inside the grace window
+// (ResetBuffer sets activityOpen again) would otherwise be closed on top of —
+// the same mid-utterance close the deferral exists to prevent, narrowed to the
+// grace window. A newer generation means a later Finalize has already spawned
+// its own attempt, so this one is stale. retirePending is never cleared, so
+// declining here only postpones: the next successful Finalize re-spawns, and
+// retireAtTTL's backstop remains the hard stop.
+func (s *geminiStreamAdapter) retireAfterTurn(gen uint64, grace time.Duration) {
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 	select {
@@ -493,6 +523,21 @@ func (s *geminiStreamAdapter) retireAfterTurn(grace time.Duration) {
 	case <-s.closed:
 		return
 	}
+
+	s.turnMu.Lock()
+	open := s.activityOpen
+	stale := s.turnGen != gen
+	s.turnMu.Unlock()
+
+	if open || stale {
+		logger.DebugCF("livekit", "Deferred Gemini STT retirement declined; turn still live", map[string]any{
+			"provider":      "gemini",
+			"activity_open": open,
+			"stale_gen":     stale,
+		})
+		return
+	}
+
 	logger.InfoCF("livekit", "Retiring Gemini STT socket at the turn boundary after its TTL", map[string]any{
 		"provider": "gemini",
 		"grace":    grace.String(),

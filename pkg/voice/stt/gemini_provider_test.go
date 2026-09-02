@@ -879,6 +879,10 @@ func TestGeminiStreamRetiresBeforeSessionCap(t *testing.T) {
 
 	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
 	t.Setenv("GEMINI_STT_SESSION_TTL", "300ms")
+	// Retirement always waits one retire grace (2x this) for a final in flight,
+	// even with no window open — the live endpoint delivers finals ~0.54s after
+	// activityEnd, so a TTL landing in that gap must not discard one.
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "100ms")
 
 	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
 		SampleRate: 16000, Channels: 1, Language: "hi-IN",
@@ -986,6 +990,122 @@ func TestGeminiRetirementDeferredUntilTurnBoundary(t *testing.T) {
 	}
 	if !resultsClosed(t, stream, 3*time.Second) {
 		t.Fatal("the deferred retirement was never taken at the turn boundary")
+	}
+}
+
+// The deferred retirement must re-check turn state when it fires, not only
+// when it was spawned. Nothing cancels the goroutine, so a press landing
+// inside the grace window would otherwise be closed on top of — the same
+// mid-utterance close the deferral exists to prevent, just narrowed to the
+// grace window. The retirement is only postponed: the next Finalize takes it.
+func TestGeminiDeferredRetirementYieldsToAFreshPress(t *testing.T) {
+	geminiTapServer(t)
+	t.Setenv("GEMINI_STT_SESSION_TTL", "150ms")
+	t.Setenv("GEMINI_STT_RETIRE_BACKSTOP", "30s") // far away: not what closes here
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "100ms")   // retire grace is 200ms
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	reset := stream.(interface{ ResetBuffer() }).ResetBuffer
+
+	// Turn 1 is open when the TTL lands, so retirement defers to its Finalize.
+	reset()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+	time.Sleep(400 * time.Millisecond)
+
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize (turn 1): %v", err)
+	}
+	// The child presses again immediately — inside the retirement grace.
+	reset()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+
+	if resultsClosed(t, stream, time.Second) {
+		t.Fatal("the deferred retirement closed on top of a fresh press; that is the mid-utterance close it exists to prevent")
+	}
+
+	// Turn 2 ends: now the postponed retirement may be taken.
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize (turn 2): %v", err)
+	}
+	if !resultsClosed(t, stream, 3*time.Second) {
+		t.Fatal("the postponed retirement was never taken at the next turn boundary")
+	}
+}
+
+// Finalize spawns announceIfEmpty and the retirement together, and
+// announceIfEmpty returns early on <-s.closed. Given the same duration they
+// race, and a Close that wins answers an empty tap with silence. The
+// retirement grace must be strictly longer so the announcement always wins.
+func TestGeminiRetireGraceOutlastsEmptyGrace(t *testing.T) {
+	for _, empty := range []string{"", "100ms", "3s", "10s"} {
+		t.Setenv("GEMINI_STT_EMPTY_GRACE", empty)
+		if got, want := geminiRetireGrace(), geminiEmptyGrace(); got <= want {
+			t.Fatalf("GEMINI_STT_EMPTY_GRACE=%q: retire grace %v <= empty grace %v; the retirement would race the announcement", empty, got, want)
+		}
+		if geminiRetireGrace() >= geminiRetireBackstop() {
+			t.Fatalf("GEMINI_STT_EMPTY_GRACE=%q: retire grace %v is not inside the backstop %v", empty, geminiRetireGrace(), geminiRetireBackstop())
+		}
+	}
+}
+
+// The behavioural half of the same finding: an empty tap on the very turn that
+// takes the retirement must still get "I didn't hear you".
+//
+// Asserting only that the handler fires is not enough to catch the bug — with
+// both goroutines waking on the same deadline the announcement usually wins on
+// timer-creation order, so the race passes most runs. The load-bearing
+// assertion is the timing one: the socket must still be open comfortably past
+// the empty grace, which is false by construction when the retirement is
+// spawned with that same grace.
+func TestGeminiRetirementTurnStillAnnouncesEmptyTap(t *testing.T) {
+	geminiTapServer(t) // answers nothing: every tap here is an empty one
+	t.Setenv("GEMINI_STT_SESSION_TTL", "150ms")
+	t.Setenv("GEMINI_STT_RETIRE_BACKSTOP", "30s")
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "300ms")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	fired := make(chan struct{}, 1)
+	stream.(interface{ SetEmptyResultHandler(func()) }).SetEmptyResultHandler(func() {
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	})
+
+	// Open a window, let the TTL land on it, then end the turn: this Finalize
+	// spawns the announcement and the retirement together.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+	time.Sleep(400 * time.Millisecond)
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	// The announcement is due at +300ms and the retirement at +600ms. At +450ms
+	// the socket must still be open: a retirement sharing the empty grace would
+	// already have closed it, and announceIfEmpty returns early on <-s.closed.
+	if resultsClosed(t, stream, 450*time.Millisecond) {
+		t.Fatal("the retiring socket closed within the empty grace; the announcement is racing the close")
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the retiring socket closed before the empty-tap announcement; the child got silence")
 	}
 }
 
