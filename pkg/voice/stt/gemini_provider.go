@@ -154,6 +154,14 @@ type geminiStreamAdapter struct {
 
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+
+	turnMu        sync.Mutex
+	emptyHandler  func()
+	sawAudio      bool
+	cancelled     bool
+	gotFinal      bool
+	activityEnded bool
+	turnGen       uint64
 }
 
 func (s *geminiStreamAdapter) writeJSON(v any) error {
@@ -175,6 +183,10 @@ func (s *geminiStreamAdapter) SendAudio(pcm []byte) error {
 	if len(pcm) == 0 {
 		return nil
 	}
+	s.turnMu.Lock()
+	s.sawAudio = true
+	s.turnMu.Unlock()
+
 	return s.writeJSON(map[string]any{
 		"realtimeInput": map[string]any{
 			"audio": map[string]any{
@@ -187,13 +199,117 @@ func (s *geminiStreamAdapter) SendAudio(pcm []byte) error {
 
 func (s *geminiStreamAdapter) Results() <-chan TranscriptEvent { return s.resultChan }
 
-// Finalize is End Turn. Under manual activity detection this is activityEnd,
-// not audioStreamEnd: the utterance is over, the socket is not. audioStreamEnd
-// would retire the whole session on every tap.
+// ResetBuffer is a fresh press: open a new activity window and drop any
+// suppression left over from the previous turn.
+func (s *geminiStreamAdapter) ResetBuffer() {
+	s.turnMu.Lock()
+	s.sawAudio = false
+	s.cancelled = false
+	s.gotFinal = false
+	s.activityEnded = false
+	s.turnGen++
+	s.turnMu.Unlock()
+
+	if err := s.writeJSON(map[string]any{
+		"realtimeInput": map[string]any{"activityStart": map[string]any{}},
+	}); err != nil {
+		logger.DebugCF("livekit", "Gemini activityStart failed", map[string]any{
+			"provider": "gemini",
+			"error":    err.Error(),
+		})
+	}
+}
+
+// CancelTurn is deliberate silence. The audio already reached Google, so the
+// final still arrives; suppress it on the way out and skip the empty-tap reply.
+//
+// Deliberately sends nothing: room_session.go:554-562 calls this twice per
+// cancel and then drives Finalize, and Finalize owns the single activityEnd.
+// Idempotent by construction.
+func (s *geminiStreamAdapter) CancelTurn() {
+	s.turnMu.Lock()
+	s.cancelled = true
+	s.turnMu.Unlock()
+}
+
+// SetEmptyResultHandler registers the "I didn't hear you" callback.
+func (s *geminiStreamAdapter) SetEmptyResultHandler(fn func()) {
+	s.turnMu.Lock()
+	s.emptyHandler = fn
+	s.turnMu.Unlock()
+}
+
+// geminiEmptyGrace is how long Finalize waits for a final before calling the
+// tap empty.
+// ponytail: one fixed window, not adaptive. If real devices show finals landing
+// later than this on slow networks, widen GEMINI_STT_EMPTY_GRACE rather than
+// building latency tracking.
+func geminiEmptyGrace() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("GEMINI_STT_EMPTY_GRACE")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 3 * time.Second
+}
+
+// Finalize is End Turn: close the activity window, then decide whether the tap
+// produced anything. A tap that carried audio but drew no final gets the
+// empty-result reply.
+//
+// The activityEnd is one-shot per turn generation. Both PTT paths can drive
+// more than one Finalize for a single turn — the cancel path calls CancelTurn
+// twice and then finalizes, and a 25s cap can race a speech_end — and the Live
+// API has no open activity window to close the second time.
 func (s *geminiStreamAdapter) Finalize() error {
-	return s.writeJSON(map[string]any{
+	s.turnMu.Lock()
+	gen := s.turnGen
+	sawAudio := s.sawAudio
+	cancelled := s.cancelled
+	alreadyEnded := s.activityEnded
+	s.activityEnded = true
+	s.turnMu.Unlock()
+
+	if alreadyEnded {
+		return nil
+	}
+
+	err := s.writeJSON(map[string]any{
 		"realtimeInput": map[string]any{"activityEnd": map[string]any{}},
 	})
+
+	if sawAudio && !cancelled {
+		go s.announceIfEmpty(gen, geminiEmptyGrace())
+	}
+	return err
+}
+
+// announceIfEmpty fires the empty-result handler when the grace window closes
+// with no final for this turn. Keyed on turnGen so a press landing during the
+// wait cancels the announcement for the turn it superseded.
+func (s *geminiStreamAdapter) announceIfEmpty(gen uint64, grace time.Duration) {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-s.closed:
+		return
+	}
+
+	s.turnMu.Lock()
+	stale := s.turnGen != gen
+	quiet := !s.gotFinal && !s.cancelled
+	handler := s.emptyHandler
+	s.turnMu.Unlock()
+
+	if stale || !quiet || handler == nil {
+		return
+	}
+	logger.InfoCF("livekit", "Gemini tap produced no transcript", map[string]any{
+		"provider": "gemini",
+		"grace":    grace.String(),
+	})
+	handler()
 }
 
 func (s *geminiStreamAdapter) Close() error {
@@ -227,6 +343,17 @@ func (s *geminiStreamAdapter) readLoop() {
 		if !ok {
 			continue
 		}
+
+		s.turnMu.Lock()
+		if evt.IsFinal {
+			s.gotFinal = true
+		}
+		suppressed := s.cancelled
+		s.turnMu.Unlock()
+		if suppressed {
+			continue
+		}
+
 		select {
 		case s.resultChan <- evt:
 		case <-s.closed:

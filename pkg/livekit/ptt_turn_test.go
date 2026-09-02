@@ -512,3 +512,15 @@ func TestPTTCancelUsesCancelTurnAndPressDoesNot(t *testing.T) {
 		}
 	})
 }
+
+func TestGeminiIsPTTDriven(t *testing.T) {
+	if !isPTTDrivenProvider("gemini") {
+		t.Fatal("gemini must be PTT-driven: ADR 0007 gives the device the turn boundary")
+	}
+	if !isPTTDrivenProvider("sarvam_rest") {
+		t.Fatal("sarvam_rest must stay PTT-driven")
+	}
+	if isPTTDrivenProvider("sarvam") {
+		t.Fatal("streaming sarvam must stay VAD-driven")
+	}
+}

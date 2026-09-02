@@ -381,7 +381,12 @@ func (rs *RoomSession) leave() {
 // (ADR 0007), meaning TEN VAD must not run and ptt_event/speech_end drive
 // the turn instead.
 func isPTTDrivenProvider(name string) bool {
-	return strings.TrimSpace(name) == "sarvam_rest"
+	switch strings.TrimSpace(name) {
+	case "sarvam_rest", "gemini":
+		return true
+	default:
+		return false
+	}
 }
 
 // pttSpeechEndGrace absorbs audio frames still in flight on the LiveKit track
