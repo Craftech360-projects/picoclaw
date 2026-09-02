@@ -1186,15 +1186,17 @@ func TestGeminiFinalizeRetriableAfterWriteFailure(t *testing.T) {
 	defer server.Close()
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
-	live, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	live, liveResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	closeUpgradeBody(liveResp)
 	defer live.Close()
-	broken, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	broken, brokenResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial throwaway socket: %v", err)
 	}
+	closeUpgradeBody(brokenResp)
 	_ = broken.Close() // every write on this one fails
 
 	adapter := &geminiStreamAdapter{
@@ -1338,5 +1340,15 @@ func TestGeminiAudioSeconds(t *testing.T) {
 		if got := geminiAudioSeconds(in); got != want {
 			t.Errorf("geminiAudioSeconds(%d) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// closeUpgradeBody releases the handshake response body from a websocket dial.
+// gorilla hands back the *http.Response alongside the conn; the body is a
+// no-op for a successful upgrade but bodyclose flags it, and leaving it open
+// is untidy either way.
+func closeUpgradeBody(resp *http.Response) {
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 }

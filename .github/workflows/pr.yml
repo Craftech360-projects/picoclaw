@@ -32,7 +32,8 @@ jobs:
       - name: Install audio codec dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev
+          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev \
+                                  libc++-dev libc++abi-dev
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -70,7 +71,8 @@ jobs:
       - name: Install audio codec dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev
+          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev \
+                                  libc++-dev libc++abi-dev
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -85,6 +87,12 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    # third_party/ten-vad's prebuilt libten_vad.so was compiled against libc++
+    # (its undefined symbols are in the std::__1:: namespace), but cgo links
+    # with gcc/libstdc++ by default, so linking the test binary fails with
+    # "undefined reference to std::__1::__vector_base_common".
+    env:
+      CGO_LDFLAGS: "-lc++ -lc++abi"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -97,7 +105,8 @@ jobs:
       - name: Install audio codec dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev
+          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev \
+                                  libc++-dev libc++abi-dev
 
       - name: Setup Go
         uses: actions/setup-go@v6
