@@ -89,6 +89,9 @@ func TestIsPTTDrivenProvider(t *testing.T) {
 		want bool
 	}{
 		{"sarvam_rest", true},
+		// ADR 0007 gives the device the turn boundary for gemini too.
+		{"gemini", true},
+		{"  gemini  ", true},
 		{"sarvam", false},
 		{"deepgram", false},
 		{"", false},
@@ -100,8 +103,8 @@ func TestIsPTTDrivenProvider(t *testing.T) {
 	}
 }
 
-// fakePTTProvider only needs Name() — handleDataMessage's gate is providers
-// named "sarvam_rest".
+// fakePTTProvider only needs Name() — handleDataMessage's gate is
+// isPTTDrivenProvider, which now admits gemini alongside sarvam_rest.
 type fakePTTProvider struct{ name string }
 
 func (p *fakePTTProvider) Name() string                     { return p.name }
@@ -511,16 +514,4 @@ func TestPTTCancelUsesCancelTurnAndPressDoesNot(t *testing.T) {
 			t.Errorf("ResetBuffer calls = %d on End Turn, want 0", stream.resets())
 		}
 	})
-}
-
-func TestGeminiIsPTTDriven(t *testing.T) {
-	if !isPTTDrivenProvider("gemini") {
-		t.Fatal("gemini must be PTT-driven: ADR 0007 gives the device the turn boundary")
-	}
-	if !isPTTDrivenProvider("sarvam_rest") {
-		t.Fatal("sarvam_rest must stay PTT-driven")
-	}
-	if isPTTDrivenProvider("sarvam") {
-		t.Fatal("streaming sarvam must stay VAD-driven")
-	}
 }

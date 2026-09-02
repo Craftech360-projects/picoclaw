@@ -212,7 +212,7 @@ func (s *sarvamStreamAdapter) Close() error {
 		// deaf for the rest of the call, so the one thing worth knowing is who
 		// called this. Six call sites close an STT stream and the logs named none
 		// of them; runtime.Caller costs nothing on a once-per-stream path.
-		caller := closeCallerOutsideAdapter()
+		caller := closeCallerOutsideAdapter("sarvam_provider.go")
 		logger.WarnCF("livekit", "Sarvam STT stream closing", map[string]any{
 			"provider":    "sarvam",
 			"called_from": caller,
@@ -455,8 +455,9 @@ func (s *sarvamStreamAdapter) logDroppedMessage(reason string, data []byte) {
 
 // closeCallerOutsideAdapter names the code that closed the stream. Close runs
 // inside closeOnce.Do, so a fixed skip depth lands in sync/once.go — as the first
-// version of this diagnostic did. Walk out instead.
-func closeCallerOutsideAdapter() string {
+// version of this diagnostic did. Walk out instead, past the stdlib sync package
+// and past adapterFile, the calling adapter's own source file.
+func closeCallerOutsideAdapter(adapterFile string) string {
 	pcs := make([]uintptr, 12)
 	n := runtime.Callers(2, pcs)
 	frames := runtime.CallersFrames(pcs[:n])
@@ -464,7 +465,7 @@ func closeCallerOutsideAdapter() string {
 		frame, more := frames.Next()
 		if frame.File != "" &&
 			!strings.Contains(frame.File, "/sync/") &&
-			!strings.HasSuffix(frame.File, "sarvam_provider.go") {
+			!strings.HasSuffix(frame.File, adapterFile) {
 			return fmt.Sprintf("%s:%d", frame.File, frame.Line)
 		}
 		if !more {

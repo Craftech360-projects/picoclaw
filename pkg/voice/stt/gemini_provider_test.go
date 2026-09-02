@@ -358,7 +358,11 @@ func TestGeminiCancelTurnSuppressesLateFinal(t *testing.T) {
 }
 
 // A fresh press after a cancel must transcribe normally again.
-func TestGeminiResetBufferClearsCancel(t *testing.T) {
+//
+// Named for what it actually proves: ResetBuffer deliberately does NOT clear
+// cancellation (see cancelledGen's comment) — turn 2's own Finalize is what
+// releases the suppression, and this asserts turn 2's transcript comes through.
+func TestGeminiTurnAfterCancelTranscribes(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)

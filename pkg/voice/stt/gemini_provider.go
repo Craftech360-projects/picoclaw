@@ -69,6 +69,10 @@ func (p *geminiProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 		model = geminiDefaultModel
 	}
 
+	// SECRET: connURL carries the API key in its query string — this endpoint
+	// accepts no Authorization header. Never log it, never fold it into an
+	// error message, never attach it to a span. The dial failure below
+	// deliberately reports only the HTTP status and body for that reason.
 	q := url.Values{}
 	q.Set("key", apiKey)
 	connURL := geminiSTTURL() + "?" + q.Encode()
@@ -124,7 +128,15 @@ func (p *geminiProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 		return nil, fmt.Errorf("gemini: awaiting setupComplete: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
-	if !strings.Contains(string(raw), "setupComplete") {
+	// Decoded, not substring-matched: an error frame that happens to quote the
+	// field name ("unknown field setupComplete", say) would pass a Contains
+	// check and leave us treating a rejection as a live session.
+	var ack map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &ack); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("gemini: setup response not JSON: %s", truncateForLog(string(raw), 512))
+	}
+	if _, ok := ack["setupComplete"]; !ok {
 		_ = conn.Close()
 		return nil, fmt.Errorf("gemini: setup rejected: %s", truncateForLog(string(raw), 512))
 	}
@@ -490,6 +502,15 @@ func (s *geminiStreamAdapter) retireAfterTurn(grace time.Duration) {
 
 func (s *geminiStreamAdapter) Close() error {
 	s.closeOnce.Do(func() {
+		// Which caller closed this is the one thing worth knowing: readLoop
+		// closes resultChan on the way out, and a session whose STT stream
+		// dies without being reopened is a toy that has gone deaf. Same
+		// diagnostic, and the same reasoning, as sarvam_provider.go:208-231.
+		logger.WarnCF("livekit", "Gemini STT stream closing", map[string]any{
+			"provider":    "gemini",
+			"called_from": closeCallerOutsideAdapter("gemini_provider.go"),
+		})
+
 		close(s.closed)
 		s.writeMu.Lock()
 		_ = s.conn.WriteMessage(websocket.CloseMessage,
@@ -505,14 +526,24 @@ func (s *geminiStreamAdapter) readLoop() {
 	for {
 		_, data, err := s.conn.ReadMessage()
 		if err != nil {
+			// Warn, always, and with the close code: this return closes
+			// resultChan, which is what makes the session deaf until the
+			// pipeline reopens. Suppressing it on our own close hid which side
+			// ended the stream (sarvam_provider.go:249-263).
+			fields := map[string]any{"provider": "gemini", "error": err.Error()}
+			if ce, ok := err.(*websocket.CloseError); ok {
+				fields["ws_close_code"] = ce.Code
+				fields["ws_close_text"] = ce.Text
+				fields["closed_by"] = "gemini"
+			} else {
+				fields["closed_by"] = "transport"
+			}
 			select {
 			case <-s.closed:
+				fields["already_closed_locally"] = true
 			default:
-				logger.DebugCF("livekit", "Gemini STT read loop ended", map[string]any{
-					"provider": "gemini",
-					"error":    err.Error(),
-				})
 			}
+			logger.WarnCF("livekit", "Gemini STT read loop ended", fields)
 			return
 		}
 		evt, ok := s.parseMessage(data)
@@ -554,6 +585,11 @@ func (s *geminiStreamAdapter) readLoop() {
 // parseMessage maps one Live API server frame to a TranscriptEvent. Finals
 // arrive as serverContent.inputTranscription, interims as
 // serverContent.interimInputTranscription.
+//
+// Everything it does not recognise is logged rather than dropped in silence.
+// After setupComplete this is the ONLY place a model rejection or a goAway
+// could surface, and a silently discarded one of those looks exactly like a
+// toy that simply stopped answering.
 func (s *geminiStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) {
 	var msg struct {
 		ServerContent struct {
@@ -564,8 +600,15 @@ func (s *geminiStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 				Text string `json:"text"`
 			} `json:"interimInputTranscription"`
 		} `json:"serverContent"`
+		Error  json.RawMessage `json:"error"`
+		GoAway json.RawMessage `json:"goAway"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
+		logger.WarnCF("livekit", "Gemini STT frame not parseable as JSON", map[string]any{
+			"provider": "gemini",
+			"error":    err.Error(),
+			"raw":      truncateForLog(string(data), 400),
+		})
 		return TranscriptEvent{}, false
 	}
 
@@ -575,6 +618,21 @@ func (s *geminiStreamAdapter) parseMessage(data []byte) (TranscriptEvent, bool) 
 	if text := strings.TrimSpace(msg.ServerContent.InterimInputTranscription.Text); text != "" {
 		return TranscriptEvent{Text: text, IsFinal: false, Language: s.language}, true
 	}
+
+	if len(msg.Error) > 0 || len(msg.GoAway) > 0 {
+		logger.WarnCF("livekit", "Gemini STT server error or goAway frame", map[string]any{
+			"provider": "gemini",
+			"raw":      truncateForLog(string(data), 400),
+		})
+		return TranscriptEvent{}, false
+	}
+
+	// generationComplete and other bookkeeping frames land here; Debug, not
+	// Warn, because they are expected traffic.
+	logger.DebugCF("livekit", "Gemini STT frame carried no transcript", map[string]any{
+		"provider": "gemini",
+		"raw":      truncateForLog(string(data), 400),
+	})
 	return TranscriptEvent{}, false
 }
 
