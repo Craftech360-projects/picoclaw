@@ -24,6 +24,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # pkg/livekit reaches libopus/libopusfile (gopkg.in/hraban/opus.v2) and
+      # libsoxr (github.com/livekit/media-sdk) through cgo + pkg-config, and
+      # ubuntu-latest ships none of them. Without this the package does not
+      # compile and every downstream error ("undefined: media") is cascade.
+      - name: Install audio codec dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libopus-dev libopusfile-dev libsoxr-dev
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
