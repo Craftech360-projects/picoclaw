@@ -260,7 +260,7 @@ func TestWonderQuestionCaptureAndFlush(t *testing.T) {
 	ab := &AgentBridge{
 		quizBatch:              &QuizBatch{Questions: []QuizQuestion{{ID: 1, IDString: "1"}}},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(q string) { saved = q },
+		wonderQuestionReporter: func(q string, _ string) { saved = q },
 	}
 
 	// Captured from the MEMO, on a turn that scores nothing.
@@ -291,7 +291,7 @@ func TestNoWonderQuestionSavesNothing(t *testing.T) {
 	ab := &AgentBridge{
 		quizBatch:              &QuizBatch{},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(string) { called = true },
+		wonderQuestionReporter: func(string, string) { called = true },
 	}
 	// A session where the model never emitted one, and a blank field.
 	ab.reportQuizVerdict("c\nMEMO: type=daily_quiz | status=in_progress | awaiting=5")
@@ -381,6 +381,90 @@ func TestWonderQuestionEchoOfAnyRecentOneIsDropped(t *testing.T) {
 	}
 }
 
+// A question the child ANSWERED must come back as a callback, not as the same
+// question again. Prod 2026-09-01: the child said "Pizza", was told the roof
+// would be melted cheese, and heard the identical question the next morning.
+func TestAnsweredWonderQuestionRendersAsACallback(t *testing.T) {
+	qs := []QuizQuestion{{ID: 1, IDString: "1", Text: "Q?", Answer: "A"}}
+
+	answered := quizQuestionsBlock(&QuizBatch{
+		Level: 1, Questions: qs,
+		WonderQuestion: "If you could build a house out of any food, what would you use?",
+		WonderAnswer:   "Pizza",
+	})
+	for _, want := range []string{"what THEY said", "Pizza", "Do NOT ask them that question again"} {
+		if !strings.Contains(answered, want) {
+			t.Errorf("answered recall missing %q in:\n%s", want, answered)
+		}
+	}
+	if strings.Contains(answered, "thought any more about it") {
+		t.Errorf("an answered question must not be re-asked:\n%s", answered)
+	}
+
+	// Left open, the old behaviour is still the right one.
+	open := quizQuestionsBlock(&QuizBatch{
+		Level: 1, Questions: qs,
+		WonderQuestion: "If you could build a house out of any food, what would you use?",
+	})
+	for _, want := range []string{"never got to answer it", "thought any more about it"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("unanswered recall missing %q in:\n%s", want, open)
+		}
+	}
+}
+
+// The answer arrives on a LATER turn than the question, so the two are captured
+// separately and must still reach the reporter as one pair.
+func TestWonderAnswerIsPairedWithItsQuestion(t *testing.T) {
+	var gotQ, gotA string
+	newBridge := func() *AgentBridge {
+		return &AgentBridge{
+			quizBatch:              &QuizBatch{},
+			reportedQuizIDs:        map[int64]bool{},
+			wonderQuestionReporter: func(q string, a string) { gotQ, gotA = q, a },
+		}
+	}
+
+	// Asked on one turn, answered on the next.
+	ab := newBridge()
+	ab.reportQuizVerdict("a\nMEMO: type=daily_quiz | wonder=What do fish dream about?")
+	ab.reportQuizVerdict("b\nMEMO: type=daily_quiz | wonder_answer=Bubbles of juice")
+	ab.flushWonderQuestion()
+	if gotQ != "What do fish dream about?" || gotA != "Bubbles of juice" {
+		t.Fatalf("question/answer pair lost: %q / %q", gotQ, gotA)
+	}
+
+	// Never answered: the pair is question-only, and the next session re-asks.
+	gotQ, gotA = "", ""
+	ab = newBridge()
+	ab.reportQuizVerdict("c\nMEMO: type=daily_quiz | wonder=Where does the wind start?")
+	ab.flushWonderQuestion()
+	if gotQ != "Where does the wind start?" || gotA != "" {
+		t.Fatalf("unanswered question must carry no answer: %q / %q", gotQ, gotA)
+	}
+
+	// A NEW question drops the previous answer - filing one reply under another
+	// question would read it back as a callback the child never said.
+	gotQ, gotA = "", ""
+	ab = newBridge()
+	ab.reportQuizVerdict("d\nMEMO: type=daily_quiz | wonder=First question?")
+	ab.reportQuizVerdict("e\nMEMO: type=daily_quiz | wonder_answer=Answer to the first")
+	ab.reportQuizVerdict("f\nMEMO: type=daily_quiz | wonder=Second question?")
+	ab.flushWonderQuestion()
+	if gotQ != "Second question?" || gotA != "" {
+		t.Fatalf("stale answer followed a new question: %q / %q", gotQ, gotA)
+	}
+
+	// An answer with no question pending is a model filling in a field.
+	gotQ, gotA = "", ""
+	ab = newBridge()
+	ab.reportQuizVerdict("g\nMEMO: type=daily_quiz | wonder_answer=Orphan")
+	ab.flushWonderQuestion()
+	if gotQ != "" || gotA != "" {
+		t.Fatalf("orphan answer was reported: %q / %q", gotQ, gotA)
+	}
+}
+
 // The ladder must END. DoorFor clamps at Door 3, so without a terminal state
 // every try past the third re-issued "ask again, do not say the answer" forever.
 // Observed live 2026-08-14: six wrong tries on one authored question, no verdict,
@@ -461,7 +545,7 @@ func TestRestatedWonderQuestionIsNotSavedAgain(t *testing.T) {
 		// question rendered as the opening beat.
 		quizBatch:              &QuizBatch{WonderQuestion: asked},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(q string) { saved = q },
+		wonderQuestionReporter: func(q string, _ string) { saved = q },
 	}
 
 	ab.reportQuizVerdict("[happy] Good afternoon, Kishore!\nMEMO: type=daily_quiz | date=2026-08-15 | status=completed | answered=10 | wonder=" + asked)
@@ -494,7 +578,7 @@ func TestFirstEverWonderQuestionIsSaved(t *testing.T) {
 	ab := &AgentBridge{
 		quizBatch:              &QuizBatch{},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(q string) { saved = q },
+		wonderQuestionReporter: func(q string, _ string) { saved = q },
 	}
 	ab.reportQuizVerdict("z\nMEMO: type=daily_quiz | wonder=Where does the sky end?")
 	ab.flushWonderQuestion()

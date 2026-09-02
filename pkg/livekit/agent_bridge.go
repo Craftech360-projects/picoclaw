@@ -192,10 +192,13 @@ type AgentBridge struct {
 	quizAnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
 	// quizAttemptReporter flushes tries for a question that never resolved.
 	quizAttemptReporter func(questionID int64, attempts []QuizAttempt)
-	// wonderQuestionReporter saves the open question the session ended on (M4),
-	// and pendingWonderQuestion is the latest one the model emitted.
-	wonderQuestionReporter func(question string)
+	// wonderQuestionReporter saves the question the session ended on (M4),
+	// pendingWonderQuestion is the latest one the model emitted, and
+	// pendingWonderAnswer is what the child said back - empty when they never
+	// answered, which is the only case the next session re-asks.
+	wonderQuestionReporter func(question string, answer string)
 	pendingWonderQuestion  string
+	pendingWonderAnswer    string
 	// reportedQuizIDs de-duplicates verdicts within the session: the model
 	// re-emits its cumulative MEMO every turn. Guarded because proactive and
 	// async-tool turns can land concurrently with a conversation turn.
@@ -230,9 +233,9 @@ type AgentBridge struct {
 
 // AgentBridgeConfig defines shared resources for creating bridges.
 type AgentBridgeConfig struct {
-	Config               *config.Config
-	Provider             providers.LLMProvider
-	ModelID              string
+	Config   *config.Config
+	Provider providers.LLMProvider
+	ModelID  string
 	// APIBase is the LLM endpoint this session resolved to. Logged per turn
 	// because ModelID cannot identify the provider: a slug's leading segment is
 	// the model's AUTHOR, not the host (google/gemma-4-31b-it went to openrouter.ai).
@@ -280,7 +283,7 @@ type AgentBridgeConfig struct {
 	// produce no verdict and would otherwise leave no trace at all.
 	QuizAttemptReporter func(questionID int64, attempts []QuizAttempt)
 	// WonderQuestionReporter saves the Wonder Question (M4) at teardown.
-	WonderQuestionReporter func(question string)
+	WonderQuestionReporter func(question string, answer string)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -1011,9 +1014,33 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 		// matching it is a quotation, not a new question.
 		if !ab.alreadyWondered(wonder) {
 			ab.reportedQuizMu.Lock()
+			// A different question means the old answer belongs to the old
+			// question. Pairing them would file one child's reply under another
+			// question and read it back as a callback they never said.
+			if !sameWonderQuestion(wonder, ab.pendingWonderQuestion) {
+				ab.pendingWonderAnswer = ""
+			}
 			ab.pendingWonderQuestion = wonder
 			ab.reportedQuizMu.Unlock()
 		}
+	}
+
+	// What the child said back, on the turn AFTER the question was asked. Kept
+	// separately because the two never arrive together: the question rides the
+	// turn that asks it, the answer the turn that acknowledges it.
+	//
+	// Without this the recall could only re-ask. On prod 2026-09-01 the child
+	// answered "Pizza" thirty seconds before the toy was switched off and was
+	// asked the same question the next morning, because nothing recorded that
+	// it had been answered.
+	if answer := strings.TrimSpace(memoField(memo, "wonder_answer")); answer != "" {
+		ab.reportedQuizMu.Lock()
+		// Only meaningful next to a question. An answer with nothing pending is
+		// a model filling in a field, not a child replying.
+		if ab.pendingWonderQuestion != "" {
+			ab.pendingWonderAnswer = answer
+		}
+		ab.reportedQuizMu.Unlock()
 	}
 
 	if ab.quizAnswerReporter == nil {
@@ -1119,13 +1146,15 @@ func (ab *AgentBridge) flushWonderQuestion() {
 	}
 	ab.reportedQuizMu.Lock()
 	question := ab.pendingWonderQuestion
+	answer := ab.pendingWonderAnswer
 	ab.pendingWonderQuestion = ""
+	ab.pendingWonderAnswer = ""
 	ab.reportedQuizMu.Unlock()
 
 	if strings.TrimSpace(question) == "" {
 		return
 	}
-	ab.wonderQuestionReporter(question)
+	ab.wonderQuestionReporter(question, answer)
 }
 
 // doorForPendingLocked is the Door the pending question was on before this

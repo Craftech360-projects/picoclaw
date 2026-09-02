@@ -112,6 +112,10 @@ type QuizBatch struct {
 	// WonderQuestion is the open, unscored question the LAST session left this
 	// child with (M4). Empty for a child who has never been left one.
 	WonderQuestion string `json:"wonder_question"`
+	// WonderAnswer is what the child SAID when they answered the question above,
+	// empty when they never did. It decides which opening beat this session gets:
+	// a callback to the child's own idea, or the question asked again.
+	WonderAnswer string `json:"wonder_answer"`
 	// RecentWonderQuestions is what this child has already been asked, newest
 	// first, including the one above. The model has no memory of its own here —
 	// chat history is trimmed and its session summaries are lossy — so without
@@ -393,6 +397,7 @@ func PostWonderQuestion(
 	serviceKey string,
 	deviceMac string,
 	question string,
+	answer string,
 ) error {
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" {
@@ -403,7 +408,13 @@ func PostWonderQuestion(
 		return nil
 	}
 
-	payload, err := json.Marshal(map[string]any{"device_mac": deviceMac, "question": question})
+	payload, err := json.Marshal(map[string]any{
+		"device_mac": deviceMac,
+		"question":   question,
+		// Empty when the child never answered - the server stores null, and
+		// the next session asks the question again instead of calling back.
+		"answer": strings.TrimSpace(answer),
+	})
 	if err != nil {
 		return err
 	}
@@ -417,17 +428,21 @@ func NewWonderQuestionReporter(
 	cfg config.LiveKitServiceManagerAPIConfig,
 	serviceKey string,
 	deviceMac string,
-) func(question string) {
-	return func(question string) {
+) func(question string, answer string) {
+	return func(question string, answer string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if err := PostWonderQuestion(ctx, cfg, serviceKey, deviceMac, question); err != nil {
+		if err := PostWonderQuestion(ctx, cfg, serviceKey, deviceMac, question, answer); err != nil {
 			// The question itself is not logged: it is the child's, and a log
 			// line is a second place it would have to be protected.
 			logger.WarnCF("livekit", "Wonder question not saved", map[string]any{"error": err.Error()})
 			return
 		}
-		logger.InfoCF("livekit", "Wonder question saved", map[string]any{"chars": len(question)})
+		logger.InfoCF("livekit", "Wonder question saved", map[string]any{
+			"chars": len(question),
+			// The answer itself is the child's; only whether there was one.
+			"answered": strings.TrimSpace(answer) != "",
+		})
 	}
 }
 
@@ -522,10 +537,23 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 	// the questions because it is the opening beat, not part of the scored run.
 	if wonder := strings.TrimSpace(batch.WonderQuestion); wonder != "" {
 		b.WriteString("## Last Time You Wondered\n")
-		b.WriteString(fmt.Sprintf(
-			"Before the quiz, warmly remind the child of the question you left them with: %q. ", wonder))
-		b.WriteString("Ask if they thought any more about it, listen, and be delighted by whatever they say. ")
-		b.WriteString("There is no right answer and it is NOT scored. One short exchange, then start the quiz.\n\n")
+		if answer := strings.TrimSpace(batch.WonderAnswer); answer != "" {
+			// The child already answered this one. Asking it again is not a
+			// memory, it is a toy that was not listening: on prod 2026-09-01 the
+			// child said "Pizza", was told the roof would be melted cheese, and
+			// heard the same question the next morning. His reply was "ask the
+			// direct question".
+			b.WriteString(fmt.Sprintf(
+				"Before the quiz, delight the child by remembering what THEY said. You asked them %q and they answered %q. ", wonder, answer))
+			b.WriteString("Open with a warm callback to their idea, and add one playful thought about it. ")
+			b.WriteString("Do NOT ask them that question again - they have already answered it. ")
+			b.WriteString("One short exchange, then start the quiz.\n\n")
+		} else {
+			b.WriteString(fmt.Sprintf(
+				"Before the quiz, warmly remind the child of the question you left them with: %q. ", wonder))
+			b.WriteString("They never got to answer it, so ask if they thought any more about it, listen, and be delighted by whatever they say. ")
+			b.WriteString("There is no right answer and it is NOT scored. One short exchange, then start the quiz.\n\n")
+		}
 	}
 	// What has already been asked. The closing beat says "leave them a NEW
 	// question", which the model cannot obey without knowing the old ones: on dev
