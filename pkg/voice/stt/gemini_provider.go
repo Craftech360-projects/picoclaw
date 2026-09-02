@@ -143,20 +143,8 @@ func (p *geminiProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	})
 
 	go stream.readLoop()
-	go stream.retireAtTTL(geminiSessionTTL())
+	go stream.retireAtTTL(geminiSessionTTL(), geminiRetireBackstop())
 	return stream, nil
-}
-
-// geminiSessionTTL is how long a socket is used before it is retired. The Live
-// API hard-caps a transcription session at 10 minutes; retiring at 9 leaves
-// room for the pipeline to reopen without racing the server's own close.
-func geminiSessionTTL() time.Duration {
-	if raw := strings.TrimSpace(os.Getenv("GEMINI_STT_SESSION_TTL")); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-			return d
-		}
-	}
-	return 9 * time.Minute
 }
 
 type geminiStreamAdapter struct {
@@ -165,6 +153,11 @@ type geminiStreamAdapter struct {
 	closed     chan struct{}
 	language   string
 
+	// Lock order is turnMu → writeMu, and only that way: writeJSON and Close
+	// are the sole writeMu holders and neither touches turnMu, so taking
+	// writeMu underneath turnMu (which ResetBuffer and Finalize do, to keep
+	// the activityStart/activityEnd wire order matching the state they record)
+	// cannot deadlock.
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 
@@ -188,6 +181,12 @@ type geminiStreamAdapter struct {
 	// a cancellation is outstanding is presumed to belong to the cancelled
 	// turn, right up until the next turn's own boundary is provably sent.
 	cancelledGen uint64
+	// retirePending is set when the session TTL elapsed while an activity
+	// window was open. Closing right then would drop the child mid-utterance —
+	// the exact failure the TTL exists to avoid — so the close waits for the
+	// next turn boundary, with retireAtTTL's backstop closing anyway if that
+	// boundary never comes.
+	retirePending bool
 }
 
 func (s *geminiStreamAdapter) writeJSON(v any) error {
@@ -235,17 +234,18 @@ func (s *geminiStreamAdapter) Results() <-chan TranscriptEvent { return s.result
 // landing inside the 200ms cancel grace before the deferred Finalize fires —
 // the Live API has no open activity window to accept a second activityStart
 // on, so the stale one is closed first (finding 2).
+//
+// The writes happen UNDER turnMu, not after releasing it. ResetBuffer runs on
+// the data-message goroutine (room_session.go:545) and Finalize on RunInbound's
+// (audio_pipeline.go:1808), so they are genuinely concurrent: a press landing
+// between Finalize's unlock and its write would otherwise put activityStart on
+// the wire ahead of the previous turn's activityEnd, closing the new window the
+// instant it opened while both adapters' flags claimed all was well.
 func (s *geminiStreamAdapter) ResetBuffer() {
 	s.turnMu.Lock()
-	staleOpen := s.activityOpen
-	s.sawAudio = false
-	s.gotFinal = false
-	s.activityEnded = false
-	s.activityOpen = true
-	s.turnGen++
-	s.turnMu.Unlock()
+	defer s.turnMu.Unlock()
 
-	if staleOpen {
+	if s.activityOpen {
 		if err := s.writeJSON(map[string]any{
 			"realtimeInput": map[string]any{"activityEnd": map[string]any{}},
 		}); err != nil {
@@ -254,16 +254,27 @@ func (s *geminiStreamAdapter) ResetBuffer() {
 				"error":    err.Error(),
 			})
 		}
+		s.activityOpen = false
 	}
+
+	s.sawAudio = false
+	s.gotFinal = false
+	s.activityEnded = false
+	s.turnGen++
 
 	if err := s.writeJSON(map[string]any{
 		"realtimeInput": map[string]any{"activityStart": map[string]any{}},
 	}); err != nil {
+		// Only a write that landed opens a window. Recording one that didn't
+		// would have the next ResetBuffer send a stale-window activityEnd for
+		// a window the server never opened.
 		logger.DebugCF("livekit", "Gemini activityStart failed", map[string]any{
 			"provider": "gemini",
 			"error":    err.Error(),
 		})
+		return
 	}
+	s.activityOpen = true
 }
 
 // CancelTurn is deliberate silence. The audio already reached Google, so the
@@ -299,6 +310,31 @@ func geminiEmptyGrace() time.Duration {
 	return 3 * time.Second
 }
 
+// geminiSessionTTL is how long a socket is used before it is retired. The Live
+// API hard-caps a transcription session at 10 minutes; retiring at 9 leaves
+// room for the pipeline to reopen without racing the server's own close.
+func geminiSessionTTL() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("GEMINI_STT_SESSION_TTL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 9 * time.Minute
+}
+
+// geminiRetireBackstop is how long past the TTL a deferred retirement waits for
+// a turn boundary before closing anyway. 45s past the 9m TTL lands at 9m45s,
+// still inside the server's own 10m cap — a window left open forever must not
+// be allowed to run the session into that cap.
+func geminiRetireBackstop() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("GEMINI_STT_RETIRE_BACKSTOP")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 45 * time.Second
+}
+
 // Finalize is End Turn: close the activity window, then decide whether the tap
 // produced anything. A tap that carried audio but drew no final gets the
 // empty-result reply.
@@ -317,24 +353,40 @@ func (s *geminiStreamAdapter) Finalize() error {
 	gen := s.turnGen
 	sawAudio := s.sawAudio
 	cancelledNow := s.cancelledGen != 0 && s.cancelledGen == gen
-	alreadyEnded := s.activityEnded
-	s.activityEnded = true
-	s.activityOpen = false
-	if s.cancelledGen != 0 && gen > s.cancelledGen {
-		s.cancelledGen = 0
-	}
-	s.turnMu.Unlock()
-
-	if alreadyEnded {
+	if s.activityEnded {
+		s.turnMu.Unlock()
 		return nil
 	}
 
+	// Written under turnMu, and the flags committed only once the write lands
+	// (findings 4 and 5). Marking the turn ended before attempting the write
+	// meant a failed write — precisely the dying-socket case a rotation
+	// produces — permanently marked the turn ended: a retried Finalize
+	// returned nil without retrying, and the next ResetBuffer saw no stale
+	// window to close either, leaving the server's window open forever.
 	err := s.writeJSON(map[string]any{
 		"realtimeInput": map[string]any{"activityEnd": map[string]any{}},
 	})
+	retireNow := false
+	if err == nil {
+		s.activityEnded = true
+		s.activityOpen = false
+		if s.cancelledGen != 0 && gen > s.cancelledGen {
+			s.cancelledGen = 0
+		}
+		retireNow = s.retirePending
+	}
+	s.turnMu.Unlock()
 
 	if sawAudio && !cancelledNow {
 		go s.announceIfEmpty(gen, geminiEmptyGrace())
+	}
+	if retireNow {
+		// The turn boundary the deferred retirement was waiting for. One empty
+		// grace of slack first: the final lands ~0.5s after activityEnd on the
+		// live endpoint, and closing the socket ahead of it would throw away
+		// the very utterance we just ended.
+		go s.retireAfterTurn(geminiEmptyGrace())
 	}
 	return err
 }
@@ -371,18 +423,69 @@ func (s *geminiStreamAdapter) announceIfEmpty(gen uint64, grace time.Duration) {
 
 // retireAtTTL closes the socket at the TTL. readLoop then closes resultChan,
 // which audio_pipeline.go's reopenSTTStream already treats as a dead stream.
-func (s *geminiStreamAdapter) retireAtTTL(ttl time.Duration) {
+//
+// Never mid-utterance: a bare timer that closed on the deadline traded the
+// server's mid-turn close for one of our own, which is not a win. If a turn is
+// open at the deadline the retirement is deferred to that turn's Finalize;
+// backstop bounds the wait so a window left open forever cannot run the
+// session into the server's own 10-minute cap.
+func (s *geminiStreamAdapter) retireAtTTL(ttl, backstop time.Duration) {
 	timer := time.NewTimer(ttl)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+	case <-s.closed:
+		return
+	}
+
+	s.turnMu.Lock()
+	open := s.activityOpen
+	s.retirePending = true
+	s.turnMu.Unlock()
+
+	if !open {
 		logger.InfoCF("livekit", "Retiring Gemini STT socket at session TTL", map[string]any{
 			"provider": "gemini",
 			"ttl":      ttl.String(),
 		})
 		_ = s.Close()
+		return
+	}
+
+	logger.InfoCF("livekit", "Gemini STT session TTL reached mid-turn; retirement deferred", map[string]any{
+		"provider": "gemini",
+		"ttl":      ttl.String(),
+		"backstop": backstop.String(),
+	})
+	deadline := time.NewTimer(backstop)
+	defer deadline.Stop()
+	select {
+	case <-deadline.C:
+		logger.WarnCF("livekit", "Retiring Gemini STT socket at the TTL backstop with a turn still open", map[string]any{
+			"provider": "gemini",
+			"ttl":      ttl.String(),
+			"backstop": backstop.String(),
+		})
+		_ = s.Close()
 	case <-s.closed:
 	}
+}
+
+// retireAfterTurn takes a deferred retirement once the turn that deferred it
+// has had its grace to deliver a final.
+func (s *geminiStreamAdapter) retireAfterTurn(grace time.Duration) {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-s.closed:
+		return
+	}
+	logger.InfoCF("livekit", "Retiring Gemini STT socket at the turn boundary after its TTL", map[string]any{
+		"provider": "gemini",
+		"grace":    grace.String(),
+	})
+	_ = s.Close()
 }
 
 func (s *geminiStreamAdapter) Close() error {

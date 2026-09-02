@@ -751,6 +751,107 @@ func TestGeminiInterimAfterCancelReachesResults(t *testing.T) {
 	}
 }
 
+// Finding 4: ResetBuffer runs on the data-message goroutine and Finalize on
+// RunInbound's, so they really do overlap. When each mutated state under
+// turnMu, released it, and only then wrote, a press landing in that gap put
+// turn 2's activityStart on the wire ahead of turn 1's activityEnd — closing
+// the new window the instant it opened, with both adapters' flags insisting
+// nothing was wrong. The wire order must match the state transitions, so
+// neither an unbalanced start nor an unbalanced end may ever appear.
+func TestGeminiConcurrentPressAndFinalizeKeepWireOrder(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var mu sync.Mutex
+	var sequence []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			switch {
+			case strings.Contains(string(raw), `"activityStart"`):
+				sequence = append(sequence, "start")
+			case strings.Contains(string(raw), `"activityEnd"`):
+				sequence = append(sequence, "end")
+			}
+			mu.Unlock()
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "10s")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	reset := stream.(interface{ ResetBuffer() }).ResetBuffer
+	const rounds = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			reset()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			_ = stream.Finalize()
+		}
+	}()
+	wg.Wait()
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	seq := append([]string(nil), sequence...)
+	mu.Unlock()
+
+	// Every critical section emits either [end?, start] (ResetBuffer) or [end]
+	// (Finalize, once per generation), and holding turnMu across the write
+	// makes the wire order equal the section order. Two consequences follow,
+	// and both are violated by the interleavings the unlocked writes allowed:
+	// a start never lands on an already-open window, and two ends never land
+	// back to back (a ResetBuffer's stale-close is always followed by its own
+	// start, and a second Finalize cannot write until a ResetBuffer has).
+	open := false
+	for i, tok := range seq {
+		from := i - 6
+		if from < 0 {
+			from = 0
+		}
+		if tok == "start" {
+			if open {
+				t.Fatalf("activityStart on an already-open window at position %d: %v", i, seq[from:i+1])
+			}
+			open = true
+			continue
+		}
+		if i > 0 && seq[i-1] == "end" {
+			t.Fatalf("two activityEnd messages back to back at position %d: %v", i, seq[from:i+1])
+		}
+		open = false
+	}
+	if len(seq) < rounds {
+		t.Fatalf("only %d boundary messages reached the server across %d rounds", len(seq), rounds)
+	}
+}
+
 // The Live API caps a session at 10 minutes. The adapter must retire itself
 // just before that so the pipeline's reopen path runs on our schedule rather
 // than on a mid-utterance server close.
@@ -797,5 +898,202 @@ func TestGeminiSessionTTLDefault(t *testing.T) {
 	t.Setenv("GEMINI_STT_SESSION_TTL", "")
 	if got := geminiSessionTTL(); got != 9*time.Minute {
 		t.Fatalf("geminiSessionTTL() = %v, want 9m", got)
+	}
+}
+
+// The backstop must land inside the server's own 10-minute cap.
+func TestGeminiRetireBackstopDefault(t *testing.T) {
+	t.Setenv("GEMINI_STT_RETIRE_BACKSTOP", "")
+	if got := geminiRetireBackstop(); got != 45*time.Second {
+		t.Fatalf("geminiRetireBackstop() = %v, want 45s", got)
+	}
+	if total := geminiSessionTTL() + geminiRetireBackstop(); total >= 10*time.Minute {
+		t.Fatalf("TTL+backstop = %v, must stay under the server's 10m session cap", total)
+	}
+}
+
+// geminiTapServer is a fake Live API socket that only completes the handshake
+// and then reads. Enough for the retirement tests, which are about when the
+// adapter closes, not about transcripts.
+func geminiTapServer(t *testing.T) {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+}
+
+// resultsClosed reports whether the stream retired within the timeout.
+func resultsClosed(t *testing.T, stream TranscriptionStream, timeout time.Duration) bool {
+	t.Helper()
+	select {
+	case _, open := <-stream.Results():
+		if open {
+			t.Fatal("expected the results channel to close, got an event")
+		}
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// Critical 2: retiring on a bare timer closes the socket mid-utterance — the
+// exact failure the TTL exists to prevent, just moved to our side of the wire.
+// A TTL that elapses with an activity window open must defer to the turn
+// boundary, and take the retirement there.
+func TestGeminiRetirementDeferredUntilTurnBoundary(t *testing.T) {
+	geminiTapServer(t)
+	t.Setenv("GEMINI_STT_SESSION_TTL", "150ms")
+	t.Setenv("GEMINI_STT_RETIRE_BACKSTOP", "30s") // far away: Finalize must be what closes
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "100ms")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	// The child is mid-utterance when the TTL lands.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+
+	if resultsClosed(t, stream, 700*time.Millisecond) {
+		t.Fatal("the socket retired mid-utterance; the TTL must defer to the turn boundary")
+	}
+
+	// End Turn: now the retirement may be taken.
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if !resultsClosed(t, stream, 3*time.Second) {
+		t.Fatal("the deferred retirement was never taken at the turn boundary")
+	}
+}
+
+// A window that never closes — a tap the firmware never released — must not
+// let the session run into the server's own 10-minute cap.
+func TestGeminiRetirementBackstopClosesOpenWindow(t *testing.T) {
+	geminiTapServer(t)
+	t.Setenv("GEMINI_STT_SESSION_TTL", "150ms")
+	t.Setenv("GEMINI_STT_RETIRE_BACKSTOP", "250ms")
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "10s")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	// Opened and never finalized.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+
+	if !resultsClosed(t, stream, 3*time.Second) {
+		t.Fatal("a window left open forever never hit the retirement backstop")
+	}
+}
+
+// Findings 4 and 5: the activityEnd write and the flags recording it must move
+// together. Committing activityEnded before attempting the write left a failed
+// write — the dying-socket case — with the turn permanently marked ended, so a
+// retried Finalize returned nil without retrying and the server's window stayed
+// open forever.
+//
+// Built by hand rather than through OpenStream: this needs to substitute the
+// socket underneath the adapter, which is only safe with no readLoop running
+// on it.
+func TestGeminiFinalizeRetriableAfterWriteFailure(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var mu sync.Mutex
+	var sequence []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			switch {
+			case strings.Contains(string(raw), `"activityStart"`):
+				sequence = append(sequence, "start")
+			case strings.Contains(string(raw), `"activityEnd"`):
+				sequence = append(sequence, "end")
+			}
+			mu.Unlock()
+		}
+	}))
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	live, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer live.Close()
+	broken, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial throwaway socket: %v", err)
+	}
+	_ = broken.Close() // every write on this one fails
+
+	adapter := &geminiStreamAdapter{
+		conn:       live,
+		resultChan: make(chan TranscriptEvent, 4),
+		closed:     make(chan struct{}),
+	}
+
+	adapter.ResetBuffer()
+
+	// The dying socket: the rotation case the old code turned into a permanent
+	// "this turn already ended".
+	adapter.conn = broken
+	if err := adapter.Finalize(); err == nil {
+		t.Fatal("Finalize on a dead socket returned nil; the write failure was swallowed")
+	}
+	adapter.turnMu.Lock()
+	ended, open := adapter.activityEnded, adapter.activityOpen
+	adapter.turnMu.Unlock()
+	if ended {
+		t.Fatal("a failed activityEnd write still marked the turn ended; the retry can never reach the wire")
+	}
+	if !open {
+		t.Fatal("a failed activityEnd write closed the window locally; the server's window would stay open forever")
+	}
+
+	adapter.conn = live
+	if err := adapter.Finalize(); err != nil {
+		t.Fatalf("retried Finalize: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	got := append([]string(nil), sequence...)
+	mu.Unlock()
+	want := []string{"start", "end"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("wire sequence = %v, want %v — the retried activityEnd never landed", got, want)
 	}
 }
