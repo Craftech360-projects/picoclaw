@@ -750,3 +750,52 @@ func TestGeminiInterimAfterCancelReachesResults(t *testing.T) {
 		t.Fatal("turn 2's own interim never reached Results(): an outstanding cancellation suppressed it")
 	}
 }
+
+// The Live API caps a session at 10 minutes. The adapter must retire itself
+// just before that so the pipeline's reopen path runs on our schedule rather
+// than on a mid-utterance server close.
+func TestGeminiStreamRetiresBeforeSessionCap(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+	t.Setenv("GEMINI_STT_SESSION_TTL", "300ms")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	select {
+	case _, open := <-stream.Results():
+		if open {
+			t.Fatal("expected the results channel to close at the TTL, got an event")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream did not retire itself within 3s of a 300ms TTL")
+	}
+}
+
+func TestGeminiSessionTTLDefault(t *testing.T) {
+	t.Setenv("GEMINI_STT_SESSION_TTL", "")
+	if got := geminiSessionTTL(); got != 9*time.Minute {
+		t.Fatalf("geminiSessionTTL() = %v, want 9m", got)
+	}
+}

@@ -143,7 +143,20 @@ func (p *geminiProvider) OpenStream(ctx context.Context, opts StreamOptions) (Tr
 	})
 
 	go stream.readLoop()
+	go stream.retireAtTTL(geminiSessionTTL())
 	return stream, nil
+}
+
+// geminiSessionTTL is how long a socket is used before it is retired. The Live
+// API hard-caps a transcription session at 10 minutes; retiring at 9 leaves
+// room for the pipeline to reopen without racing the server's own close.
+func geminiSessionTTL() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("GEMINI_STT_SESSION_TTL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 9 * time.Minute
 }
 
 type geminiStreamAdapter struct {
@@ -354,6 +367,22 @@ func (s *geminiStreamAdapter) announceIfEmpty(gen uint64, grace time.Duration) {
 		"grace":    grace.String(),
 	})
 	handler()
+}
+
+// retireAtTTL closes the socket at the TTL. readLoop then closes resultChan,
+// which audio_pipeline.go's reopenSTTStream already treats as a dead stream.
+func (s *geminiStreamAdapter) retireAtTTL(ttl time.Duration) {
+	timer := time.NewTimer(ttl)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		logger.InfoCF("livekit", "Retiring Gemini STT socket at session TTL", map[string]any{
+			"provider": "gemini",
+			"ttl":      ttl.String(),
+		})
+		_ = s.Close()
+	case <-s.closed:
+	}
 }
 
 func (s *geminiStreamAdapter) Close() error {
