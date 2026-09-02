@@ -665,3 +665,88 @@ func TestGeminiResetBufferClosesStaleActivityWindow(t *testing.T) {
 		t.Fatalf("expected at least 3 activityStart messages (one per press), got %d: %v", starts, seq)
 	}
 }
+
+// Review round 2: round 1's fix suppressed EVERY event while a cancellation
+// was outstanding, not just finals. cancelledGen stays outstanding from a
+// cancel all the way through the following turn's own Finalize, so that
+// blanket suppression silently ate the following turn's own interims too —
+// which the pipeline depends on for barge-in (audio_pipeline.go:1790,
+// 1841-1870) and as the finalize-timeout safety net text
+// (audio_pipeline.go:1679-1687, 1837). Only finals should be suppressed.
+//
+// This replays exactly that gap: turn 1 is cancelled (leaving cancelledGen
+// outstanding), turn 2 presses immediately after, and turn 2's own interim —
+// arriving before turn 2's own Finalize, i.e. while the old turn's
+// cancellation is still outstanding — must still reach Results().
+func TestGeminiInterimAfterCancelReachesResults(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	audioCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			// Deliberately silent on activityEnd: this test is only about
+			// the interim, and turn 2 must stay a "no final yet" turn so
+			// cancelledGen (set by turn 1's cancel) is still outstanding
+			// when turn 2's interim is checked.
+			if strings.Contains(string(raw), `"audio"`) {
+				audioCount++
+				// Only respond to turn 2's audio (the second frame), with
+				// distinct text — turn 1's audio must elicit nothing, or a
+				// stray reply to it could let this test pass without ever
+				// exercising the suppression-while-outstanding path.
+				if audioCount == 2 {
+					_ = conn.WriteMessage(websocket.TextMessage,
+						[]byte(`{"serverContent":{"interimInputTranscription":{"text":"turn two interim"}}}`))
+				}
+			}
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GEMINI_STT_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http"))
+	t.Setenv("GEMINI_STT_EMPTY_GRACE", "10s")
+
+	stream, err := NewGeminiProvider("k", "").OpenStream(context.Background(), StreamOptions{
+		SampleRate: 16000, Channels: 1, Language: "hi-IN",
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer stream.Close()
+
+	// Turn 1: press, speak, cancel — leaves cancelledGen outstanding.
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	_ = stream.SendAudio([]byte("PCMPCM"))
+	stream.(interface{ CancelTurn() }).CancelTurn()
+	stream.(interface{ CancelTurn() }).CancelTurn()
+	if err := stream.Finalize(); err != nil {
+		t.Fatalf("Finalize (turn 1): %v", err)
+	}
+
+	// Turn 2: a fresh press while turn 1's cancellation is still outstanding
+	// (cleared only by turn 2's own Finalize, deliberately not called here).
+	stream.(interface{ ResetBuffer() }).ResetBuffer()
+	if err := stream.SendAudio([]byte("PCMPCM")); err != nil {
+		t.Fatalf("SendAudio (turn 2): %v", err)
+	}
+
+	select {
+	case evt := <-stream.Results():
+		if evt.IsFinal || evt.Text != "turn two interim" {
+			t.Fatalf("event = %+v, want a non-final \"turn two interim\"", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn 2's own interim never reached Results(): an outstanding cancellation suppressed it")
+	}
+}

@@ -388,12 +388,21 @@ func (s *geminiStreamAdapter) readLoop() {
 			continue
 		}
 
-		// While a cancellation is outstanding (cancelledGen != 0), every event
-		// is presumed to belong to the cancelled turn and is dropped without
-		// updating gotFinal — a stale final must not silence the next turn's
-		// legitimate empty-tap reply (finding 1, symptom 2).
+		// Suppress FINALS only while a cancellation is outstanding, not
+		// interims (review round 2). Incoming messages carry no generation
+		// tag, so a stale event can only be identified by kind and timing:
+		// an interim arrives during speech, which for the cancelled turn is
+		// before the cancel — it already reached the pipeline either way, so
+		// nothing changes by letting it through. The final is what arrives
+		// after the cancel and is what would drive an unwanted response, so
+		// only it needs suppressing. Blanket-suppressing everything (as
+		// round 1 did) silently ate the FOLLOWING turn's own interims too —
+		// cancelledGen stays outstanding until that turn's own Finalize
+		// clears it — which broke barge-in (audio_pipeline.go:1790,
+		// 1841-1870) and the finalize-timeout safety net
+		// (audio_pipeline.go:1679-1687, 1837).
 		s.turnMu.Lock()
-		suppressed := s.cancelledGen != 0
+		suppressed := evt.IsFinal && s.cancelledGen != 0
 		if evt.IsFinal && !suppressed {
 			s.gotFinal = true
 		}
