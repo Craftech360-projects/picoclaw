@@ -1,6 +1,0 @@
-.env
-# Captured audio: raw mic takes and the per-segment cuts. Kept out of git
-# because they are large and contain recordings of real children.
-recordings/
-segments/
-__pycache__/
