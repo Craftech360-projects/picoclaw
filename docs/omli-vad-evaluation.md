@@ -162,3 +162,92 @@ State these before quoting the numbers:
 - **No device audio.** Everything was captured through a laptop mic in one room. The toy's mic, its noise floor, and its far-field distance are a materially different acoustic problem, and one device capture we tried (`part0003`) contained no intelligible speech at all.
 - **Short-utterance recall is untested.** `ten_vad`'s `minSpeechMS=300` discards very short sounds, and our takes contain few one-word answers. A child answering "haan" is the case most likely to favour Omli, and we have almost no samples of it.
 - **`confidence` being inert may be a deployment bug** rather than intended, in which case several conclusions here soften considerably.
+
+---
+
+# Addendum — real child conversation (2026-09-04)
+
+The gap this evaluation kept flagging — no real child in natural conversation — is now
+filled. Session `4e96c076dcd5`, 93.6s, two children plus an adult asking questions
+(national flag recitation, phone number, school, capitals). 67% speech, i.e. **dense
+conversation**, unlike every earlier take.
+
+**This take reverses the earlier conclusion, and shows the previous one was drawn from
+the wrong operating condition.**
+
+## Omli on real child speech: good
+
+| | |
+|---|---|
+| Segments | 25 |
+| Empty on all three STTs | **1 of 25** (vs 10 of 14 on the sparse adult take) |
+| Cap flushes | 0 |
+| Shortest segments | 1728-1856ms — short child answers *were* captured |
+
+Segments are turn-shaped and track individual utterances. The phantom-turn problem that
+dominated the sparse take essentially disappears when someone is actually talking.
+
+Short-utterance recall — the open question this whole evaluation hinged on — is
+answered in Omli's favour: `#6` ("It does"), `#11` ("Tell me my phone number"), `#14`,
+`#20` ("Lotus") are all ~1.7-1.9s segments carrying real one- or two-word content.
+Note the 1728ms floor is `hangover_ms=1000` plus the pads, not the speech length.
+
+## ten_vad at production defaults: fails this audio
+
+At `endpoint=1000ms` (the shipped default) ten_vad produced **9 segments** for the same
+93.6s, and they are blobs:
+
+| ten_vad segment | Length | Omli turns inside it |
+|---|---|---|
+| `#3` 32.30-52.66s | 20.35s | 4 |
+| `#4` 52.72-71.39s | 18.67s | **7** |
+
+`#4` swallows "Tell me my phone number", the number itself, "Which is your school?" and
+its answer into one 18.7s block. In a live session the toy would answer once, 18 seconds
+late, to a merged transcript — and Omli's STT is separately known to collapse long
+segments to a few words.
+
+The cause is straightforward: in dense conversation the gaps between turns are shorter
+than 1000ms, so the endpoint never fires.
+
+## But ten_vad is tunable, and that mostly fixes it
+
+| `endpoint_ms` | ten_vad segments |
+|---|---|
+| 1000 (default) | 9 |
+| 500 | 18 |
+| 300 | **27** |
+
+At 300ms ten_vad produces 27 turn-shaped segments (0.6-9.7s), comparable to Omli's 25.
+So the merging is a **tuning defect in our configuration, not a limitation of the
+engine** — and `PICOCLAW_VAD_ENDPOINT_MS` is already an environment variable.
+
+## Revised reading
+
+The two VADs fail under opposite conditions, and neither earlier conclusion generalised:
+
+| Condition | Omli `kids_v5` | `ten_vad` @1000ms |
+|---|---|---|
+| Sparse / quiet room (9% speech) | 10/14 phantom turns | 4/4 exact |
+| Dense conversation (67% speech) | 25 turns, 1 empty | 9 blobs, up to 7 turns merged |
+
+A toy in use is the **dense** case; a toy sitting in a room between conversations is the
+**sparse** case. It must survive both.
+
+## What this changes
+
+1. **`PICOCLAW_VAD_ENDPOINT_MS=1000` is wrong for conversation** regardless of which VAD
+   wins. This is actionable today, independent of Omli. Test 300-500ms.
+2. **Omli's short-utterance recall is now demonstrated**, not assumed. That was the one
+   dimension the earlier verdict rested on and could not evidence.
+3. **The earlier "do not adopt" verdict was over-stated.** It was measured on sparse
+   adult audio in a noisy room — the condition that flatters `ten_vad` most. On the
+   product's actual operating condition Omli looks materially better than that verdict
+   implied.
+4. Still unresolved: the `confidence` no-op, the endpointing lag, and Omli's own STT
+   being the weakest of the three on this take (Gemini read "my name is Ethan… the Indian
+   flag, which is also called Tiranga" where Omli returned garbled transliteration).
+
+**Fair next test:** run ten_vad at `endpoint=300` and Omli side by side on the *same*
+sparse and dense recordings, sending both sets of segments to the same STT. Segment
+counts alone cannot settle transcript quality.
