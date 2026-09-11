@@ -473,7 +473,7 @@ func TestBankWonderQuestionReplacesTheList(t *testing.T) {
 	block := quizQuestionsBlock(&QuizBatch{
 		Level: 1, Questions: qs,
 		RecentWonderQuestions: []string{"If you could fly like a bee, where would you go?"},
-		WonderToAsk: &WonderToAsk{Code: "WQ-FOOD-01", Text: "If you could build a house out of any food, what would you use?"},
+		WonderToAsk:           &WonderToAsk{Code: "WQ-FOOD-01", Text: "If you could build a house out of any food, what would you use?"},
 	})
 	for _, want := range []string{"Today's Wonder Question", "EXACTLY this question", "build a house out of any food", "code WQ-FOOD-01", "wonder_code=WQ-FOOD-01"} {
 		if !strings.Contains(block, want) {
@@ -536,12 +536,50 @@ func TestBankWonderQuestionIsRecordedAsServed(t *testing.T) {
 		t.Fatalf("text-only report of the served question lost its code: %q", gotC)
 	}
 
-	// A different code is not the served question. Nothing is recorded.
+	// A different code is the model asking its own question. What the child
+	// heard is recorded as itself - no code - and the served one stays owed.
 	ab = newBridge()
 	ab.reportQuizVerdict("d\nMEMO: type=daily_quiz | wonder_code=WQ-SPACE-03 | wonder=something else")
 	ab.flushWonderQuestion()
-	if gotC != "" || gotQ != "" {
-		t.Fatalf("a foreign code was recorded: code=%q q=%q", gotC, gotQ)
+	if gotC != "" || gotQ != "something else" {
+		t.Fatalf("a foreign code must be recorded as an invented question: code=%q q=%q", gotC, gotQ)
+	}
+
+	// The model asked its OWN question and omitted the code. Prod 2026-09-11:
+	// this was recorded as the served one, so the ledger said the child had
+	// heard the rupees question and answered "dog". It is an invented
+	// question: recorded as itself, no code, and the served one stays owed.
+	ab = newBridge()
+	ab.reportQuizVerdict("e\nMEMO: type=daily_quiz | wonder=If you could have any animal in the whole world as a pet, which one would you pick?")
+	ab.reportQuizVerdict("f\nMEMO: type=daily_quiz | wonder_answer=dog")
+	ab.flushWonderQuestion()
+	if gotC != "" || !strings.Contains(gotQ, "pet") || gotA != "dog" {
+		t.Fatalf("an ignored serve was recorded as served: code=%q q=%q a=%q", gotC, gotQ, gotA)
+	}
+}
+
+// The served question rides the tail directive on the tenth question only -
+// the state file is what the model forgets, the tail is what it follows.
+func TestWonderClosingDirectiveOnTheTenthQuestion(t *testing.T) {
+	qs := []QuizQuestion{{ID: 41, IDString: "41"}, {ID: 42, IDString: "42"}}
+	served := &WonderToAsk{Code: "WQ-FOOD-01", Text: "If you could build a house out of any food, what would you use?"}
+	ab := &AgentBridge{quizBatch: &QuizBatch{Questions: qs, AnsweredToday: 8, WonderToAsk: served}}
+
+	ab.pendingQuizID = 41 // question nine
+	if strings.Contains(ab.quizDoorDirective(), "Closing") {
+		t.Fatalf("closing directive fired on question nine:\n%s", ab.quizDoorDirective())
+	}
+	ab.pendingQuizID = 42 // question ten
+	got := ab.quizDoorDirective()
+	for _, want := range []string{"## Closing", "build a house out of any food", "wonder_code=WQ-FOOD-01"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("closing directive missing %q in:\n%s", want, got)
+		}
+	}
+	// No bank question, no directive - the fallback path has nothing to name.
+	ab.quizBatch.WonderToAsk = nil
+	if strings.Contains(ab.quizDoorDirective(), "Closing") {
+		t.Fatal("closing directive without a served question")
 	}
 }
 

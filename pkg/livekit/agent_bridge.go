@@ -1005,10 +1005,14 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 	if ask := ab.servedWonder(); ask != nil {
 		code := strings.TrimSpace(memoField(memo, "wonder_code"))
 		text := strings.TrimSpace(memoField(memo, "wonder"))
-		// A different code is the model asking something else; drop it. No code
-		// at all is the model asking the served question and forgetting the
-		// field, which is what a small model does most days.
-		if code == ask.Code || (code == "" && text != "") {
+		// Served only when the model actually asked it: the right code, or no
+		// code and a text that is recognisably the served question. Anything
+		// else is the model asking its own question, and recording the served
+		// one would say the child heard something they never did. Prod
+		// 2026-09-11: the pet question was asked, the rupees question was
+		// logged as heard and answered "dog".
+		switch {
+		case code == ask.Code || (code == "" && text != "" && wonderTextIsServed(text, ask.Text)):
 			ab.reportedQuizMu.Lock()
 			if ab.pendingWonderCode != ask.Code {
 				ab.pendingWonderAnswer = ""
@@ -1016,6 +1020,23 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 			ab.pendingWonderQuestion = strings.TrimSpace(ask.Text)
 			ab.pendingWonderCode = ask.Code
 			ab.reportedQuizMu.Unlock()
+		case code != "" || text != "":
+			// The model went its own way. Keep the served question owed (the
+			// child has not heard it) and log what was actually asked as an
+			// invented one, so tomorrow's callback is to a real question.
+			logger.WarnCF("livekit", "Model ignored the served wonder question", map[string]any{
+				"served_code": ask.Code,
+				"memo_code":   code,
+			})
+			if text != "" && !ab.alreadyWondered(text) {
+				ab.reportedQuizMu.Lock()
+				if !sameWonderQuestion(text, ab.pendingWonderQuestion) {
+					ab.pendingWonderAnswer = ""
+				}
+				ab.pendingWonderQuestion = text
+				ab.pendingWonderCode = ""
+				ab.reportedQuizMu.Unlock()
+			}
 		}
 	} else if wonder := strings.TrimSpace(memoField(memo, "wonder")); wonder != "" {
 		// Not the one this session opened by recalling.
@@ -1119,6 +1140,23 @@ func (ab *AgentBridge) flushPendingQuizAttempts() {
 //
 // Both come from the server, so this asks the record rather than the model: a
 // `wonder=` matching any of them is a quotation, not new curiosity.
+// wonderTextIsServed asks whether the model's wording is the served question
+// rather than one of its own. Same tolerance as the scored questions: Quizzy
+// is told to ask "in your own warm words", so this counts shared content
+// words and wants at least half of the served question's - "which food would
+// you build your house from" keeps house/food/build; the pet question keeps
+// none of them.
+func wonderTextIsServed(text, served string) bool {
+	if sameWonderQuestion(text, served) {
+		return true
+	}
+	need := len(contentWords(served))
+	if need == 0 {
+		return false
+	}
+	return wordOverlap(text, served)*2 >= need
+}
+
 // servedWonder is the bank question the server chose for this session, or nil
 // when the bank had nothing and the model is inventing one.
 func (ab *AgentBridge) servedWonder() *WonderToAsk {
@@ -1362,7 +1400,54 @@ CRITICAL RULES FOR VOICE:
 //
 // The model is told WHICH Door and given its words; it does not choose. The
 // escalation is the worker counting tries against what the server authored.
+// quizDoorDirective is the per-turn, tail-anchored instruction: the Door for
+// the pending question, and on the tenth question the Wonder Question to close
+// with. The tail is what the model follows; the state file is what it can
+// forget. Prod 2026-09-11: with the bank question only in the state file, the
+// model closed with its stock pet question instead.
 func (ab *AgentBridge) quizDoorDirective() string {
+	directive := ab.doorDirective()
+	if closing := ab.wonderClosingDirective(); closing != "" {
+		if directive != "" {
+			directive += "\n\n"
+		}
+		directive += closing
+	}
+	return directive
+}
+
+// wonderClosingDirective names the served Wonder Question on the turn that can
+// complete the Daily Ten, so the instruction is in the last thing the model
+// reads before it speaks. Empty on every other turn.
+func (ab *AgentBridge) wonderClosingDirective() string {
+	ask := ab.servedWonder()
+	if ask == nil {
+		return ""
+	}
+	ab.reportedQuizMu.Lock()
+	pending := ab.pendingQuizID
+	ab.reportedQuizMu.Unlock()
+	if pending == 0 {
+		return ""
+	}
+	// The batch lists only questions still to ask, numbered from answered+1,
+	// so the pending question's number is its position plus what is already
+	// scored today. Ten is the Daily Ten.
+	for i := range ab.quizBatch.Questions {
+		if ab.quizBatch.Questions[i].ID != pending {
+			continue
+		}
+		if ab.quizBatch.AnsweredToday+i+1 < 10 {
+			return ""
+		}
+		return fmt.Sprintf(
+			"## Closing\nIf this answer completes the Daily Ten, end with EXACTLY this Wonder Question, in your own warm words but the same question: %q. Not one of your own. Write wonder_code=%s and wonder= in that turn's MEMO.",
+			strings.TrimSpace(ask.Text), ask.Code)
+	}
+	return ""
+}
+
+func (ab *AgentBridge) doorDirective() string {
 	if ab == nil || ab.quizBatch == nil {
 		return ""
 	}
