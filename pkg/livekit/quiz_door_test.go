@@ -260,7 +260,7 @@ func TestWonderQuestionCaptureAndFlush(t *testing.T) {
 	ab := &AgentBridge{
 		quizBatch:              &QuizBatch{Questions: []QuizQuestion{{ID: 1, IDString: "1"}}},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(q string, _ string) { saved = q },
+		wonderQuestionReporter: func(q string, _ string, _ string) { saved = q },
 	}
 
 	// Captured from the MEMO, on a turn that scores nothing.
@@ -291,7 +291,7 @@ func TestNoWonderQuestionSavesNothing(t *testing.T) {
 	ab := &AgentBridge{
 		quizBatch:              &QuizBatch{},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(string, string) { called = true },
+		wonderQuestionReporter: func(string, string, string) { called = true },
 	}
 	// A session where the model never emitted one, and a blank field.
 	ab.reportQuizVerdict("c\nMEMO: type=daily_quiz | status=in_progress | awaiting=5")
@@ -421,7 +421,7 @@ func TestWonderAnswerIsPairedWithItsQuestion(t *testing.T) {
 		return &AgentBridge{
 			quizBatch:              &QuizBatch{},
 			reportedQuizIDs:        map[int64]bool{},
-			wonderQuestionReporter: func(q string, a string) { gotQ, gotA = q, a },
+			wonderQuestionReporter: func(q string, a string, _ string) { gotQ, gotA = q, a },
 		}
 	}
 
@@ -462,6 +462,86 @@ func TestWonderAnswerIsPairedWithItsQuestion(t *testing.T) {
 	ab.flushWonderQuestion()
 	if gotQ != "" || gotA != "" {
 		t.Fatalf("orphan answer was reported: %q / %q", gotQ, gotA)
+	}
+}
+
+// The server chose the question, so the block names it and the model is told
+// to ask exactly that. The do-not-repeat list is the fallback, not the path:
+// it was the list a small model walked past with "make" for "build".
+func TestBankWonderQuestionReplacesTheList(t *testing.T) {
+	qs := []QuizQuestion{{ID: 1, IDString: "1", Text: "Q?", Answer: "A"}}
+	block := quizQuestionsBlock(&QuizBatch{
+		Level: 1, Questions: qs,
+		RecentWonderQuestions: []string{"If you could fly like a bee, where would you go?"},
+		WonderToAsk: &WonderToAsk{Code: "WQ-FOOD-01", Text: "If you could build a house out of any food, what would you use?"},
+	})
+	for _, want := range []string{"Today's Wonder Question", "EXACTLY this question", "build a house out of any food", "code WQ-FOOD-01", "wonder_code=WQ-FOOD-01"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("bank block missing %q in:\n%s", want, block)
+		}
+	}
+	if strings.Contains(block, "Already Wondered") {
+		t.Errorf("the list must not render when the server chose the question:\n%s", block)
+	}
+
+	// Second pass: the child has heard the whole bank; say so and use their answer.
+	again := quizQuestionsBlock(&QuizBatch{
+		Level: 1, Questions: qs,
+		WonderToAsk: &WonderToAsk{Code: "WQ-FOOD-01", Text: "If you could build a house out of any food, what would you use?", SecondPass: true, PreviousAnswer: "biryani"},
+	})
+	for _, want := range []string{"heard this one before", "biryani", "still pick the same"} {
+		if !strings.Contains(again, want) {
+			t.Errorf("second-pass block missing %q in:\n%s", want, again)
+		}
+	}
+
+	// No bank question: the list is the fallback and must still render.
+	bare := quizQuestionsBlock(&QuizBatch{Level: 1, Questions: qs, RecentWonderQuestions: []string{"bee"}})
+	if !strings.Contains(bare, "Already Wondered") || strings.Contains(bare, "Today's Wonder Question") {
+		t.Errorf("fallback list missing without a bank question:\n%s", bare)
+	}
+}
+
+// What gets recorded for a bank question is the SERVED text and code, however
+// the model worded it. No text comparison: paraphrase is exactly what every
+// text guard lost to.
+func TestBankWonderQuestionIsRecordedAsServed(t *testing.T) {
+	var gotQ, gotA, gotC string
+	served := &WonderToAsk{Code: "WQ-FOOD-01", Text: "If you could build a house out of any food, what would you use?"}
+	newBridge := func() *AgentBridge {
+		gotQ, gotA, gotC = "", "", ""
+		return &AgentBridge{
+			quizBatch:              &QuizBatch{WonderToAsk: served, RecentWonderQuestions: []string{served.Text}},
+			reportedQuizIDs:        map[int64]bool{},
+			wonderQuestionReporter: func(q, a, c string) { gotQ, gotA, gotC = q, a, c },
+		}
+	}
+
+	// Reported by code, worded differently, answered on the next turn.
+	ab := newBridge()
+	ab.reportQuizVerdict("a\nMEMO: type=daily_quiz | wonder_code=WQ-FOOD-01 | wonder=From which food will you make your house?")
+	ab.reportQuizVerdict("b\nMEMO: type=daily_quiz | wonder_answer=biryani")
+	ab.flushWonderQuestion()
+	if gotC != "WQ-FOOD-01" || gotQ != served.Text || gotA != "biryani" {
+		t.Fatalf("served question not recorded as served: code=%q q=%q a=%q", gotC, gotQ, gotA)
+	}
+
+	// The model forgot the code but said the question: still the served one -
+	// even though the served text is on the history list, which the old echo
+	// guard would have read as a quotation and dropped.
+	ab = newBridge()
+	ab.reportQuizVerdict("c\nMEMO: type=daily_quiz | wonder=" + served.Text)
+	ab.flushWonderQuestion()
+	if gotC != "WQ-FOOD-01" {
+		t.Fatalf("text-only report of the served question lost its code: %q", gotC)
+	}
+
+	// A different code is not the served question. Nothing is recorded.
+	ab = newBridge()
+	ab.reportQuizVerdict("d\nMEMO: type=daily_quiz | wonder_code=WQ-SPACE-03 | wonder=something else")
+	ab.flushWonderQuestion()
+	if gotC != "" || gotQ != "" {
+		t.Fatalf("a foreign code was recorded: code=%q q=%q", gotC, gotQ)
 	}
 }
 
@@ -545,7 +625,7 @@ func TestRestatedWonderQuestionIsNotSavedAgain(t *testing.T) {
 		// question rendered as the opening beat.
 		quizBatch:              &QuizBatch{WonderQuestion: asked},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(q string, _ string) { saved = q },
+		wonderQuestionReporter: func(q string, _ string, _ string) { saved = q },
 	}
 
 	ab.reportQuizVerdict("[happy] Good afternoon, Kishore!\nMEMO: type=daily_quiz | date=2026-08-15 | status=completed | answered=10 | wonder=" + asked)
@@ -578,7 +658,7 @@ func TestFirstEverWonderQuestionIsSaved(t *testing.T) {
 	ab := &AgentBridge{
 		quizBatch:              &QuizBatch{},
 		reportedQuizIDs:        map[int64]bool{},
-		wonderQuestionReporter: func(q string, _ string) { saved = q },
+		wonderQuestionReporter: func(q string, _ string, _ string) { saved = q },
 	}
 	ab.reportQuizVerdict("z\nMEMO: type=daily_quiz | wonder=Where does the sky end?")
 	ab.flushWonderQuestion()

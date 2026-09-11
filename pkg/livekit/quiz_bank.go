@@ -122,6 +122,21 @@ type QuizBatch struct {
 	// this list "leave them a different one" has nothing to be different from,
 	// and it hands back the same stock question in new words.
 	RecentWonderQuestions []string `json:"recent_wonder_questions"`
+	// WonderToAsk is the question the SERVER chose for this child today, from
+	// the bank, excluding everything they have heard. Nil when the bank is
+	// empty, and only then does the model invent one against the list above.
+	WonderToAsk *WonderToAsk `json:"wonder_to_ask"`
+}
+
+// WonderToAsk is one bank question. SecondPass means the child has heard the
+// whole bank and this is the one they heard longest ago; PreviousAnswer is
+// what they said then, so the model can ask whether they would still pick it
+// rather than pretend the question is new.
+type WonderToAsk struct {
+	Code           string `json:"code"`
+	Text           string `json:"question_text"`
+	SecondPass     bool   `json:"second_pass"`
+	PreviousAnswer string `json:"previous_answer"`
 }
 
 // managerQuizBaseURL resolves the Manager API base the same way the persona pull
@@ -398,6 +413,7 @@ func PostWonderQuestion(
 	deviceMac string,
 	question string,
 	answer string,
+	code string,
 ) error {
 	deviceMac = strings.TrimSpace(deviceMac)
 	if deviceMac == "" {
@@ -414,6 +430,9 @@ func PostWonderQuestion(
 		// Empty when the child never answered - the server stores null, and
 		// the next session asks the question again instead of calling back.
 		"answer": strings.TrimSpace(answer),
+		// The bank code when the server chose the question. Empty for a
+		// model-invented one; the server then falls back to text dedupe.
+		"code": strings.TrimSpace(code),
 	})
 	if err != nil {
 		return err
@@ -428,11 +447,11 @@ func NewWonderQuestionReporter(
 	cfg config.LiveKitServiceManagerAPIConfig,
 	serviceKey string,
 	deviceMac string,
-) func(question string, answer string) {
-	return func(question string, answer string) {
+) func(question string, answer string, code string) {
+	return func(question string, answer string, code string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if err := PostWonderQuestion(ctx, cfg, serviceKey, deviceMac, question, answer); err != nil {
+		if err := PostWonderQuestion(ctx, cfg, serviceKey, deviceMac, question, answer, code); err != nil {
 			// The question itself is not logged: it is the child's, and a log
 			// line is a second place it would have to be protected.
 			logger.WarnCF("livekit", "Wonder question not saved", map[string]any{"error": err.Error()})
@@ -442,6 +461,7 @@ func NewWonderQuestionReporter(
 			"chars": len(question),
 			// The answer itself is the child's; only whether there was one.
 			"answered": strings.TrimSpace(answer) != "",
+			"code":     strings.TrimSpace(code),
 		})
 	}
 }
@@ -555,11 +575,25 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 			b.WriteString("There is no right answer and it is NOT scored. One short exchange, then start the quiz.\n\n")
 		}
 	}
-	// What has already been asked. The closing beat says "leave them a NEW
-	// question", which the model cannot obey without knowing the old ones: on dev
-	// it re-read its own summaries and asked the food-house question again with
-	// two words changed, three times across nine days.
-	if asked := wonderHistoryList(batch.RecentWonderQuestions); asked != "" {
+	// The question to leave the child with. Chosen by the server from the bank
+	// against the child's whole ledger, so the model has nothing to choose and
+	// nothing to paraphrase past: every text guard before this was walked
+	// through by "make a house" for "build a house".
+	if ask := batch.WonderToAsk; ask != nil && strings.TrimSpace(ask.Text) != "" {
+		b.WriteString("## Today's Wonder Question\n")
+		b.WriteString(fmt.Sprintf("When the session ends, leave the child with EXACTLY this question, in your own warm words but the same question: %q (code %s). ", strings.TrimSpace(ask.Text), ask.Code))
+		b.WriteString("Do not invent a different one. ")
+		if ask.SecondPass {
+			if prev := strings.TrimSpace(ask.PreviousAnswer); prev != "" {
+				b.WriteString(fmt.Sprintf("They have heard this one before, a long time ago, and answered %q - say you remember, and ask if they would still pick the same today. ", prev))
+			} else {
+				b.WriteString("They have heard this one before, a long time ago - say you remember asking, and ask what they think now. ")
+			}
+		}
+		b.WriteString(fmt.Sprintf("In that turn's MEMO write wonder_code=%s and wonder=the question as you asked it.\n\n", ask.Code))
+	} else if asked := wonderHistoryList(batch.RecentWonderQuestions); asked != "" {
+		// No bank question: the model invents one, and this list is the only
+		// thing between it and a repeat. Kept as the fallback, not the path.
 		b.WriteString("## Already Wondered\n")
 		b.WriteString("You have already left this child these questions: " + asked + ". ")
 		b.WriteString("Do not ask any of them again, or a reworded version of one. ")

@@ -196,9 +196,10 @@ type AgentBridge struct {
 	// pendingWonderQuestion is the latest one the model emitted, and
 	// pendingWonderAnswer is what the child said back - empty when they never
 	// answered, which is the only case the next session re-asks.
-	wonderQuestionReporter func(question string, answer string)
+	wonderQuestionReporter func(question string, answer string, code string)
 	pendingWonderQuestion  string
 	pendingWonderAnswer    string
+	pendingWonderCode      string
 	// reportedQuizIDs de-duplicates verdicts within the session: the model
 	// re-emits its cumulative MEMO every turn. Guarded because proactive and
 	// async-tool turns can land concurrently with a conversation turn.
@@ -283,7 +284,7 @@ type AgentBridgeConfig struct {
 	// produce no verdict and would otherwise leave no trace at all.
 	QuizAttemptReporter func(questionID int64, attempts []QuizAttempt)
 	// WonderQuestionReporter saves the Wonder Question (M4) at teardown.
-	WonderQuestionReporter func(question string, answer string)
+	WonderQuestionReporter func(question string, answer string, code string)
 }
 
 // NewAgentBridge creates a new AgentBridge.
@@ -997,7 +998,26 @@ func (ab *AgentBridge) reportQuizVerdict(assistantContent string) {
 	// with the answer log, so gating it on the verdict reporter existing would
 	// couple two unrelated things and lose the question whenever the quiz path
 	// happened to be inactive.
-	if wonder := strings.TrimSpace(memoField(memo, "wonder")); wonder != "" {
+	// A bank question. The server chose it, so the moment the model reports
+	// asking one - by code or by text - what is recorded is the SERVED text
+	// and code, not the model's paraphrase. No text comparison anywhere:
+	// that is the whole point of the bank.
+	if ask := ab.servedWonder(); ask != nil {
+		code := strings.TrimSpace(memoField(memo, "wonder_code"))
+		text := strings.TrimSpace(memoField(memo, "wonder"))
+		// A different code is the model asking something else; drop it. No code
+		// at all is the model asking the served question and forgetting the
+		// field, which is what a small model does most days.
+		if code == ask.Code || (code == "" && text != "") {
+			ab.reportedQuizMu.Lock()
+			if ab.pendingWonderCode != ask.Code {
+				ab.pendingWonderAnswer = ""
+			}
+			ab.pendingWonderQuestion = strings.TrimSpace(ask.Text)
+			ab.pendingWonderCode = ask.Code
+			ab.reportedQuizMu.Unlock()
+		}
+	} else if wonder := strings.TrimSpace(memoField(memo, "wonder")); wonder != "" {
 		// Not the one this session opened by recalling.
 		//
 		// A new session restores the previous session's completed MEMO from
@@ -1099,6 +1119,15 @@ func (ab *AgentBridge) flushPendingQuizAttempts() {
 //
 // Both come from the server, so this asks the record rather than the model: a
 // `wonder=` matching any of them is a quotation, not new curiosity.
+// servedWonder is the bank question the server chose for this session, or nil
+// when the bank had nothing and the model is inventing one.
+func (ab *AgentBridge) servedWonder() *WonderToAsk {
+	if ab == nil || ab.quizBatch == nil || ab.quizBatch.WonderToAsk == nil || strings.TrimSpace(ab.quizBatch.WonderToAsk.Code) == "" {
+		return nil
+	}
+	return ab.quizBatch.WonderToAsk
+}
+
 func (ab *AgentBridge) alreadyWondered(question string) bool {
 	if ab == nil || ab.quizBatch == nil {
 		return false
@@ -1147,14 +1176,16 @@ func (ab *AgentBridge) flushWonderQuestion() {
 	ab.reportedQuizMu.Lock()
 	question := ab.pendingWonderQuestion
 	answer := ab.pendingWonderAnswer
+	code := ab.pendingWonderCode
 	ab.pendingWonderQuestion = ""
 	ab.pendingWonderAnswer = ""
+	ab.pendingWonderCode = ""
 	ab.reportedQuizMu.Unlock()
 
 	if strings.TrimSpace(question) == "" {
 		return
 	}
-	ab.wonderQuestionReporter(question, answer)
+	ab.wonderQuestionReporter(question, answer, code)
 }
 
 // doorForPendingLocked is the Door the pending question was on before this
