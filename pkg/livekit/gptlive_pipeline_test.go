@@ -312,6 +312,12 @@ func TestFinishStartSelfClosesWhenContextAlreadyCancelled(t *testing.T) {
 	if err := p.finishStart(ctx, sess); err == nil {
 		t.Fatal("finishStart() with an already-cancelled context must return an error, not spawn the pumps")
 	}
+	if p.startErr == nil {
+		t.Fatal("finishStart's self-close branch must set p.startErr to a non-nil error before it ever " +
+			"closes p.ready, or a handleTrackSubscribed goroutine already blocked on <-p.ready reads the " +
+			"nil zero value and wires the room's mic into a pipeline that is being closed right now (Task " +
+			"13 review, carried forward from Task 12)")
+	}
 
 	// If pumpPublish were running (i.e. the pumps leaked), it would consume
 	// this within microseconds; nothing should be listening on p.publish at all.
@@ -321,6 +327,47 @@ func TestFinishStartSelfClosesWhenContextAlreadyCancelled(t *testing.T) {
 	case <-consumed:
 		t.Fatal("a pump goroutine consumed from p.publish — the pumps were not supposed to be spawned")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestFinishStartSelfCloseWaiterNeverObservesNilStartErr reproduces
+// handleTrackSubscribed's exact shape (room_session.go): a goroutine blocked
+// on <-p.ready, which reads p.startErr the instant the receive unblocks, with
+// no lock or other synchronization of its own — that IS the synchronization,
+// per p.ready's own doc comment. Before the fix, finishStart closed p.ready
+// unconditionally before ever checking ctx.Done(), so this waiter could wake
+// up, see p.startErr's nil zero value (nothing had set it yet in the
+// self-close branch), and proceed to wire the room's remote track into a
+// pipeline finishStart was about to close underneath it. The waiter goroutine
+// here is started BEFORE finishStart is even called, so it is genuinely
+// racing the close, not just checking the field afterwards.
+func TestFinishStartSelfCloseWaiterNeverObservesNilStartErr(t *testing.T) {
+	url := newMinimalFakeGPTLiveServer(t)
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer sess.Close(context.Background())
+
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	waiterErr := make(chan error, 1)
+	go func() {
+		<-p.ready
+		waiterErr <- p.startErr
+	}()
+
+	_ = p.finishStart(ctx, sess)
+
+	select {
+	case got := <-waiterErr:
+		if got == nil {
+			t.Fatal("waiter observed a nil startErr right after <-p.ready unblocked, in the self-close path")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter never saw p.ready close")
 	}
 }
 
@@ -385,5 +432,100 @@ func TestConcurrentAccessDuringFinishStartDoesNotRace(t *testing.T) {
 func TestPublishAgentStateOnRoomMatchesPublishAgentStateForNilRoom(t *testing.T) {
 	if err := publishAgentStateOnRoom(nil, "listening", "speaking"); err == nil {
 		t.Error("expected an error for a nil room, matching RoomSession.PublishAgentState's own nil-room behavior")
+	}
+}
+
+// newFakeGPTLiveServerWithUsage is newMinimalFakeGPTLiveServer plus a
+// caller-chosen VoiceSeconds on the session.closed reply, so
+// TestWaitForEventsDrainSynchronizesBeforeReadingVoiceSeconds can tell
+// whether the value it reads is the real final one or a stale zero.
+func newFakeGPTLiveServerWithUsage(t *testing.T, seconds float64) string {
+	t.Helper()
+	var upgrader websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var ev map[string]any
+			if err := json.Unmarshal(data, &ev); err != nil {
+				continue
+			}
+			switch ev["type"] {
+			case "session.start":
+				_ = conn.WriteJSON(map[string]any{"type": "session.started", "session": map[string]any{"id": "test"}})
+			case "session.close":
+				_ = conn.WriteJSON(map[string]any{"type": "session.closed", "reason": "close_requested", "usage": map[string]any{"seconds": seconds}})
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// TestWaitForEventsDrainSynchronizesBeforeReadingVoiceSeconds covers Task
+// 12's "carried forward, not fixed" review note: Close's own p.cancel() (via
+// pctx) races the just-buffered gptlive.Closed{VoiceSeconds} event through a
+// select with two simultaneously-ready cases in pumpEvents, so Close
+// returning is not sufficient evidence VoiceSeconds() reflects the final
+// report. This dials a real (fake-server-backed) session, starts the pumps
+// for real via finishStart, then exercises the exact sequence leave() uses —
+// Close then WaitForEventsDrain then VoiceSeconds() — repeatedly, to catch
+// the flakiness a missing drain would show up as instead of asserting it once
+// and getting lucky on the scheduler.
+func TestWaitForEventsDrainSynchronizesBeforeReadingVoiceSeconds(t *testing.T) {
+	const wantSeconds = 7.5
+	for i := 0; i < 20; i++ {
+		url := newFakeGPTLiveServerWithUsage(t, wantSeconds)
+		sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+		if err != nil {
+			t.Fatalf("Dial() error = %v", err)
+		}
+
+		p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000})
+		if err := p.finishStart(context.Background(), sess); err != nil {
+			t.Fatalf("finishStart() error = %v", err)
+		}
+
+		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		p.Close(closeCtx)
+		cancel()
+		// This is the exact sequence leave() uses (Close, then
+		// WaitForEventsDrain, then read VoiceSeconds/BackendTokens/
+		// TranscriptSnapshot). Without this call the read below races
+		// pumpEvents' processing of the just-buffered Closed{VoiceSeconds}
+		// event; removing it locally reproduces the pre-fix flake this test
+		// guards against (see task-13-report.md for the before/after run).
+		p.WaitForEventsDrain(2 * time.Second)
+
+		if got := p.VoiceSeconds(); got != wantSeconds {
+			t.Fatalf("iteration %d: VoiceSeconds() = %v, want %v (final Closed event was not drained before reading)", i, got, wantSeconds)
+		}
+	}
+}
+
+// TestWaitForEventsDrainNoOpWhenPumpsNeverStarted covers the other half of
+// WaitForEventsDrain's contract: a pipeline whose pumps were never spawned —
+// exercised here with the same bare &gptLivePipeline{} the pure-logic tests
+// above use, standing in for both a Start dial failure and finishStart's own
+// self-close branch — must return immediately rather than blocking on a
+// channel (eventsDone) nothing will ever close.
+func TestWaitForEventsDrainNoOpWhenPumpsNeverStarted(t *testing.T) {
+	p := &gptLivePipeline{}
+	done := make(chan struct{})
+	go func() {
+		p.WaitForEventsDrain(5 * time.Second)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("WaitForEventsDrain blocked even though eventsPumpStarted was never set")
 	}
 }

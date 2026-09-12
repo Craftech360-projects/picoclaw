@@ -336,6 +336,13 @@ func main() {
 	type roomRuntimeSelection struct {
 		ttsProvider   tts.Provider
 		ttsSampleRate int
+		// gptLiveSpec is set (Task 13) when this job selected the gptlive
+		// pipeline. bridgeFactory is where every piece of it (persona greeting,
+		// tools, quiz batch/reporters, workspace) is actually in scope; the
+		// RoomFactory closure below only receives the already-built *AgentBridge,
+		// so this map is how the spec crosses from one closure to the other —
+		// the same reason ttsProvider/ttsSampleRate already ride along here.
+		gptLiveSpec *livekit.GPTLiveSessionSpec
 	}
 	var roomRuntimeByJobID sync.Map
 
@@ -1075,6 +1082,71 @@ func main() {
 				}
 			}
 		}
+
+		// Task 13: select the gptlive pipeline for this process, if configured.
+		// This is a per-process switch, not per-session dispatch metadata — the
+		// gptlive block on the metadata only tunes voice/accent/rate once the
+		// pipeline is already selected here. Every piece this needs (persona
+		// greeting, tools, quiz batch/reporters, workspace) is only in scope
+		// inside this closure, so the resulting spec rides to the RoomFactory
+		// closure below through roomRuntimeByJobID, exactly like
+		// sessionTTSProvider/sessionTTSSampleRate already do a few lines above.
+		var gptLiveSpec *livekit.GPTLiveSessionSpec
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("PICOCLAW_LIVEKIT_PIPELINE")), "gptlive") {
+			bankBlockForSession := ""
+			if quizBatchForSession != nil {
+				bankBlockForSession = livekit.RenderQuizQuestions("{{QUIZ_QUESTIONS}}", quizBatchForSession)
+			} else if contentBankForSession != nil {
+				bankBlockForSession = livekit.RenderContentBank("{{JOKES}}", contentBankForSession)
+			}
+			spec, err := buildGPTLiveSpec(gptLiveSpecInput{
+				APIKey:         os.Getenv("OPENAI_API_KEY"),
+				Metadata:       bootstrap.Metadata,
+				Workspace:      workspace,
+				CharacterName:  characterName,
+				GreetingPrompt: personaGreeting,
+				LanguageName:   sessionLanguagePolicy.DisplayName,
+				BaseTools:      agentInstance.Tools,
+				QuizBatch:      quizBatchForSession,
+				BankBlock:      bankBlockForSession,
+				QuizReporters: livekit.QuizTrackerConfig{
+					AnswerReporter: livekit.NewQuizAnswerReporter(
+						lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC, quizBatchBank(quizBatchForSession),
+					),
+					AttemptReporter: livekit.NewQuizAttemptReporter(
+						lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC, quizBatchBank(quizBatchForSession),
+					),
+					WonderReporter: livekit.NewWonderQuestionReporter(
+						lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC,
+					),
+				},
+			})
+			if err != nil {
+				logger.ErrorCF("livekit", "gptlive: failed to build session spec", map[string]any{
+					"room":  roomName,
+					"error": err.Error(),
+				})
+				releaseWorkspaceLock("gptlive_spec_failed")
+				return nil
+			}
+			gptLiveSpec = spec
+			sessionTTSSampleRate = spec.SampleRate // the local track must match the model's output rate
+			if job != nil && strings.TrimSpace(job.Id) != "" {
+				roomRuntimeByJobID.Store(job.Id, roomRuntimeSelection{
+					ttsProvider:   sessionTTSProvider,
+					ttsSampleRate: sessionTTSSampleRate,
+					gptLiveSpec:   gptLiveSpec,
+				})
+			}
+			logger.InfoCF("livekit", "gptlive: session spec selected", map[string]any{
+				"room":               roomName,
+				"character":          characterName,
+				"sample_rate_hz":     spec.SampleRate,
+				"has_quiz":           spec.Quiz != nil,
+				"tts_sample_rate_hz": sessionTTSSampleRate,
+			})
+		}
+
 		// Voice LLM sampling temperature. Use the configured value
 		// (agents.defaults.temperature) so it is tunable without a rebuild; fall
 		// back to 0.8 for storytelling variety. The old hardcoded 0.3 was
@@ -1265,6 +1337,7 @@ func main() {
 			sessionLanguagePolicy := bridge.SessionLanguagePolicy()
 			sessionTTSProvider := ttsProvider
 			sessionTTSSampleRate := ttsSampleRate
+			var gptLiveSpec *livekit.GPTLiveSessionSpec
 			if job != nil {
 				if selected, ok := roomRuntimeByJobID.LoadAndDelete(job.Id); ok {
 					if runtimeSelection, castOK := selected.(roomRuntimeSelection); castOK {
@@ -1274,6 +1347,7 @@ func main() {
 						if runtimeSelection.ttsSampleRate > 0 {
 							sessionTTSSampleRate = runtimeSelection.ttsSampleRate
 						}
+						gptLiveSpec = runtimeSelection.gptLiveSpec
 					}
 				}
 			}
@@ -1310,6 +1384,7 @@ func main() {
 				SessionLanguageName: sessionLanguagePolicy.DisplayName,
 				SessionLanguageCode: sessionLanguagePolicy.RawCode,
 				Runtime:             lkCfg.Runtime,
+				GPTLive:             gptLiveSpec,
 			})
 		},
 	}

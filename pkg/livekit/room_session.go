@@ -399,6 +399,13 @@ func (rs *RoomSession) leave() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		gptlivePipeline.Close(closeCtx)
 		cancel()
+		// Close returning is NOT sufficient evidence that pumpEvents already
+		// processed the final Closed{VoiceSeconds} event still sitting in the
+		// events channel at that point (Task 12 review, "carried forward, not
+		// fixed": Close's own cancel() races that event through a select with
+		// two simultaneously-ready cases). Wait for pumpEvents to have actually
+		// exited before reading anything it wrote.
+		gptlivePipeline.WaitForEventsDrain(2 * time.Second)
 		rs.persistGPTLiveSession(gptlivePipeline)
 	}
 
@@ -1269,13 +1276,45 @@ func (rs *RoomSession) roomSnapshot() *lksdk.Room {
 	return rs.room
 }
 
-// persistGPTLiveSession will persist the GPT-Live transcript and usage
-// counters to the same manager-API path persistPostSessionData uses for the
-// cascade. Left empty for Task 12 (the pipeline plumbing); Task 13 wires the
-// actual persistence using pipeline.TranscriptSnapshot/VoiceSeconds/BackendTokens.
-// pipeline is passed explicitly (rather than read from rs.gptlive) because
-// leave() has already cleared that field by the time this is called.
-func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline) {}
+// persistGPTLiveSession persists the GPT-Live transcript and usage counters
+// to the same manager-API path persistPostSessionData uses for the cascade
+// (sendChatHistory, sendSessionEnd, sendUsageSummary — see
+// post_session_persistence.go). pipeline is passed explicitly (rather than
+// read from rs.gptlive) because leave() has already cleared that field by the
+// time this is called.
+//
+// Callers must synchronize on pipeline.WaitForEventsDrain before calling this
+// (leave() does, right after Close): Close's own p.cancel() races the final
+// gptlive.Closed{VoiceSeconds} event that may still be sitting, unread, in
+// the pipeline's events channel at the moment sess.Close returns — Go's
+// select picks between two simultaneously-ready cases at random, so pumpEvents
+// processing that event before exiting on ctx.Done() is likely but not
+// guaranteed (see the gptLivePipeline.Close doc comment and Task 12's
+// "carried forward, not fixed" review note). Reading VoiceSeconds/
+// BackendTokens/TranscriptSnapshot before pumpEvents has actually exited
+// would risk reading them one event stale. WaitForEventsDrain is a no-op
+// when pumpEvents was never spawned at all (a dial failure, or finishStart's
+// own self-close path — see its doc comment): in that case voiceSeconds is
+// simply 0 and backendTokens 0, which is correct — the session never
+// produced any usage to report, not a lost update.
+func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline) {
+	if rs == nil || pipeline == nil || strings.TrimSpace(rs.managerAPIURL) == "" || strings.TrimSpace(rs.deviceMAC) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	messages := pipeline.TranscriptSnapshot()
+	if err := rs.sendChatHistory(ctx, messages); err != nil {
+		logger.WarnCF("livekit", "gptlive: chat history upload failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+	}
+	if err := rs.sendSessionEnd(ctx, len(messages)); err != nil {
+		logger.WarnCF("livekit", "gptlive: session end failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+	}
+	usage := UsageSnapshot{SessionDurationSeconds: pipeline.VoiceSeconds(), TotalTokens: pipeline.BackendTokens()}
+	if err := rs.sendUsageSummary(ctx, usage); err != nil {
+		logger.WarnCF("livekit", "gptlive: usage summary failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+	}
+}
 
 func (rs *RoomSession) roomName() string {
 	if rs == nil || rs.roomInfo == nil {

@@ -100,15 +100,28 @@ type gptLivePipeline struct {
 	// being spoken instead of guessing a fixed sleep.
 	burstClosed chan struct{}
 
-	mu            sync.Mutex
-	state         string
-	greeted       bool
-	agentText     map[string]string // burst id -> latest full text
-	openAgentIDs  []string          // transcript ids seen since the burst opened
-	transcript    []PersistedChatMessage
-	voiceSeconds  float64
-	backendTokens int
-	cancel        context.CancelFunc
+	// eventsDone is closed exactly once pumpEvents has returned for good (see
+	// pumpEvents' defer), OR immediately by finishStart if pumpEvents is never
+	// going to be spawned at all (the ctx-already-cancelled self-close branch,
+	// or Start's own dial-error return). WaitForEventsDrain is the sole reader;
+	// see its doc comment for why persistGPTLiveSession must wait on this
+	// before reading VoiceSeconds/BackendTokens/TranscriptSnapshot.
+	eventsDone chan struct{}
+
+	mu sync.Mutex
+	// eventsPumpStarted is true only once pumpEvents has actually been
+	// spawned (finishStart's normal path). Guarded by mu like p.sess/p.cancel:
+	// WaitForEventsDrain reads it from whichever goroutine calls Close/leave(),
+	// finishStart writes it from its own goroutine.
+	eventsPumpStarted bool
+	state             string
+	greeted           bool
+	agentText         map[string]string // burst id -> latest full text
+	openAgentIDs      []string          // transcript ids seen since the burst opened
+	transcript        []PersistedChatMessage
+	voiceSeconds      float64
+	backendTokens     int
+	cancel            context.CancelFunc
 }
 
 // newGPTLivePipeline builds the pipeline; call Start to dial the model and
@@ -122,6 +135,7 @@ func newGPTLivePipeline(rs *RoomSession, spec GPTLiveSessionSpec) *gptLivePipeli
 	p := &gptLivePipeline{
 		rs: rs, spec: spec, state: "listening", agentText: map[string]string{},
 		ready: make(chan struct{}), publish: make(chan func(), 64), burstClosed: make(chan struct{}, 1),
+		eventsDone: make(chan struct{}),
 	}
 	p.seg = gptlive.NewSegmenter(p.onBurstOpen, p.onBurstClose)
 	if spec.Quiz != nil {
@@ -225,6 +239,12 @@ func (p *gptLivePipeline) Start(ctx context.Context) error {
 	if err != nil {
 		p.startErr = err
 		close(p.ready)
+		// pumpEvents will never be spawned for this pipeline (Dial itself
+		// failed), so nothing else will ever close eventsDone; do it here so
+		// WaitForEventsDrain's caller (leave(), via persistGPTLiveSession)
+		// never has to think about a dial failure differently from a normal
+		// teardown — a bare no-op if this pipeline is later Close()'d.
+		close(p.eventsDone)
 		return err
 	}
 	return p.finishStart(ctx, sess)
@@ -243,7 +263,6 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session
 	p.sess = sess
 	p.cancel = cancel
 	p.mu.Unlock()
-	close(p.ready)
 
 	select {
 	case <-ctx.Done():
@@ -251,13 +270,33 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session
 		// ctx here, before it ever calls Close) while Dial was still in
 		// flight. Its Close call found p.sess/p.cancel nil and did nothing;
 		// finish that close now, since nothing else will ever call it again.
+		//
+		// startErr must be set to a non-nil error BEFORE close(p.ready) here,
+		// not after (Task 12 review carried forward to Task 13): a
+		// handleTrackSubscribed goroutine can be blocked on <-p.ready right
+		// now, and once that receive unblocks it immediately reads p.startErr
+		// with no further synchronization. Closing ready first would let it
+		// observe nil — the zero value, meaning "dialed fine" — and go on to
+		// wire the room's mic track to a pipeline that is, in this very branch,
+		// about to be torn down. Setting startErr first (the same
+		// write-before-close pattern Start's own dial-error path above already
+		// uses) makes the waiter bail deterministically instead.
+		p.startErr = ctx.Err()
+		close(p.ready)
+		// Nothing below ever spawns pumpEvents on this path; see eventsDone's
+		// own doc comment for why this must still close it.
+		close(p.eventsDone)
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		p.Close(closeCtx)
 		closeCancel()
 		return ctx.Err()
 	default:
+		close(p.ready)
 	}
 
+	p.mu.Lock()
+	p.eventsPumpStarted = true
+	p.mu.Unlock()
 	go p.pumpAudioOut(pctx)
 	go p.pumpEvents(pctx)
 	go p.pumpPublish(pctx)
@@ -416,6 +455,12 @@ func (p *gptLivePipeline) enqueuePublish(fn func()) {
 }
 
 func (p *gptLivePipeline) pumpEvents(ctx context.Context) {
+	// Closed on every return path (including via the ctx.Done() case racing a
+	// still-buffered final event — see eventsDone's doc comment) so
+	// WaitForEventsDrain can tell pumpEvents has actually stopped touching
+	// p.voiceSeconds/p.backendTokens/p.transcript, rather than inferring it
+	// from Close having returned.
+	defer close(p.eventsDone)
 	for {
 		select {
 		case ev, ok := <-p.sess.Events():
@@ -644,6 +689,31 @@ func (p *gptLivePipeline) BackendTokens() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.backendTokens
+}
+
+// WaitForEventsDrain blocks until pumpEvents has actually returned (eventsDone
+// closed) or timeout elapses, whichever comes first — bounded so a caller (only
+// leave(), today) can never hang: pumpEvents is expected to exit within
+// microseconds of Close's cancel() firing, so timeout is only a backstop, not
+// the normal path.
+//
+// Safe to call even when pumpEvents was never spawned at all — a dial failure
+// in Start, or finishStart's own ctx-already-cancelled self-close branch — by
+// checking eventsPumpStarted first: in both of those cases eventsDone is
+// already closed too (see their own comments), so this would actually return
+// immediately either way, but checking the flag avoids relying on that and
+// documents the no-pump case explicitly.
+func (p *gptLivePipeline) WaitForEventsDrain(timeout time.Duration) {
+	p.mu.Lock()
+	started := p.eventsPumpStarted
+	p.mu.Unlock()
+	if !started {
+		return
+	}
+	select {
+	case <-p.eventsDone:
+	case <-time.After(timeout):
+	}
 }
 
 // Close tears down the underlying gptlive.Session — sess.Close waits for the

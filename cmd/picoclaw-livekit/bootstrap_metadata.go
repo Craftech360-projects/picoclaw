@@ -39,6 +39,23 @@ type roomMetadata struct {
 	// Per-character SmallestAI Waves voice (ai_agent_template.smallest_voice_id) —
 	// overrides the global TTS voice for this session when the provider is smallest.
 	SmallestVoiceID string `json:"smallest_voice_id"`
+
+	// GPTLive carries the per-session voice/accent/rate overrides for the
+	// gptlive pipeline (Task 13). nil when the dispatch metadata carries no
+	// "gptlive" block at all, which is the normal case for every cascade
+	// session and must never be treated as an error.
+	GPTLive *roomMetadataGPTLive `json:"gptlive"`
+}
+
+// roomMetadataGPTLive is untrusted input straight from MQTT dispatch
+// metadata: an unknown Voice, an Accent other than "indian", or a Rate that
+// is neither 16000 nor 24000 are all normal traffic, not errors — buildGPTLiveSpec
+// (gptlive_spec.go) is what validates and falls back to safe defaults; this
+// struct only carries whatever was there.
+type roomMetadataGPTLive struct {
+	Voice  string `json:"voice"`
+	Accent string `json:"accent"`
+	Rate   int    `json:"rate"`
 }
 
 type roomMetadataChildProfile struct {
@@ -153,6 +170,18 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	metadata.Language = normalizeString(mustGetMapValue(payload, "language"))
 	metadata.SarvamVoiceID = normalizeString(mustGetMapValue(payload, "sarvam_voice_id", "sarvamVoiceId"))
 	metadata.SmallestVoiceID = normalizeString(mustGetMapValue(payload, "smallest_voice_id", "smallestVoiceId"))
+	// getMapFromValue returns nil both when "gptlive" is absent and when it is
+	// present but not a JSON object — either way there is nothing to parse, and
+	// metadata.GPTLive stays nil, which buildGPTLiveSpec already treats as "use
+	// every default" (dispatch metadata is untrusted; a malformed block must
+	// degrade gracefully, not fail the session).
+	if raw := getMapFromValue(mustGetMapValue(payload, "gptlive")); raw != nil {
+		metadata.GPTLive = &roomMetadataGPTLive{
+			Voice:  normalizeString(mustGetMapValue(raw, "voice")),
+			Accent: normalizeString(mustGetMapValue(raw, "accent")),
+			Rate:   normalizeInt(mustGetMapValue(raw, "rate")),
+		}
+	}
 	metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "primary_language", "primaryLanguage"))
 	if metadata.PrimaryLanguage == "" {
 		metadata.PrimaryLanguage = metadata.SessionLanguageName
