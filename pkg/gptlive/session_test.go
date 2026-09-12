@@ -2,6 +2,8 @@ package gptlive
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"testing"
 	"time"
 )
@@ -95,5 +97,129 @@ func TestCloseSendsSessionCloseAndWaitsForClosed(t *testing.T) {
 	}
 	if !sawClosed {
 		t.Error("Closed event with final usage not delivered")
+	}
+}
+
+// TestFatalProtocolErrorEmitsOnce covers Finding 2 from the Task 3 review: a fatal
+// EventError must produce exactly one Error event, and that event's error must expose
+// the fatal ErrorBody so a retry loop can decide not to reconnect.
+func TestFatalProtocolErrorEmitsOnce(t *testing.T) {
+	var f *fakeLive
+	f = newFakeLive(t, func(c *websocketConn, ev map[string]any) {
+		if ev["type"] == EventSessionStart {
+			f.send(c, map[string]any{"type": EventSessionStarted, "session": map[string]any{"id": "fatal_test"}})
+			f.send(c, map[string]any{"type": EventError, "error": map[string]any{
+				"type": "invalid_request_error", "code": "invalid_api_key", "message": "bad key",
+			}})
+		}
+	})
+	s, err := Dial(context.Background(), testConfig(f.url()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The session already ended on its own (fatal error); tear down its context
+	// directly instead of Close(), which would otherwise wait the full
+	// sessionCloseTimeout for a session.closed reply that will never arrive.
+	defer s.cancel()
+
+	var errs []Error
+	timeout := time.After(2 * time.Second)
+drain:
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				break drain
+			}
+			if e, ok := ev.(Error); ok {
+				errs = append(errs, e)
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for events channel to close")
+		}
+	}
+	if len(errs) != 1 {
+		t.Fatalf("want exactly one Error event, got %d: %v", len(errs), errs)
+	}
+	var fp *FatalProtocolError
+	if !errors.As(errs[0].Err, &fp) {
+		t.Fatalf("Error.Err does not expose a *FatalProtocolError: %v", errs[0].Err)
+	}
+	if fp.Body.Code != "invalid_api_key" {
+		t.Errorf("fatal code = %q, want invalid_api_key", fp.Body.Code)
+	}
+	if errs[0].Recoverable {
+		t.Error("fatal error should be marked non-recoverable")
+	}
+}
+
+// TestCloseJoinsReadGoroutineBeforeClosingChannels covers Finding 1 from the Task 3
+// review: runOnce must not return (letting run() close s.events/s.audio) while the
+// read goroutine could still be inside handleEvent sending on those channels, which
+// would panic since a send on an already-closed channel is always ready to proceed.
+//
+// The fake server floods far more output_audio deltas than s.audio's buffer holds,
+// and the test never drains Audio(), so the read goroutine blocks inside handleEvent's
+// audio select once the buffer fills. session.close cannot be acked by this session's
+// own read goroutine while it is stuck (the reply is queued behind the flood), so
+// Close falls back to sessionCloseTimeout before cancelling — exactly the moment the
+// stuck goroutine has a large backlog still to race through against run() closing the
+// channels. A panic here crashes the whole test binary, which fails the run.
+func TestCloseJoinsReadGoroutineBeforeClosingChannels(t *testing.T) {
+	var f *fakeLive
+	stopFlood := make(chan struct{})
+	f = newFakeLive(t, func(c *websocketConn, ev map[string]any) {
+		switch ev["type"] {
+		case EventSessionStart:
+			f.send(c, map[string]any{"type": EventSessionStarted, "session": map[string]any{"id": "flood_test"}})
+			payload := base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4})
+			go func() {
+				for i := 0; i < 20000; i++ {
+					select {
+					case <-stopFlood:
+						return
+					default:
+						f.send(c, map[string]any{"type": EventOutputAudioDelta, "delta": payload})
+					}
+				}
+			}()
+		case EventSessionClose:
+			f.send(c, map[string]any{"type": EventSessionClosed, "reason": "close_requested", "usage": map[string]any{"seconds": 1}})
+		}
+	})
+	defer close(stopFlood)
+
+	s, err := Dial(context.Background(), testConfig(f.url()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately do not drain s.Audio(): once its buffer (1024) fills, the read
+	// goroutine blocks mid-handleEvent, which is exactly the state Finding 1 says
+	// must not race with run() closing the channels.
+	time.Sleep(150 * time.Millisecond) // let the flood fill the audio buffer
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- s.Close(context.Background()) }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Close did not return in time")
+	}
+
+	// If run() closed s.audio/s.events while the read goroutine was still sending on
+	// them, that send panics and crashes the test binary before reaching this point.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for range s.Audio() {
+		}
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("s.Audio() never closed after Close returned")
 	}
 }

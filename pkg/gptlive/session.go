@@ -155,11 +155,19 @@ func (s *Session) PushAudio(pcm []byte) {
 	s.send(inputAudioAppendEvent{Type: EventInputAudioAppend, Audio: base64.StdEncoding.EncodeToString(pcm)})
 }
 
-func (s *Session) AppendInstructions(text string) { s.send(encodeAppend(EventInstructionsAppend, text, nil)) }
-func (s *Session) AppendThinking(text string)     { s.send(encodeAppend(EventThinkingAppend, text, nil)) }
-func (s *Session) AppendCommentary(text string)   { s.send(encodeAppend(EventCommentaryAppend, text, nil)) }
-func (s *Session) MuteInput()                     { s.send(simpleEvent{Type: EventInputAudioMute, EventID: newEventID("mute_")}) }
-func (s *Session) UnmuteInput()                   { s.send(simpleEvent{Type: EventInputAudioUnmute, EventID: newEventID("unmute_")}) }
+func (s *Session) AppendInstructions(text string) {
+	s.send(encodeAppend(EventInstructionsAppend, text, nil))
+}
+func (s *Session) AppendThinking(text string) { s.send(encodeAppend(EventThinkingAppend, text, nil)) }
+func (s *Session) AppendCommentary(text string) {
+	s.send(encodeAppend(EventCommentaryAppend, text, nil))
+}
+func (s *Session) MuteInput() {
+	s.send(simpleEvent{Type: EventInputAudioMute, EventID: newEventID("mute_")})
+}
+func (s *Session) UnmuteInput() {
+	s.send(simpleEvent{Type: EventInputAudioUnmute, EventID: newEventID("unmute_")})
+}
 
 func (s *Session) send(v any) {
 	data, err := json.Marshal(v)
@@ -274,12 +282,22 @@ func (s *Session) runOnce(conn *websocket.Conn) error {
 		defer writeMu.Unlock()
 		return conn.WriteMessage(websocket.TextMessage, b)
 	}
+	// stopReader closes the connection to unblock a pending ReadMessage and waits for
+	// the read goroutine to exit. Every return path that has not already consumed
+	// readErr must call this before returning, so the caller (run) never closes
+	// s.events/s.audio while the read goroutine could still be inside handleEvent
+	// sending on them — a send on an already-closed channel always panics.
+	stopReader := func() {
+		conn.Close()
+		<-readErr
+	}
 	// hold every client event until session.started, as the protocol requires
 	select {
 	case <-started:
 	case err := <-readErr:
 		return s.classify(err)
 	case <-s.ctx.Done():
+		stopReader()
 		return nil
 	}
 	var timer <-chan time.Time
@@ -290,13 +308,16 @@ func (s *Session) runOnce(conn *websocket.Conn) error {
 		select {
 		case b := <-s.out:
 			if err := write(b); err != nil {
+				stopReader()
 				return fmt.Errorf("gptlive: write: %w", err)
 			}
 		case err := <-readErr:
 			return s.classify(err)
 		case <-timer:
+			stopReader()
 			return errReconnectTimer
 		case <-s.ctx.Done():
+			stopReader()
 			return nil
 		}
 	}
@@ -304,8 +325,25 @@ func (s *Session) runOnce(conn *websocket.Conn) error {
 
 var errReconnectTimer = errors.New("gptlive: max session duration reached")
 
-// classify turns a read failure into nil when the close was ours.
+// FatalProtocolError is returned from runOnce when the service reports an
+// unrecoverable protocol error (see ErrorBody.Fatal). Task 6's retry loop inspects it
+// via errors.As to decide not to reconnect.
+type FatalProtocolError struct {
+	Body *ErrorBody
+}
+
+func (e *FatalProtocolError) Error() string {
+	return fmt.Sprintf("gptlive: %s (%s): %s", e.Body.Type, e.Body.Code, e.Body.Message)
+}
+
+// classify turns a read failure into nil when the close was ours, and passes a fatal
+// protocol error through unchanged so run() can emit it as the one Error for this
+// failure and Task 6 can recognize it.
 func (s *Session) classify(err error) error {
+	var fatal *FatalProtocolError
+	if errors.As(err, &fatal) {
+		return fatal
+	}
 	s.mu.Lock()
 	closing := s.closing
 	s.mu.Unlock()
@@ -391,11 +429,12 @@ func (s *Session) handleEvent(ev ServerEvent) error {
 		if ev.Error == nil {
 			return nil
 		}
-		err := fmt.Errorf("gptlive: %s (%s): %s", ev.Error.Type, ev.Error.Code, ev.Error.Message)
 		if ev.Error.Fatal() {
-			s.emit(Error{Err: err, Recoverable: false})
-			return err
+			// Returned, not emitted: the read loop hands this to classify, and run()
+			// emits it exactly once. Emitting here too would double-report one failure.
+			return &FatalProtocolError{Body: ev.Error}
 		}
+		err := fmt.Errorf("gptlive: %s (%s): %s", ev.Error.Type, ev.Error.Code, ev.Error.Message)
 		s.emit(Error{Err: err, Recoverable: true})
 	}
 	return nil
