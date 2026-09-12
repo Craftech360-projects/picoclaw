@@ -670,43 +670,76 @@ func (ab *AgentBridge) ExpireStaleTranscript(sessionKey string) {
 // FinalizeSessionSummary summarizes the completed voice session even when the
 // rolling context threshold was not reached during the call.
 func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey string) (string, int, error) {
-	if ab == nil {
-		return "", 0, nil
-	}
-	return ab.FinalizeSessionSummaryFrom(ctx, sessionKey, ab.TranscriptSnapshot())
-}
-
-// FinalizeSessionSummaryFrom is FinalizeSessionSummary for a session whose
-// turns this bridge never saw, so it cannot supply the fallback transcript
-// itself. That is every gptlive session: the gptLivePipeline owns the
-// transcript and the bridge is only present for its provider, workspace and
-// session store, so ab.TranscriptSnapshot() is empty and the summary — and with
-// it the MEMORY.md append that is the only cross-session continuity a character
-// has — would always come out blank.
-//
-// fallback is used exactly where ab.TranscriptSnapshot() was used before: only
-// when the session store has no history for sessionKey.
-func (ab *AgentBridge) FinalizeSessionSummaryFrom(
-	ctx context.Context, sessionKey string, fallback []PersistedChatMessage,
-) (string, int, error) {
 	if ab == nil || ab.sessions == nil {
 		return "", 0, nil
 	}
 
+	// Unchanged: the store's history wins, and this bridge's own recorded
+	// transcript is only a fallback for when the store has nothing.
 	history := ab.sessions.GetHistory(sessionKey)
 	if len(history) == 0 {
-		for _, msg := range fallback {
-			role := "assistant"
-			if msg.ChatType == chatTypeUser {
-				role = "user"
-			}
-			if strings.TrimSpace(msg.Content) == "" {
-				continue
-			}
-			history = append(history, providers.Message{Role: role, Content: msg.Content})
-		}
+		history = transcriptAsMessages(ab.TranscriptSnapshot())
 	}
+	return ab.summarizeSessionHistory(ctx, sessionKey, history)
+}
 
+// FinalizeSessionSummaryOf summarizes an EXPLICIT transcript, which REPLACES
+// whatever the session store holds for sessionKey rather than deferring to it.
+// That direction is the whole point, and getting it wrong was a real bug: the
+// first version of this took the transcript as a fallback, the way
+// FinalizeSessionSummary does, and was therefore correct only on a device with
+// no stored history.
+//
+// The store is disk-backed JSONL keyed stably per device and character, and
+// nothing on the gptlive path ever writes to it — AddMessage is only reached
+// from ChatStream, which is cascade-only. So on a device that ran cascade
+// yesterday and gptlive today, GetHistory returns YESTERDAY'S cascade turns,
+// this session's real transcript is discarded, and what gets appended to
+// MEMORY.md is a re-summary of the old conversation — every session, forever.
+// The dev box takes over the agent name for every device, so the devices it
+// serves are precisely the ones with cascade history.
+//
+// An empty transcript returns "" rather than the stored summary. A gptlive
+// session that produced no turns has nothing to say, and handing back the
+// previous summary would make persistGPTLiveSessionTail re-append that stale
+// text to MEMORY.md — the same repeat-forever failure through a narrower door.
+func (ab *AgentBridge) FinalizeSessionSummaryOf(
+	ctx context.Context, sessionKey string, transcript []PersistedChatMessage,
+) (string, int, error) {
+	if ab == nil || ab.sessions == nil {
+		return "", 0, nil
+	}
+	history := transcriptAsMessages(transcript)
+	if len(history) == 0 {
+		return "", 0, nil
+	}
+	return ab.summarizeSessionHistory(ctx, sessionKey, history)
+}
+
+// transcriptAsMessages converts persisted chat turns into provider messages,
+// dropping blank content. Extracted verbatim from FinalizeSessionSummary's own
+// fallback loop so both entry points build the history identically.
+func transcriptAsMessages(transcript []PersistedChatMessage) []providers.Message {
+	var history []providers.Message
+	for _, msg := range transcript {
+		role := "assistant"
+		if msg.ChatType == chatTypeUser {
+			role = "user"
+		}
+		if strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		history = append(history, providers.Message{Role: role, Content: msg.Content})
+	}
+	return history
+}
+
+// summarizeSessionHistory is the shared tail of both Finalize entry points,
+// extracted unchanged: filter to real user/assistant turns, summarize them
+// against the existing rolling summary, and store the result.
+func (ab *AgentBridge) summarizeSessionHistory(
+	ctx context.Context, sessionKey string, history []providers.Message,
+) (string, int, error) {
 	batch := make([]providers.Message, 0, len(history))
 	for _, msg := range history {
 		if (msg.Role == "user" || msg.Role == "assistant") && strings.TrimSpace(msg.Content) != "" {

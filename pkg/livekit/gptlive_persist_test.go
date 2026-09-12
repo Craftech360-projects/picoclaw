@@ -143,8 +143,10 @@ func TestPersistGPTLiveSessionSendsUsageAndTranscript(t *testing.T) {
 
 	// bridge is nil here: this test is only about the manager-API payloads, and
 	// the summary/MEMORY.md/trace tail that a real bridge drives has its own
-	// test below.
-	rs.persistGPTLiveSession(p, nil)
+	// test below. With no bridge there is no deferred tail to run.
+	if tail := rs.persistGPTLiveSession(p, nil); tail != nil {
+		t.Fatal("no bridge means no deferred tail")
+	}
 
 	if !chatHistoryHit {
 		t.Error("chat-history endpoint was never hit")
@@ -213,7 +215,9 @@ func TestPersistGPTLiveSessionWithNoUsageSkipsUsagePost(t *testing.T) {
 		roomInfo:         &protocol.Room{Name: "session-1"},
 	}
 
-	rs.persistGPTLiveSession(p, nil)
+	if tail := rs.persistGPTLiveSession(p, nil); tail != nil {
+		t.Fatal("no bridge means no deferred tail")
+	}
 
 	if chatHistoryHit {
 		t.Error("chat-history endpoint was hit for an empty transcript; sendChatHistory should have no-op'd")
@@ -306,7 +310,9 @@ func TestPersistGPTLiveSessionRunsTheFullPostSessionTail(t *testing.T) {
 		gptLiveSpec:      &GPTLiveSessionSpec{Quiz: tracker},
 	}
 
-	rs.persistGPTLiveSession(p, bridge)
+	// leave() runs the returned tail after room.Disconnect() (re-review, New
+	// Important 2); with no room to disconnect here, run it inline.
+	rs.persistGPTLiveSession(p, bridge)()
 
 	// Important 5: the unfinished question's tries were reported.
 	select {
@@ -386,7 +392,7 @@ func TestPersistGPTLiveSessionWritesMemoryWithNoManagerAPI(t *testing.T) {
 	p.onEvent(gptlive.UserTranscript{ID: "u1", Text: "tell me about trains", Final: true})
 
 	rs := &RoomSession{roomInfo: &protocol.Room{Name: "session-nomanager"}}
-	rs.persistGPTLiveSession(p, bridge)
+	rs.persistGPTLiveSession(p, bridge)()
 
 	memory, err := os.ReadFile(filepath.Join(workspace, "memory", "MEMORY.md"))
 	if err != nil {
@@ -394,5 +400,173 @@ func TestPersistGPTLiveSessionWritesMemoryWithNoManagerAPI(t *testing.T) {
 	}
 	if !strings.Contains(string(memory), "the child answered the spider question") {
 		t.Errorf("MEMORY.md is missing the summary:\n%s", memory)
+	}
+}
+
+// TestGPTLiveSlowTailIsDeferredPastTheDisconnect covers the re-review's New
+// Important 2. Adding the session summary put a 60s-bounded LLM call in front
+// of room.Disconnect(), on a path previously capped around 15s: after
+// handleGPTLiveEndPrompt speaks the farewell and calls Leave(), a slow provider
+// would hold the child in a connected room with a silent agent for up to about
+// 75 seconds — the same symptom Important 1 existed to prevent, through a
+// different door.
+//
+// persistGPTLiveSession therefore RETURNS the slow half instead of running it,
+// and leave() invokes that after room.Disconnect(). This asserts the split
+// holds: the fast manager POSTs happen during the call, and nothing that
+// touches the provider does, until the returned closure is run.
+func TestGPTLiveSlowTailIsDeferredPastTheDisconnect(t *testing.T) {
+	workspace := t.TempDir()
+	usageHit := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/device/token-usage" {
+			usageHit = true
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	provider := &stubSummaryProvider{}
+	bridge := &AgentBridge{
+		agentInstance: &agent.AgentInstance{Workspace: workspace},
+		characterName: "Quizzy",
+		sessions:      newStubSessionStore(),
+		provider:      provider,
+		modelID:       "stub",
+	}
+	p := &gptLivePipeline{}
+	p.onEvent(gptlive.UserTranscript{ID: "u1", Text: "hello there", Final: true})
+	p.onEvent(gptlive.BackendUsage{Total: 10, Input: 6, Output: 4})
+
+	rs := &RoomSession{
+		managerAPIURL:    server.URL,
+		managerAPISecret: "secret",
+		deviceMAC:        "aa:bb:cc:dd:ee:ff",
+		roomInfo:         &protocol.Room{Name: "session-deferred"},
+	}
+
+	tail := rs.persistGPTLiveSession(p, bridge)
+
+	// Everything up to this point is what runs while the child is still in the
+	// room. The usage POST is bounded and belongs here.
+	if !usageHit {
+		t.Error("the bounded manager POSTs should still run before the disconnect")
+	}
+	if provider.summarizedPrompt() != "" {
+		t.Fatal("the summary's LLM call ran before room.Disconnect(): a slow provider would hold the child " +
+			"in a connected room with a silent agent for up to a minute")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "memory", "MEMORY.md")); err == nil {
+		t.Error("MEMORY.md was written before the disconnect; it depends on the summary and must be deferred too")
+	}
+
+	if tail == nil {
+		t.Fatal("persistGPTLiveSession must return the deferred tail, or the summary never runs at all")
+	}
+	tail()
+
+	if provider.summarizedPrompt() == "" {
+		t.Error("the deferred tail did not run the summary")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "memory", "MEMORY.md")); err != nil {
+		t.Errorf("MEMORY.md was never written by the deferred tail: %v", err)
+	}
+}
+
+// TestGPTLiveSummaryIgnoresStaleSessionStoreHistory covers the re-review's New
+// Important 1.
+//
+// The session store is disk-backed JSONL keyed stably per device and character,
+// and NOTHING on the gptlive path ever writes to it — AddMessage is only
+// reached from ChatStream, which is cascade-only. The first version of the
+// Important 2 fix passed the gptlive transcript as a FALLBACK, used only when
+// ab.sessions.GetHistory(sessionKey) came back empty. On a device that ran
+// cascade yesterday and gptlive today, that store is NOT empty: it holds
+// yesterday's cascade turns. The gptlive transcript was discarded, and what got
+// appended to MEMORY.md was a re-summary of the old conversation — every
+// session, forever. The dev box takes over the agent name for every device, so
+// the devices it serves are exactly the ones with cascade history; this would
+// have fired on essentially every session there.
+//
+// The earlier tail test passes with the bug present because its stub store is
+// empty, which is only the clean-device case. This one seeds the store first.
+func TestGPTLiveSummaryIgnoresStaleSessionStoreHistory(t *testing.T) {
+	workspace := t.TempDir()
+	provider := &stubSummaryProvider{}
+	store := newStubSessionStore()
+
+	rs := &RoomSession{
+		deviceMAC: "aa:bb:cc:dd:ee:ff",
+		agentID:   "11111111-2222-3333-4444-555555555555",
+		roomInfo:  &protocol.Room{Name: "session-stale"},
+	}
+	// Yesterday's cascade session, under the exact key this session will use.
+	store.SetHistory(rs.sessionKeyForParticipant(""), []providers.Message{
+		{Role: "user", Content: "tell me about DINOSAURS"},
+		{Role: "assistant", Content: "the stegosaurus had plates"},
+	})
+
+	bridge := &AgentBridge{
+		agentInstance: &agent.AgentInstance{Workspace: workspace},
+		characterName: "Quizzy",
+		sessions:      store,
+		provider:      provider,
+		modelID:       "stub",
+	}
+
+	p := &gptLivePipeline{}
+	p.onEvent(gptlive.UserTranscript{ID: "u1", Text: "spiders have eight legs", Final: true})
+	p.onEvent(gptlive.AgentTranscript{ID: "a1", Delta: "exactly right", Text: "exactly right"})
+	p.onBurstClose()
+
+	rs.persistGPTLiveSession(p, bridge)()
+
+	prompt := provider.summarizedPrompt()
+	if strings.Contains(prompt, "DINOSAURS") || strings.Contains(prompt, "stegosaurus") {
+		t.Errorf("the summarizer was given YESTERDAY's stored cascade turns; this session's transcript must "+
+			"override the store, not fall back to it. Prompt was:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "spiders have eight legs") {
+		t.Errorf("the summarizer was not given this gptlive session's own transcript. Prompt was:\n%s", prompt)
+	}
+}
+
+// TestGPTLiveSummaryOfAnEmptySessionIsBlank is the narrower door into the same
+// repeat-forever failure: a gptlive session that produced no turns at all must
+// not hand back the STORED summary, because persistGPTLiveSessionTail would
+// then re-append that stale text to MEMORY.md on every such session.
+func TestGPTLiveSummaryOfAnEmptySessionIsBlank(t *testing.T) {
+	store := newStubSessionStore()
+	rs := &RoomSession{deviceMAC: "aa:bb:cc:dd:ee:ff", roomInfo: &protocol.Room{Name: "session-empty"}}
+	store.SetSummary(rs.sessionKeyForParticipant(""), "yesterday they talked about dinosaurs")
+
+	bridge := &AgentBridge{sessions: store, provider: &stubSummaryProvider{}, modelID: "stub"}
+
+	summary, count, err := bridge.FinalizeSessionSummaryOf(context.Background(), rs.sessionKeyForParticipant(""), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "" || count != 0 {
+		t.Errorf("a gptlive session with no turns must summarize to nothing, got %q (%d messages) — returning "+
+			"the stored summary would re-append it to MEMORY.md every time", summary, count)
+	}
+}
+
+// TestCascadeFinalizeSessionSummaryStillPrefersTheStore pins the direction the
+// CASCADE depends on, which New Important 1's fix must not have flipped: there,
+// the store's history is authoritative and the bridge's own transcript is only
+// consulted when the store has nothing.
+func TestCascadeFinalizeSessionSummaryStillPrefersTheStore(t *testing.T) {
+	provider := &stubSummaryProvider{}
+	store := newStubSessionStore()
+	store.SetHistory("k", []providers.Message{{Role: "user", Content: "the stored cascade turn"}})
+	bridge := &AgentBridge{sessions: store, provider: provider, modelID: "stub"}
+
+	if _, _, err := bridge.FinalizeSessionSummary(context.Background(), "k"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(provider.summarizedPrompt(), "the stored cascade turn") {
+		t.Errorf("FinalizeSessionSummary must still summarize the session store's history for cascade "+
+			"sessions; prompt was:\n%s", provider.summarizedPrompt())
 	}
 }

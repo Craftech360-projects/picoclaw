@@ -266,22 +266,28 @@ func (rs *RoomSession) finalizeAndPersistSessionSummary(bridge *AgentBridge) (st
 	if rs == nil || bridge == nil {
 		return "", 0
 	}
-	// bridge.TranscriptSnapshot() is exactly what FinalizeSessionSummary used
-	// internally as its fallback, so this is the same call it always made.
-	return rs.finalizeAndPersistSessionSummaryFrom(bridge, bridge.TranscriptSnapshot())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return rs.logFinalizedSummary(bridge.FinalizeSessionSummary(ctx, rs.sessionKeyForParticipant("")))
 }
 
-// finalizeAndPersistSessionSummaryFrom is finalizeAndPersistSessionSummary with
-// the fallback transcript supplied by the caller, for the gptlive path where
-// the bridge holds none of the session's turns (see FinalizeSessionSummaryFrom).
-func (rs *RoomSession) finalizeAndPersistSessionSummaryFrom(bridge *AgentBridge, transcript []PersistedChatMessage) (string, int) {
+// finalizeAndPersistSessionSummaryOf is finalizeAndPersistSessionSummary for a
+// transcript the caller owns, which REPLACES the session store's history rather
+// than falling back to it (see FinalizeSessionSummaryOf for why that direction
+// matters). Used by the gptlive path, where the bridge holds none of the
+// session's turns but the store may still hold a previous cascade session's.
+func (rs *RoomSession) finalizeAndPersistSessionSummaryOf(bridge *AgentBridge, transcript []PersistedChatMessage) (string, int) {
 	if rs == nil || bridge == nil {
 		return "", 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	return rs.logFinalizedSummary(bridge.FinalizeSessionSummaryOf(ctx, rs.sessionKeyForParticipant(""), transcript))
+}
 
-	summary, messageCount, err := bridge.FinalizeSessionSummaryFrom(ctx, rs.sessionKeyForParticipant(""), transcript)
+// logFinalizedSummary is the shared logging/validation tail of both, extracted
+// unchanged.
+func (rs *RoomSession) logFinalizedSummary(summary string, messageCount int, err error) (string, int) {
 	if err != nil {
 		logger.WarnCF("livekit", "Failed to finalize session summary", map[string]any{
 			"room":  rs.roomName(),

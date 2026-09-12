@@ -385,6 +385,10 @@ func (rs *RoomSession) leave() {
 		})
 	}
 
+	// gptliveTail is the slow half of the gptlive post-session tail (the LLM
+	// summary and what depends on it), deliberately deferred until after the
+	// room has been disconnected — see persistGPTLiveSession's doc comment.
+	var gptliveTail func()
 	if gptlivePipeline != nil {
 		// Close before persist, not after (Task 12 review, Important 4): Close's
 		// sess.Close is what makes the service send its final usage report — the
@@ -405,7 +409,10 @@ func (rs *RoomSession) leave() {
 		// two simultaneously-ready cases). Wait for pumpEvents to have actually
 		// exited before reading anything it wrote.
 		gptlivePipeline.WaitForEventsDrain(2 * time.Second)
-		rs.persistGPTLiveSession(gptlivePipeline, bridge)
+		// The slow half comes back as a closure and is run after
+		// room.Disconnect() below, so the child is released from the call
+		// before the summary's LLM round trip (re-review, New Important 2).
+		gptliveTail = rs.persistGPTLiveSession(gptlivePipeline, bridge)
 	}
 
 	// persistPostSessionData reads bridge.UsageSnapshot()/TranscriptSnapshot(),
@@ -446,6 +453,13 @@ func (rs *RoomSession) leave() {
 	}
 	if room != nil {
 		room.Disconnect()
+	}
+	// After the disconnect, before bridge.Close(): the child is already out of
+	// the call, so the summary's round trip costs them nothing, and the bridge
+	// (its provider, its session store and the workspace lock the MEMORY.md
+	// write needs) is still alive because Close is the very next statement.
+	if gptliveTail != nil {
+		gptliveTail()
 	}
 	if bridge != nil {
 		bridge.Close()
@@ -1326,9 +1340,27 @@ func (rs *RoomSession) roomSnapshot() *lksdk.Room {
 // it — plus kid_character_state frozen for the quiz characters and no summary
 // for the parent app to show. bridge is still non-nil here (main.go builds it
 // normally on this path), which is what makes the summary reachable at all.
-func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline, bridge *AgentBridge) {
+//
+// It returns the SLOW half of that tail — the summary and everything that
+// depends on it — for the caller to run after the room has been disconnected,
+// rather than running it here (re-review, New Important 2). Adding the
+// summary put a 60s-bounded LLM call in front of room.Disconnect(), on a path
+// that was previously capped around 15s: after handleGPTLiveEndPrompt speaks
+// the farewell and calls Leave(), a slow provider would hold the child in a
+// connected room with a silent agent for up to about 75 seconds. That is the
+// exact symptom Important 1 existed to prevent, arriving through a different
+// door, and a minute is far too long for a children's toy.
+//
+// Deferring rather than shortening the timeout is the better trade here: the
+// summary is the input to MEMORY.md, which is the only cross-session continuity
+// a character has, so it is worth the full quality budget — it just is not
+// worth the child's time. Nothing it needs dies at disconnect (the transcript
+// and usage are already snapshotted below, and the bridge is closed after it),
+// so the wait can simply happen with the call already ended. The returned
+// closure is nil when there is nothing to run.
+func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline, bridge *AgentBridge) (tail func()) {
 	if rs == nil || pipeline == nil {
-		return
+		return nil
 	}
 	messages := pipeline.TranscriptSnapshot()
 	usage := UsageSnapshot{
@@ -1368,7 +1400,12 @@ func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline, bridge *
 		logger.InfoCF("livekit", "gptlive: manager persistence disabled; file-memory mode only", map[string]any{"room": rs.roomName()})
 	}
 
-	rs.persistGPTLiveSessionTail(bridge, messages, usage, managerPersistenceEnabled)
+	if bridge == nil {
+		return nil
+	}
+	return func() {
+		rs.persistGPTLiveSessionTail(bridge, messages, usage, managerPersistenceEnabled)
+	}
 }
 
 // sendGPTLiveCharacterProgress is persistPostSessionData's character-progress
@@ -1431,7 +1468,7 @@ func (rs *RoomSession) persistGPTLiveSessionTail(
 		// the workspace lock and would clobber this MEMORY.md write anyway.
 		logger.InfoCF("livekit", "gptlive: skipping session summary on preempted handoff", map[string]any{"room": rs.roomName()})
 	} else {
-		summary, summaryMessageCount = rs.finalizeAndPersistSessionSummaryFrom(bridge, messages)
+		summary, summaryMessageCount = rs.finalizeAndPersistSessionSummaryOf(bridge, messages)
 	}
 
 	if summary != "" {

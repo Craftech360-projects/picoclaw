@@ -281,13 +281,18 @@ func (t *QuizTracker) FlushPendingAttempts() {
 		id       int64
 		attempts []QuizAttempt
 	)
-	if q := t.pendingLocked(); q != nil {
+	// The take and the decision to report are the same decision: an earlier
+	// version removed the buffered attempts first and then discarded the report
+	// when id happened to be 0, which silently lost those rows. Nothing in
+	// today's bank uses id 0, but "we deleted it and then dropped it" is not a
+	// property to leave lying around. Take only what will actually be reported.
+	if q := t.pendingLocked(); q != nil && len(t.attempts[q.ID]) > 0 {
 		id = q.ID
 		attempts = append([]QuizAttempt(nil), t.attempts[q.ID]...)
 		delete(t.attempts, q.ID)
 	}
 	t.mu.Unlock()
-	if id == 0 || len(attempts) == 0 {
+	if len(attempts) == 0 {
 		return
 	}
 	t.cfg.AttemptReporter(id, attempts)

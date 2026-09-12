@@ -290,6 +290,41 @@ func TestQuizFlushPendingAttemptsReportsTheUnfinishedQuestion(t *testing.T) {
 	}
 }
 
+// TestQuizFlushPendingAttemptsDoesNotDropRowsForQuestionIDZero covers the
+// consistency fix the re-review noted: the take and the decision to report must
+// be the same decision. An earlier version removed the buffered attempts under
+// the lock and THEN discarded the report when the id happened to be 0, which
+// silently lost those rows. Not reachable with today's bank, but "we deleted it
+// and then dropped it" is not a property worth leaving in place.
+func TestQuizFlushPendingAttemptsDoesNotDropRowsForQuestionIDZero(t *testing.T) {
+	type call struct {
+		id       int64
+		attempts []QuizAttempt
+	}
+	calls := make(chan call, 4)
+	batch := &QuizBatch{Level: 1, Band: "6-8", Bank: "quiz", Questions: []QuizQuestion{
+		{ID: 0, IDString: "0", Text: "What is two plus two?", Answer: "four"},
+	}}
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: t.TempDir(), MemoType: "daily_math",
+		AttemptReporter: func(questionID int64, attempts []QuizAttempt) {
+			calls <- call{id: questionID, attempts: attempts}
+		}})
+
+	if _, err := tr.Score("0", "miss", "five"); err != nil {
+		t.Fatal(err)
+	}
+	tr.FlushPendingAttempts()
+
+	select {
+	case c := <-calls:
+		if len(c.attempts) != 1 {
+			t.Errorf("attempt report carried %d attempts, want 1: %+v", len(c.attempts), c.attempts)
+		}
+	default:
+		t.Fatal("the buffered attempts for question id 0 were taken under the lock and then silently dropped")
+	}
+}
+
 // TestQuizStateTypesWrittenNamesTheMemoTypeOnceScored covers the other half of
 // the character-progress fix (Important 2): CollectStateMemos treats an empty
 // written-set as "this session persisted nothing", and on the gptlive path the
