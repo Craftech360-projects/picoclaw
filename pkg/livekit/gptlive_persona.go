@@ -2,6 +2,7 @@ package livekit
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
@@ -79,14 +80,48 @@ func gptLiveGreetingGuidance(characterName, greetingPrompt string) string {
 		"\n</greeting_guidance>"
 }
 
+// gptLiveMachineBookkeepingLineRE matches whole MEMO:/QUIZ_BANK: header lines —
+// the machine-readable bookkeeping memory/state/*.md files begin with (see
+// quiz_state.go's WriteQuizBankState and pkg/agent/memory.go's ReadStateFiles).
+// Under the cascade, voiceMemoLineRE (audio_pipeline.go) strips a MEMO line
+// from the model's TEXT OUTPUT before TTS ever speaks it. GPT-Live has no text
+// stage — the voice model speaks directly from Persona.Voice — so any such
+// header line reaching Voice gets read aloud verbatim: production logged a
+// companion MEMO line recited to a child. This regex mirrors voiceMemoLineRE's
+// shape (line-anchored, case-insensitive) and additionally covers QUIZ_BANK:,
+// the other state-file header format. Deliberately a sibling of
+// voiceMemoLineRE, not a change to it: the cascade's own filtering must stay
+// byte-identical.
+var gptLiveMachineBookkeepingLineRE = regexp.MustCompile(`(?im)^[ \t]*(?:memo|quiz_bank)\s*:.*$`)
+
+// gptLiveBlankRunRE collapses the run of blank lines a removed header line
+// leaves behind (its content is gone but the line's own newline remains) down
+// to a single blank line, so Voice instructions never carry runs of empty
+// lines where a MEMO: or QUIZ_BANK: line used to be.
+var gptLiveBlankRunRE = regexp.MustCompile(`\n{3,}`)
+
+// stripGPTLiveMachineLines removes whole MEMO:/QUIZ_BANK: header lines from
+// text bound for the voice model. It must be applied only to material that
+// feeds Persona.Voice, never to Persona.Backend: the backend reasoning model
+// may legitimately see this bookkeeping (it is the one that acts on it).
+// Everything else in a state file — human-readable sections such as "Last
+// Time You Wondered" or "Today's Wonder Question" — is left untouched; only
+// lines that themselves start with the header survive.
+func stripGPTLiveMachineLines(s string) string {
+	stripped := gptLiveMachineBookkeepingLineRE.ReplaceAllString(s, "")
+	return gptLiveBlankRunRE.ReplaceAllString(stripped, "\n\n")
+}
+
 // BuildGPTLivePersona composes the voice instructions, backend instructions and greeting
 // commentary for a GPT-Live session. It is called once at session start; nothing it
 // produces changes for the rest of the session.
 func BuildGPTLivePersona(in GPTLivePersonaInput) GPTLivePersona {
-	base := agent.NewContextBuilder(in.Workspace).BuildSystemPrompt()
+	base := stripGPTLiveMachineLines(agent.NewContextBuilder(in.Workspace).BuildSystemPrompt())
 	parts := []string{base, gptLiveDelegationBlock(in.LanguageName, in.HasQuiz)}
-	if strings.TrimSpace(in.BankBlock) != "" {
-		parts = append(parts, in.BankBlock)
+	if trimmedBank := strings.TrimSpace(in.BankBlock); trimmedBank != "" {
+		if voiceBank := strings.TrimSpace(stripGPTLiveMachineLines(in.BankBlock)); voiceBank != "" {
+			parts = append(parts, voiceBank)
+		}
 	}
 	if in.Accent == "indian" {
 		parts = append(parts, strings.TrimSpace(gptLiveAccentIndian))

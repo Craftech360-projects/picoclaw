@@ -139,6 +139,115 @@ func TestBuildGPTLivePersonaVoiceCarriesFullGreetingGuidance(t *testing.T) {
 	}
 }
 
+// TestStripGPTLiveMachineLines pins the pure-function behavior stripGPTLiveMachineLines
+// relies on: MEMO: and QUIZ_BANK: header lines are removed line-anchored and
+// case-insensitively (mirroring voiceMemoLineRE), everything else survives, and a run of
+// blank lines the removal leaves behind collapses to a single blank line.
+func TestStripGPTLiveMachineLines(t *testing.T) {
+	in := "## Heading\n" +
+		"quiz_bank: type=quiz_bank | date=2026-08-20\n\n" +
+		"Some human text.\n" +
+		"  MEMO: type=companion | date=2025-03-08 | parent_summary=hi\n" +
+		"More human text that must survive."
+	out := stripGPTLiveMachineLines(in)
+	if strings.Contains(strings.ToLower(out), "memo:") || strings.Contains(strings.ToLower(out), "quiz_bank:") {
+		t.Errorf("machine header lines must be gone, got %q", out)
+	}
+	for _, want := range []string{"## Heading", "Some human text.", "More human text that must survive."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stripping must not remove %q, got %q", want, out)
+		}
+	}
+	if strings.Contains(out, "\n\n\n") {
+		t.Errorf("blank-line runs left by removed headers must collapse, got %q", out)
+	}
+}
+
+// TestBuildGPTLivePersonaStripsMemoLineFromVoice reproduces the production bug: a
+// memory/state/*.md file begins with a machine-readable "MEMO: ..." header line (see
+// pkg/agent/memory.go's ReadStateFiles, which labels these files "small runtime-managed
+// files ... written by the voice worker", and quiz_state.go's per-type state files), and
+// that header text reached Persona.Voice verbatim and got spoken to the child:
+// "MEMO: type=companion | date=2025-03-08 | topics=greeting and asked about his day | ...
+// parent_summary=Cheeko greeted Hitansh [happy". Under the cascade, voiceMemoLineRE
+// (audio_pipeline.go) strips a MEMO line from the model's TEXT before TTS ever speaks it;
+// GPT-Live's voice model speaks Voice directly with no text stage, so nothing filtered it.
+// BankBlock is the channel real GPT-Live sessions use to carry saved/rendered state-shaped
+// text into Voice (see cmd/picoclaw-livekit/main.go's bankBlockForSession), so this test
+// feeds it a header in the exact shape a state file uses, verbatim from the production log.
+func TestBuildGPTLivePersonaStripsMemoLineFromVoice(t *testing.T) {
+	ws := t.TempDir()
+	memoLine := "MEMO: type=companion | date=2025-03-08 | topics=greeting and asked about his day | " +
+		"feeling=NONE | promised=NONE | handoff=NONE | parent_summary=Cheeko greeted Hitansh [happy"
+	before := "Some saved detail before."
+	after := "Some other saved note the character should still see."
+	// The header sits mid-block, preceded and followed by prose - the shape
+	// pkg/agent/memory.go's ReadStateFiles produces (a "### <file>.md" label, then the
+	// file's own header line, then human text). This also exercises requirement 5: a plain
+	// deletion of just the header's own text leaves two blank lines (four newlines) behind,
+	// which must collapse to one.
+	block := before + "\n\n" + memoLine + "\n\n" + after
+	p := BuildGPTLivePersona(GPTLivePersonaInput{
+		Workspace: ws, CharacterName: "Cheeko",
+		BankBlock: block,
+	})
+	if strings.Contains(p.Voice, "MEMO:") {
+		t.Errorf("Voice must not contain a MEMO: line, got %q", p.Voice)
+	}
+	start, end := strings.Index(p.Voice, before), strings.Index(p.Voice, after)
+	if start == -1 || end == -1 {
+		t.Fatalf("stripping the MEMO header must not remove the rest of the block, got %q", p.Voice)
+	}
+	if section := p.Voice[start : end+len(after)]; strings.Contains(section, "\n\n\n") {
+		t.Errorf("stripping the header must collapse the blank-line run it leaves behind, got %q", section)
+	}
+	// Requirement 3: the backend reasoning model may legitimately see this bookkeeping.
+	if !strings.Contains(p.Backend, memoLine) {
+		t.Errorf("Backend must keep the MEMO bookkeeping verbatim - stripping is voice-only, got %q", p.Backend)
+	}
+}
+
+// TestBuildGPTLivePersonaStripsQuizBankHeaderKeepsWonderContent pins requirement 2 of the
+// MEMO-leak fix: memory/state/quiz_bank.md (built by quiz_state.go's WriteQuizBankState)
+// begins with a machine "QUIZ_BANK: ..." header line the child must never hear, immediately
+// followed by human-readable sections - "Last Time You Wondered" and "Today's Wonder
+// Question" - that the voice model genuinely needs to open the session correctly. Only the
+// header line may go; getting this wrong (stripping too much) is exactly the failure mode
+// the fix must avoid.
+func TestBuildGPTLivePersonaStripsQuizBankHeaderKeepsWonderContent(t *testing.T) {
+	ws := t.TempDir()
+	wonderCallback := "Before the quiz, delight the child by remembering what THEY said. You asked them " +
+		"\"Where does the wind start?\" and they answered \"From the trees\". Open with a warm callback."
+	wonderQuestion := "When the session ends, leave the child with EXACTLY this question, in your own warm " +
+		"words but the same question: \"What do fish dream about?\" (code WQ-FISH-01)."
+	quizBankFile := "QUIZ_BANK: type=quiz_bank | date=2026-08-20 | bank=math | level=4 | band=all | replay=false\n\n" +
+		"## Last Time You Wondered\n" + wonderCallback + "\n\n" +
+		"## Today's Wonder Question\n" + wonderQuestion + "\n"
+	p := BuildGPTLivePersona(GPTLivePersonaInput{
+		Workspace: ws, CharacterName: "Quizzy", HasQuiz: true,
+		BankBlock: quizBankFile,
+	})
+	if strings.Contains(p.Voice, "QUIZ_BANK:") {
+		t.Errorf("Voice must not contain a QUIZ_BANK: header line, got %q", p.Voice)
+	}
+	for _, want := range []string{"## Last Time You Wondered", wonderCallback, "## Today's Wonder Question", wonderQuestion} {
+		if !strings.Contains(p.Voice, want) {
+			t.Errorf("Voice must keep %q verbatim, got %q", want, p.Voice)
+		}
+	}
+	start, end := strings.Index(p.Voice, "## Last Time You Wondered"), strings.Index(p.Voice, wonderQuestion)
+	if start == -1 || end == -1 {
+		t.Fatalf("expected both wonder sections in Voice, got %q", p.Voice)
+	}
+	if section := p.Voice[start : end+len(wonderQuestion)]; strings.Contains(section, "\n\n\n") {
+		t.Errorf("stripping the header must not leave a run of blank lines, got %q", section)
+	}
+	// Requirement 3: the backend reasoning model may legitimately see this bookkeeping.
+	if !strings.Contains(p.Backend, "QUIZ_BANK:") || !strings.Contains(p.Backend, quizBankFile) {
+		t.Errorf("Backend must keep the full QUIZ_BANK block verbatim - stripping is voice-only, got %q", p.Backend)
+	}
+}
+
 // TestBuildGPTLivePersonaEmptyGreetingPrompt pins the fallback greeting used when the
 // character has no configured greeting_prompt: buildGreetingInstruction's generic
 // "introduce yourself" text, not an empty or malformed string.
