@@ -42,8 +42,15 @@ type RoomSession struct {
 	participant    *ParticipantState
 	activePipeline *AudioPipeline
 	gptLiveSpec    *GPTLiveSessionSpec // set from RoomSessionConfig.GPTLive; nil for a cascade session
-	gptlive        *gptLivePipeline    // non-nil only once Join has started a GPT-Live session
-	remoteAudioSID string              // SID of the first subscribed remote audio track
+	// gptlive is constructed synchronously in NewRoomSession — before Join ever
+	// registers callbacks or connects to the room — specifically so it is never
+	// nil by the time handleTrackSubscribed/handleDataMessage/handleEndPrompt
+	// can possibly run (Task 12 review, Critical 1: OnTrackSubscribed is
+	// registered before ConnectToRoomWithToken, so a device already in the room
+	// could otherwise be routed to the cascade while GPT-Live's own Dial, up to
+	// ~16s of timeout+retries, is still in flight). Join only calls Start on it.
+	gptlive        *gptLivePipeline
+	remoteAudioSID string // SID of the first subscribed remote audio track
 	mu             sync.Mutex
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -137,7 +144,7 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		policy = NormalizeSessionLanguagePolicy(cfg.PrimaryLanguage, "")
 	}
 
-	return &RoomSession{
+	rs := &RoomSession{
 		worker:              cfg.Worker,
 		jobID:               cfg.JobID,
 		roomInfo:            cfg.RoomInfo,
@@ -161,7 +168,15 @@ func NewRoomSession(cfg RoomSessionConfig) (*RoomSession, error) {
 		deviceMAC:           deviceMAC,
 		agentID:             agentID,
 		gptLiveSpec:         cfg.GPTLive,
-	}, nil
+	}
+	if cfg.GPTLive != nil {
+		// Constructed here, synchronously, rather than in Join: see the
+		// gptlive field's doc comment on the struct for why this can't wait
+		// until Join gets around to it. newGPTLivePipeline does no I/O and
+		// cannot fail or block, so this is safe to do unconditionally.
+		rs.gptlive = newGPTLivePipeline(rs, *cfg.GPTLive)
+	}
+	return rs, nil
 }
 
 func managerAPIServiceKeyFromEnv() string {
@@ -273,18 +288,20 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 		"track_sid": rs.localTrackSID,
 	})
 
-	// GPT-Live replaces the cascade AudioPipeline entirely: dial the model now that
-	// the local track it will speak through exists, before any remote track can be
-	// subscribed. rs.ctx (not the ctx param) is what leave() cancels, so every pump
-	// goroutine the pipeline spawns stops when this session does.
+	// GPT-Live replaces the cascade AudioPipeline entirely: dial the model now
+	// that the local track it will speak through exists. rs.gptlive was already
+	// constructed in NewRoomSession (see its doc comment) — this only starts
+	// it, i.e. runs the actual (blocking, up to ~16s with retries) Dial.
 	if rs.gptLiveSpec != nil {
-		pipeline := newGPTLivePipeline(rs, *rs.gptLiveSpec)
+		rs.mu.Lock()
+		pipeline := rs.gptlive
+		rs.mu.Unlock()
+		if pipeline == nil {
+			return errors.New("gptlive: pipeline was not constructed for a GPT-Live session")
+		}
 		if err := pipeline.Start(rs.ctx); err != nil {
 			return fmt.Errorf("gptlive: start session: %w", err)
 		}
-		rs.mu.Lock()
-		rs.gptlive = pipeline
-		rs.mu.Unlock()
 	}
 
 	return nil
@@ -370,13 +387,19 @@ func (rs *RoomSession) leave() {
 	}
 
 	if gptlivePipeline != nil {
-		rs.persistGPTLiveSession(gptlivePipeline)
-		// Bounded independently of rs.ctx (already cancelled above): Close still
-		// needs to talk to the service (session.close, waiting for its usage) even
-		// though the local pump goroutines have already been told to stop.
+		// Close before persist, not after (Task 12 review, Important 4): Close's
+		// sess.Close is what makes the service send its final usage report — the
+		// Closed{VoiceSeconds} event — and waits for it. Persisting first would
+		// read voiceSeconds before that update can possibly have landed. This is
+		// safe even though rs.cancel() (above) already cancelled rs.ctx: the
+		// pipeline's own pump goroutines run on a context independent of rs.ctx
+		// precisely so they keep draining events through this call (see
+		// gptLivePipeline.Start's doc comment) — only Close's own p.cancel(),
+		// invoked internally after sess.Close returns, stops them.
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		gptlivePipeline.Close(closeCtx)
 		cancel()
+		rs.persistGPTLiveSession(gptlivePipeline)
 	}
 
 	// Persist usage + transcript before bridge/session teardown.
@@ -872,18 +895,18 @@ func (rs *RoomSession) generateFarewellTextNoPersist(ctx context.Context, prompt
 
 // handleGPTLiveEndPrompt is the GPT-Live equivalent of handleEndPrompt: there is no
 // cascade AudioPipeline/TTS to reuse, so the farewell is delivered as spoken
-// commentary through the live model itself, then the room is left. Unlike the
-// cascade path this does not wait on a farewell-generation LLM call (the voice
-// model composes its own words from the instruction), so the fixed pause below
-// stands in for "long enough for it to be spoken" rather than a synthesis deadline.
+// commentary through the live model itself, then the room is left. It waits for
+// the segmenter to signal the farewell burst closed (i.e. the model actually
+// finished speaking it), bounded by farewellBurstCloseTimeout and rs.ctx, rather
+// than sleeping a fixed duration that would ignore a disconnect mid-farewell
+// (Task 12 review).
 func (rs *RoomSession) handleGPTLiveEndPrompt(pipeline *gptLivePipeline, prompt string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		prompt = "It was so much fun talking with you! Take care and see you next time!"
 	}
 	logger.InfoCF("livekit", "gptlive: speaking farewell", map[string]any{"room": rs.roomInfo.Name})
-	pipeline.SayGoodbye(prompt)
-	time.Sleep(3 * time.Second)
+	pipeline.SayGoodbyeAndWait(rs.ctx, prompt, farewellBurstCloseTimeout)
 	rs.Leave()
 }
 
@@ -933,10 +956,42 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 	rs.bridge.ExpireStaleTranscript(ps.sessionKey)
 	rs.discardLegacyTranscript(ps.sessionKey)
 
-	rs.mu.Lock()
-	gptlivePipeline := rs.gptlive
-	rs.mu.Unlock()
-	if gptlivePipeline != nil {
+	// Gated on rs.gptLiveSpec, not rs.gptlive's dial state: gptLiveSpec is set
+	// once, synchronously, before NewRoomSession ever returns, so this decision
+	// is correct even though OnTrackSubscribed can fire before Join finishes
+	// connecting (Task 12 review, Critical 1). Falling through to the cascade
+	// below here would open an STT stream for a session that GPT-Live is
+	// supposed to own outright, and once rs.participant is set (a few lines up)
+	// this track is never re-offered — so the branch must never be missed.
+	if rs.gptLiveSpec != nil {
+		rs.mu.Lock()
+		gptlivePipeline := rs.gptlive
+		rs.mu.Unlock()
+		if gptlivePipeline == nil {
+			logger.ErrorCF("livekit", "gptlive: pipeline not constructed for a GPT-Live session", map[string]any{"room": rs.roomInfo.Name})
+			return
+		}
+		// Wait for Start's Dial to finish (success or failure) rather than
+		// proceeding immediately: Dial can block for up to ~16s (a 10s timeout,
+		// 3 retries at 2s), and wiring the track before it completes would need
+		// gptlivePipeline.spec/sess before Start has necessarily touched them.
+		select {
+		case <-gptlivePipeline.ready:
+		case <-rs.ctx.Done():
+			return
+		}
+		if gptlivePipeline.startErr != nil {
+			// No cascade fallback: a GPT-Live session that failed to dial has no
+			// STT/TTS of its own to fall back to. Join's own call to Start returns
+			// this same error, which the worker treats as a failed job and tears
+			// the room down (see worker.go's handling of Join's error) — this
+			// branch just needs to not wire a track into a session that will
+			// never receive it.
+			logger.ErrorCF("livekit", "gptlive: session failed to start; no audio pipeline for this track", map[string]any{
+				"room": rs.roomInfo.Name, "error": gptlivePipeline.startErr.Error(),
+			})
+			return
+		}
 		// No STT/VAD/turn-boundary plumbing for GPT-Live (ADR: continuous mic audio,
 		// the model's own segmenter is the only turn boundary): the remote track is
 		// wired straight to the pipeline, resampled to the session's own rate by
@@ -1191,9 +1246,27 @@ func (rs *RoomSession) setRemoteAudioTrackSID(sid string) {
 }
 
 func (rs *RoomSession) remoteAudioTrackSID() string {
+	if rs == nil {
+		return ""
+	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return rs.remoteAudioSID
+}
+
+// roomSnapshot returns the current *lksdk.Room (or nil once leave() has torn
+// it down), captured under rs.mu in one read. Used by gptLivePipeline instead
+// of a nil check followed by a separate read of rs.room: those are two
+// separate, unguarded reads of a field leave() clears under this same lock,
+// and a nil arriving between them would panic inside a pump goroutine — taking
+// down the whole worker, not just this session (Task 12 review, Critical 3).
+func (rs *RoomSession) roomSnapshot() *lksdk.Room {
+	if rs == nil {
+		return nil
+	}
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.room
 }
 
 // persistGPTLiveSession will persist the GPT-Live transcript and usage
