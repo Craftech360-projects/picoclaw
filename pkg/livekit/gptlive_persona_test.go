@@ -248,6 +248,74 @@ func TestBuildGPTLivePersonaStripsQuizBankHeaderKeepsWonderContent(t *testing.T)
 	}
 }
 
+// TestBuildGPTLivePersonaMemoOverrideAfterBasePersona pins the real fix for the production
+// bug: AGENT.md (folded into the base persona via BuildSystemPrompt) instructs the model to
+// SPEAK a "MEMO: ..." bookkeeping line at the end of a turn. stripGPTLiveMachineLines only
+// catches such a line when it already exists as stored text (e.g. via BankBlock) - it cannot
+// catch one the voice model generates live because the character guidance told it to. The
+// fix is an explicit override appended after the base persona telling the voice model to
+// ignore that instruction. This test asserts the override text is present in Voice and that
+// it appears strictly after the base persona's own MEMO-emitting instruction, so it reads as
+// a later override rather than being contradicted by something that follows it.
+func TestBuildGPTLivePersonaMemoOverrideAfterBasePersona(t *testing.T) {
+	ws := t.TempDir()
+	// The instruction to speak a memo line is embedded mid-sentence here, not as its own
+	// header line - the shape that survives stripGPTLiveMachineLines (line-anchored, only
+	// strips a line that itself STARTS with "memo:"/"quiz_bank:"). This is the real
+	// production shape: AGENT.md instructs the model, in prose, to generate a bookkeeping
+	// line at speech time; there is no stored "MEMO: ..." text for the stripper to remove.
+	agentMD := "You are Quizzy, the quiz master.\n\n" +
+		"At the end of every turn, say a MEMO: line summarizing what happened, shaped like " +
+		"type=companion | date=YYYY-MM-DD | topics=WHAT THEY TALKED ABOUT | feeling=NONE_or_FEELING - " +
+		"the runtime saves it automatically; never use tools.\n"
+	if err := os.WriteFile(filepath.Join(ws, "AGENT.md"), []byte(agentMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := BuildGPTLivePersona(GPTLivePersonaInput{
+		Workspace: ws, CharacterName: "Quizzy", HasQuiz: true,
+	})
+	basePersonaIdx := strings.Index(p.Voice, "quiz master")
+	if basePersonaIdx == -1 {
+		t.Fatalf("expected base persona text in Voice, got %q", p.Voice)
+	}
+	// The mid-sentence instruction must survive into Voice unstripped (it is not a header
+	// line) - this is what makes the override necessary in the first place.
+	memoInstructionIdx := strings.Index(p.Voice, "say a MEMO: line summarizing what happened")
+	if memoInstructionIdx == -1 {
+		t.Fatalf("expected the character's own memo-emitting instruction to survive into Voice, got %q", p.Voice)
+	}
+	for _, want := range []string{
+		"word MEMO or QUIZ_BANK", "pipe-delimited key=value",
+		"does not apply to you", "runtime records this session by itself",
+	} {
+		if !strings.Contains(p.Voice, want) {
+			t.Errorf("voice instructions missing override text %q, got %q", want, p.Voice)
+		}
+	}
+	overrideIdx := strings.Index(p.Voice, "Never say, spell out, or read aloud a bookkeeping or state line")
+	if overrideIdx == -1 {
+		t.Fatalf("expected the memo override sentence in Voice, got %q", p.Voice)
+	}
+	if overrideIdx <= memoInstructionIdx {
+		t.Errorf("memo override must appear AFTER the character's own memo-emitting instruction so it reads "+
+			"as an override, override at %d, character instruction at %d", overrideIdx, memoInstructionIdx)
+	}
+	// The persona's "never use tools" instruction must survive untouched: it remains true for
+	// the voice model (the backend does the tool calls), and only the MEMO emission itself is
+	// overridden.
+	if !strings.Contains(p.Voice, "never use tools") {
+		t.Error("the base persona's \"never use tools\" instruction must not be removed or contradicted")
+	}
+	// The override itself must not introduce a language or accent command of its own - that
+	// would risk reintroducing the accent-vs-language-lock contradiction a prior review
+	// flagged (see TestBuildGPTLivePersonaComposesWorkspaceAndRules).
+	for _, unwanted := range []string{"Speak English", "Speak Hindi", "<accent>"} {
+		if strings.Contains(gptLiveMemoOverride, unwanted) {
+			t.Errorf("memo override must not itself add a language/accent instruction, found %q", unwanted)
+		}
+	}
+}
+
 // TestBuildGPTLivePersonaEmptyGreetingPrompt pins the fallback greeting used when the
 // character has no configured greeting_prompt: buildGreetingInstruction's generic
 // "introduce yourself" text, not an empty or malformed string.
