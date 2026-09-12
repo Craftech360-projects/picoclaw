@@ -110,6 +110,7 @@ type Session struct {
 	delegationsMu    sync.Mutex // guards delegations and callToDelegation across the read goroutine and tool goroutines
 	delegations      map[string]*delegatedResponse
 	callToDelegation map[string]string
+	toolWG           sync.WaitGroup // one per in-flight executeCall goroutine; see closeChannelsWhenIdle
 
 	done chan struct{} // closed when the run loop exits
 }
@@ -363,8 +364,7 @@ func (s *Session) classify(err error) error {
 
 func (s *Session) run() {
 	defer close(s.done)
-	defer close(s.events)
-	defer close(s.audio)
+	defer s.closeChannelsWhenIdle()
 	conn, err := dialWebsocket(s.ctx, s.cfg)
 	if err != nil {
 		s.emit(Error{Err: err, Recoverable: false})
@@ -372,6 +372,39 @@ func (s *Session) run() {
 	}
 	if err := s.runOnce(conn); err != nil {
 		s.emit(Error{Err: err, Recoverable: false})
+	}
+}
+
+// closeChannelsWhenIdle closes events and audio once every executeCall goroutine
+// spawned by onResponseEvent has returned, so a FunctionResult in flight can never be
+// sent on an already-closed s.events (that send is a ready case in emit's select and
+// Go can pick it, which panics). By the time run calls this, the read goroutine has
+// already exited (runOnce only returns after it does), so no new tool goroutine can
+// start; toolWG can only count down from here.
+//
+// The wait is bounded by sessionCloseTimeout, the same bound Close already applies to
+// waiting for session.closed, so a tool that ignores ctx cancellation and never
+// returns cannot hang Close forever: run (and so Close's <-s.done) proceeds once that
+// bound passes. The channels themselves are only ever closed once toolWG actually
+// reaches zero, so that stalled call still cannot make emit panic later — the close is
+// simply finished in the background instead of inline.
+func (s *Session) closeChannelsWhenIdle() {
+	idle := make(chan struct{})
+	go func() {
+		s.toolWG.Wait()
+		close(idle)
+	}()
+	select {
+	case <-idle:
+		close(s.events)
+		close(s.audio)
+	case <-time.After(sessionCloseTimeout):
+		logger.WarnCF("gptlive", "closing session while a tool call is still running; deferring channel close", nil)
+		go func() {
+			<-idle
+			close(s.events)
+			close(s.audio)
+		}()
 	}
 }
 

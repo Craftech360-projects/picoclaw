@@ -84,6 +84,7 @@ func (s *Session) onResponseEvent(ev ServerEvent) {
 		s.delegationsMu.Unlock()
 		call := FunctionCall{CallID: item.CallID, Name: item.Name, Arguments: *item.Arguments}
 		s.emit(call)
+		s.toolWG.Add(1)
 		go s.executeCall(key, call)
 
 	case "response.completed":
@@ -118,11 +119,17 @@ func (s *Session) onResponseEvent(ev ServerEvent) {
 }
 
 // executeCall runs one backend function call on its own goroutine so a slow tool
-// never blocks the read loop. It respects s.ctx for both the tool deadline and the
-// eventual send, so it cannot outlive the session.
+// never blocks the read loop. The tool itself is bounded by a context derived from
+// s.ctx, and the eventual send respects s.ctx.Done() too, but neither guarantees this
+// goroutine finishes before the session's channels close if the executor ignores its
+// context — toolWG (Add in the caller, Done deferred here) is what run's
+// closeChannelsWhenIdle actually waits on to keep this goroutine from ever emitting or
+// sending on a channel the session has already closed.
 func (s *Session) executeCall(key string, call FunctionCall) {
+	defer s.toolWG.Done()
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+		logger.WarnCF("gptlive", "function call arguments are not valid JSON", map[string]any{"name": call.Name, "call_id": call.CallID})
 		args = map[string]any{}
 	}
 	output, isErr := "no tool executor configured", true
@@ -152,7 +159,15 @@ func (s *Session) executeCall(key string, call FunctionCall) {
 func (s *Session) maybeContinue(key string) {
 	s.delegationsMu.Lock()
 	pending := s.delegations[key]
-	if pending == nil || !pending.completed || len(pending.callIDs) == 0 {
+	if pending == nil || !pending.completed {
+		s.delegationsMu.Unlock()
+		return
+	}
+	if len(pending.callIDs) == 0 {
+		// Completed without ever calling a tool: nothing to continue, and nothing more
+		// will ever touch this key, so drop the stub entry now rather than leaving it
+		// for resetDelegations.
+		delete(s.delegations, key)
 		s.delegationsMu.Unlock()
 		return
 	}
