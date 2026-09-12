@@ -3672,24 +3672,58 @@ git commit -m "feat(picoclaw-livekit): select the GPT-Live pipeline per process 
 ssh root@64.227.170.31 'cd /root/picoclaw && git fetch origin && git checkout feat/gpt-live-go && export PATH=$PATH:/usr/local/go/bin && export CGO_LDFLAGS="-lc++ -lc++abi" && make build-livekit'
 ```
 
-- [ ] **Step 2: Stop the Python worker and start the Go one under the same agent name**
+- [ ] **Step 2: Take over the agent name the device and backend actually dispatch to**
 
-The Python `cheeko-gptlive` pm2 app registers the same agent name; two workers would split dispatches.
+**Amended 2026-09-12 on the user's instruction.** The original step registered the Go
+worker as `cheeko-gptlive`, alongside the cascade. That name is only reachable from the
+dashboard's GPT-Live tab, so a real device and the normal per-character backend flow
+never reach it. To test with the device, the backend and the dashboard across different
+characters, the Go worker must register the name those dispatches already use.
+
+Verified on the dev box 2026-09-12 (`pm2 jlist`):
+
+| pm2 app | agent name | what it is |
+|---|---|---|
+| `picoclaw-livekit` | `cheeko-agent` | the Go cascade worker — this is the name devices and the backend dispatch to |
+| `cheeko-gptlive` | `cheeko-gptlive` | the Python GPT-Live worker — reachable only from the dashboard's GPT-Live tab |
+
+The name to take over is therefore `cheeko-agent`, not `cheeko`. Two workers must never
+hold it at once or LiveKit splits dispatches between them, so the cascade app is stopped
+first.
+
+**Consequence, and why this needs the user's say-so each time:** while the Go worker holds
+`cheeko-agent`, *every* character on the dev box runs on GPT-Live. This is all-or-nothing
+and replaces the per-character `runtime_agent_name` routing of ADR-0002 for the duration.
+The dev box has no cascade fallback while this is in effect.
 
 ```bash
-ssh root@64.227.170.31 'pm2 stop cheeko-gptlive; cd /root/picoclaw && PICOCLAW_LIVEKIT_PIPELINE=gptlive OPENAI_API_KEY=$(grep ^OPENAI_API_KEY= /root/xiaozhi-esp32-server/main/python-agent/.env | cut -d= -f2-) pm2 start build/picoclaw-livekit --name picoclaw-gptlive --time -- --agent-name cheeko-gptlive --config /root/.picoclaw/config.json --log-level debug && pm2 save'
+ssh root@64.227.170.31 'pm2 stop picoclaw-livekit; cd /root/picoclaw && PICOCLAW_LIVEKIT_PIPELINE=gptlive OPENAI_API_KEY=$(grep ^OPENAI_API_KEY= /root/xiaozhi-esp32-server/main/python-agent/.env | cut -d= -f2-) pm2 start build/picoclaw-livekit --name picoclaw-gptlive --time -- --agent-name cheeko-agent --config /root/.picoclaw/config.json --log-level debug && pm2 save'
 ```
+
+Rollback, which restores the cascade for every character:
+
+```bash
+ssh root@64.227.170.31 'pm2 stop picoclaw-gptlive && pm2 start picoclaw-livekit && pm2 save'
+```
+
+Leave the Python `cheeko-gptlive` app running or stopped as the user prefers; it holds a
+different name and no longer conflicts.
 
 - [ ] **Step 3: Verify registration**
 
 ```bash
 ssh root@64.227.170.31 'pm2 logs picoclaw-gptlive --lines 40 --nostream | grep -E "registered|agent_name|error"'
 ```
-Expected: a registration line with `cheeko-gptlive` and no error.
+Expected: a registration line with `cheeko-agent` and no error. Also confirm the cascade
+app is stopped: `pm2 describe picoclaw-livekit` must not show `online`.
 
-- [ ] **Step 4: Verify from the dashboard**
+- [ ] **Step 4: Verify from the dashboard and a real device**
 
-Open the dev admin dashboard, GPT-Live tab, agent `cheeko-gptlive`, voice `vesper`, accent Indian English, Start. Expected: greeting within 5 s, transcripts for both sides, state pill moving listening → speaking, "what time is it" answered via the tool. Then with a Quizzy character (set the MAC to a device whose character is Quizzy): one question asked, a wrong answer produces the two-way choice, a right answer moves on, and `memory/state/daily_quiz.md` in that workspace holds the MEMO line.
+Because the Go worker now holds `cheeko-agent`, the normal dashboard flow and a real
+device both reach it, and characters can be switched the usual way rather than through
+the GPT-Live tab's fixed agent field. Test at least two characters with different tool
+sets — one conversational (Cheeko) and one scored (Quizzy) — since they exercise
+different backend tool paths. Expected: greeting within 5 s, transcripts for both sides, state pill moving listening → speaking, "what time is it" answered via the tool. Then with a Quizzy character (set the MAC to a device whose character is Quizzy): one question asked, a wrong answer produces the two-way choice, a right answer moves on, and `memory/state/daily_quiz.md` in that workspace holds the MEMO line.
 
 - [ ] **Step 5: Document and commit**
 
