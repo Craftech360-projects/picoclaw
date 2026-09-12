@@ -121,7 +121,17 @@ type gptLivePipeline struct {
 	transcript        []PersistedChatMessage
 	voiceSeconds      float64
 	backendTokens     int
-	cancel            context.CancelFunc
+	// backendInputTokens/backendOutputTokens are the Input/Output breakdown of
+	// every summed BackendUsage event (backendTokens is their Total, which the
+	// backend computes independently — see onEvent's BackendUsage case).
+	// persistGPTLiveSession needs these specifically: sendUsageSummary
+	// (post_session_persistence.go) treats InputTokens==0 && OutputTokens==0 as
+	// "nothing to report" and skips the POST entirely, so reporting only
+	// TotalTokens here would make every gptlive session's usage silently never
+	// reach /device/token-usage (Task 13 review, Critical 1).
+	backendInputTokens  int
+	backendOutputTokens int
+	cancel              context.CancelFunc
 }
 
 // newGPTLivePipeline builds the pipeline; call Start to dial the model and
@@ -455,8 +465,7 @@ func (p *gptLivePipeline) enqueuePublish(fn func()) {
 }
 
 func (p *gptLivePipeline) pumpEvents(ctx context.Context) {
-	// Closed on every return path (including via the ctx.Done() case racing a
-	// still-buffered final event — see eventsDone's doc comment) so
+	// Closed on every return path (including via drainEvents below) so
 	// WaitForEventsDrain can tell pumpEvents has actually stopped touching
 	// p.voiceSeconds/p.backendTokens/p.transcript, rather than inferring it
 	// from Close having returned.
@@ -469,8 +478,38 @@ func (p *gptLivePipeline) pumpEvents(ctx context.Context) {
 			}
 			p.onEvent(ev)
 		case <-ctx.Done():
+			// ctx (pctx) is only ever cancelled from Close, and only after
+			// sess.Close(ctx) has already returned (see Close's doc comment) —
+			// which per gptlive.Session.run/closeChannelsWhenIdle means
+			// p.sess.Events() is already closed by now. Closing a channel does
+			// NOT discard whatever was still buffered in it (in particular the
+			// final Closed{VoiceSeconds} event, sent just before the channel was
+			// closed): a plain `return` here, with the ctx.Done() case winning a
+			// select against an equally-ready buffered-event case at random
+			// (Task 12/13 review: "carried forward, not fixed"), could leave that
+			// event unread forever. Drain synchronously instead — see
+			// drainEvents's own doc comment for why this cannot block.
+			drainEvents(p.sess.Events(), p.onEvent)
 			return
 		}
+	}
+}
+
+// drainEvents receives from events until it reports closed, calling onEvent
+// for each value first. Split out from pumpEvents' ctx.Done() case
+// (Task 13 review, Important 2/3) so the "a closed channel still yields
+// whatever was buffered before it closed, in order, with no blocking" claim
+// pumpEvents relies on can be exercised directly with a synthetic channel
+// (TestDrainEventsProcessesBufferedEventsBeforeReturning) instead of only
+// through a real dial + fake server race that may or may not land the timing
+// window on a given run.
+func drainEvents(events <-chan gptlive.Event, onEvent func(gptlive.Event)) {
+	for {
+		ev, ok := <-events
+		if !ok {
+			return
+		}
+		onEvent(ev)
 	}
 }
 
@@ -534,10 +573,16 @@ func (p *gptLivePipeline) onEvent(ev gptlive.Event) {
 		p.voiceSeconds = e.Seconds
 		p.mu.Unlock()
 	case gptlive.BackendUsage:
-		// Total is per backend response (one per delegation), so summing across
-		// every response completed this session gives the session total.
+		// Total/Input/Output are all per backend response (one per delegation),
+		// so summing each across every response completed this session gives the
+		// session totals. Input/Output are tracked alongside Total (not just
+		// derived from it) because persistGPTLiveSession needs them specifically:
+		// sendUsageSummary skips its POST entirely when both are zero (Task 13
+		// review, Critical 1).
 		p.mu.Lock()
 		p.backendTokens += e.Total
+		p.backendInputTokens += e.Input
+		p.backendOutputTokens += e.Output
 		p.mu.Unlock()
 	case gptlive.Closed:
 		p.mu.Lock()
@@ -689,6 +734,22 @@ func (p *gptLivePipeline) BackendTokens() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.backendTokens
+}
+
+// BackendInputTokens/BackendOutputTokens are the Input/Output breakdown behind
+// BackendTokens' Total (see onEvent's BackendUsage case). persistGPTLiveSession
+// needs these specifically, not just the total: sendUsageSummary's own guard
+// skips the POST entirely when both are zero.
+func (p *gptLivePipeline) BackendInputTokens() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.backendInputTokens
+}
+
+func (p *gptLivePipeline) BackendOutputTokens() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.backendOutputTokens
 }
 
 // WaitForEventsDrain blocks until pumpEvents has actually returned (eventsDone

@@ -409,8 +409,19 @@ func (rs *RoomSession) leave() {
 		rs.persistGPTLiveSession(gptlivePipeline)
 	}
 
-	// Persist usage + transcript before bridge/session teardown.
-	rs.persistPostSessionData(bridge)
+	// persistPostSessionData reads bridge.UsageSnapshot()/TranscriptSnapshot(),
+	// which are the cascade AgentBridge's own counters — never touched by a
+	// gptlive session, so they are always zero/empty on that path and this call
+	// happens to no-op today via persistPostSessionData's own "nothing to
+	// persist" early return. Gating on gptlivePipeline == nil explicitly (Task
+	// 13 review, fold-in item) makes that skip a real invariant of this
+	// function rather than an accident of persistPostSessionData's current
+	// guard, which a future change to that guard (e.g. Critical 1's fix here
+	// widening it) could otherwise silently break.
+	if gptlivePipeline == nil {
+		// Persist usage + transcript before bridge/session teardown.
+		rs.persistPostSessionData(bridge)
+	}
 
 	if participant != nil {
 		participant.mu.Lock()
@@ -1284,19 +1295,23 @@ func (rs *RoomSession) roomSnapshot() *lksdk.Room {
 // time this is called.
 //
 // Callers must synchronize on pipeline.WaitForEventsDrain before calling this
-// (leave() does, right after Close): Close's own p.cancel() races the final
-// gptlive.Closed{VoiceSeconds} event that may still be sitting, unread, in
-// the pipeline's events channel at the moment sess.Close returns — Go's
-// select picks between two simultaneously-ready cases at random, so pumpEvents
-// processing that event before exiting on ctx.Done() is likely but not
-// guaranteed (see the gptLivePipeline.Close doc comment and Task 12's
-// "carried forward, not fixed" review note). Reading VoiceSeconds/
-// BackendTokens/TranscriptSnapshot before pumpEvents has actually exited
-// would risk reading them one event stale. WaitForEventsDrain is a no-op
-// when pumpEvents was never spawned at all (a dial failure, or finishStart's
-// own self-close path — see its doc comment): in that case voiceSeconds is
-// simply 0 and backendTokens 0, which is correct — the session never
-// produced any usage to report, not a lost update.
+// (leave() does, right after Close): pumpEvents' own ctx.Done() branch now
+// drains p.sess.Events() synchronously until it reports closed (Task 13
+// review, Important 2) rather than racing a select against a possibly still-
+// buffered final event, so WaitForEventsDrain having returned is a real
+// guarantee — not just a likely one — that VoiceSeconds/BackendTokens/
+// TranscriptSnapshot reflect the session's actual final state. WaitForEventsDrain
+// is a no-op when pumpEvents was never spawned at all (a dial failure, or
+// finishStart's own self-close path — see its doc comment): in that case every
+// counter is simply 0, which is correct — the session never produced any usage
+// to report, not a lost update.
+//
+// InputTokens/OutputTokens are populated from BackendInputTokens/
+// BackendOutputTokens, not left zero with only TotalTokens set (Task 13
+// review, Critical 1): sendUsageSummary's very first statement skips the POST
+// entirely when both are zero, so reporting only the total would silently
+// drop every gptlive session's usage — voice seconds, token total, and
+// duration alike — with no error, ever reaching /device/token-usage.
 func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline) {
 	if rs == nil || pipeline == nil || strings.TrimSpace(rs.managerAPIURL) == "" || strings.TrimSpace(rs.deviceMAC) == "" {
 		return
@@ -1310,7 +1325,13 @@ func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline) {
 	if err := rs.sendSessionEnd(ctx, len(messages)); err != nil {
 		logger.WarnCF("livekit", "gptlive: session end failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
 	}
-	usage := UsageSnapshot{SessionDurationSeconds: pipeline.VoiceSeconds(), TotalTokens: pipeline.BackendTokens()}
+	usage := UsageSnapshot{
+		SessionDurationSeconds: pipeline.VoiceSeconds(),
+		MessageCount:           len(messages),
+		InputTokens:            pipeline.BackendInputTokens(),
+		OutputTokens:           pipeline.BackendOutputTokens(),
+		TotalTokens:            pipeline.BackendTokens(),
+	}
 	if err := rs.sendUsageSummary(ctx, usage); err != nil {
 		logger.WarnCF("livekit", "gptlive: usage summary failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
 	}

@@ -71,12 +71,22 @@ func TestPipelineVoiceSecondsTracksLatestUsageNotSum(t *testing.T) {
 
 func TestPipelineBackendTokensSumsAcrossResponses(t *testing.T) {
 	p := &gptLivePipeline{}
-	p.onEvent(gptlive.BackendUsage{Total: 100})
-	p.onEvent(gptlive.BackendUsage{Total: 50})
-	// BackendUsage.Total is per completed backend response (one per delegation),
-	// so the session total is the sum across every response.
+	p.onEvent(gptlive.BackendUsage{Total: 100, Input: 60, Output: 40})
+	p.onEvent(gptlive.BackendUsage{Total: 50, Input: 30, Output: 20})
+	// BackendUsage.Total/Input/Output are all per completed backend response
+	// (one per delegation), so the session total is the sum across every
+	// response. Input/Output are asserted here too (Task 13 review, Critical
+	// 1): persistGPTLiveSession needs them specifically, since sendUsageSummary
+	// skips its POST entirely when both are zero, so tracking only Total would
+	// make every gptlive session's usage silently never reach the manager API.
 	if got := p.BackendTokens(); got != 150 {
 		t.Errorf("BackendTokens() = %v, want 150 (summed across responses)", got)
+	}
+	if got := p.BackendInputTokens(); got != 90 {
+		t.Errorf("BackendInputTokens() = %v, want 90 (summed across responses)", got)
+	}
+	if got := p.BackendOutputTokens(); got != 60 {
+		t.Errorf("BackendOutputTokens() = %v, want 60 (summed across responses)", got)
 	}
 }
 
@@ -470,15 +480,24 @@ func newFakeGPTLiveServerWithUsage(t *testing.T, seconds float64) string {
 }
 
 // TestWaitForEventsDrainSynchronizesBeforeReadingVoiceSeconds covers Task
-// 12's "carried forward, not fixed" review note: Close's own p.cancel() (via
-// pctx) races the just-buffered gptlive.Closed{VoiceSeconds} event through a
-// select with two simultaneously-ready cases in pumpEvents, so Close
-// returning is not sufficient evidence VoiceSeconds() reflects the final
-// report. This dials a real (fake-server-backed) session, starts the pumps
-// for real via finishStart, then exercises the exact sequence leave() uses —
-// Close then WaitForEventsDrain then VoiceSeconds() — repeatedly, to catch
-// the flakiness a missing drain would show up as instead of asserting it once
-// and getting lucky on the scheduler.
+// 12's "carried forward, not fixed" review note, exercised through the real
+// dial + fake server + finishStart/Close/WaitForEventsDrain path leave() uses,
+// end to end. It is NOT a reliable flake reproduction on its own: on a fast
+// loopback connection the Closed{VoiceSeconds} event is typically already
+// sitting in the channel and gets drained by pumpEvents' normal select case
+// well before ctx.Done() (fired only after sess.Close returns) ever becomes
+// ready, so removing the WaitForEventsDrain call below does not reliably fail
+// this test locally (confirmed: 5/20 manual runs, all passed) — the race it
+// guards against needs the scheduler to leave pumpEvents unscheduled across
+// that whole window, which -race's overhead makes more likely but still
+// doesn't guarantee (Task 13 review, Important 3: an earlier version of this
+// comment claimed the opposite). What this test actually verifies is the
+// happens-before contract: after WaitForEventsDrain returns, pumpEvents has
+// unconditionally finished (including any drain, per drainEvents' now-
+// deterministic loop), so VoiceSeconds() cannot observe a stale value.
+// TestDrainEventsProcessesBufferedEventsBeforeReturning below is the
+// deterministic counterpart that actually forces the buffered-event-at-
+// cancel-time window, with no scheduler luck involved.
 func TestWaitForEventsDrainSynchronizesBeforeReadingVoiceSeconds(t *testing.T) {
 	const wantSeconds = 7.5
 	for i := 0; i < 20; i++ {
@@ -498,15 +517,41 @@ func TestWaitForEventsDrainSynchronizesBeforeReadingVoiceSeconds(t *testing.T) {
 		cancel()
 		// This is the exact sequence leave() uses (Close, then
 		// WaitForEventsDrain, then read VoiceSeconds/BackendTokens/
-		// TranscriptSnapshot). Without this call the read below races
-		// pumpEvents' processing of the just-buffered Closed{VoiceSeconds}
-		// event; removing it locally reproduces the pre-fix flake this test
-		// guards against (see task-13-report.md for the before/after run).
+		// TranscriptSnapshot) — see the doc comment above for what this call
+		// does and does not prove on its own.
 		p.WaitForEventsDrain(2 * time.Second)
 
 		if got := p.VoiceSeconds(); got != wantSeconds {
 			t.Fatalf("iteration %d: VoiceSeconds() = %v, want %v (final Closed event was not drained before reading)", i, got, wantSeconds)
 		}
+	}
+}
+
+// TestDrainEventsProcessesBufferedEventsBeforeReturning is the deterministic
+// reproduction Important 3 of the Task 13 review asked for: force the exact
+// window pumpEvents' old `case <-ctx.Done(): return` could lose an event in —
+// one or more values already sitting in the channel's buffer at the instant
+// it is closed — with a synthetic channel instead of racing a real dial
+// against a real Close, so this fails on every run without the fix and passes
+// on every run with it, no scheduler luck required either way.
+func TestDrainEventsProcessesBufferedEventsBeforeReturning(t *testing.T) {
+	events := make(chan gptlive.Event, 2)
+	events <- gptlive.BackendUsage{Total: 5}
+	events <- gptlive.Closed{Reason: "close_requested", VoiceSeconds: 20}
+	close(events) // mirrors run()/closeChannelsWhenIdle: buffered values survive a closed channel.
+
+	var got []gptlive.Event
+	drainEvents(events, func(ev gptlive.Event) { got = append(got, ev) })
+
+	if len(got) != 2 {
+		t.Fatalf("drainEvents delivered %d events, want 2 (both buffered values, not just whichever the channel-close raced against)", len(got))
+	}
+	if _, ok := got[0].(gptlive.BackendUsage); !ok {
+		t.Errorf("got[0] = %#v, want the BackendUsage sent first", got[0])
+	}
+	closed, ok := got[1].(gptlive.Closed)
+	if !ok || closed.VoiceSeconds != 20 {
+		t.Errorf("got[1] = %#v, want gptlive.Closed{VoiceSeconds: 20} sent last", got[1])
 	}
 }
 

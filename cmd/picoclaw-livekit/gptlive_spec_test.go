@@ -28,7 +28,11 @@ func TestGPTLiveMetadataDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spec.Voice != "vesper" || spec.SampleRate != 16000 || spec.BackendModel == "" || spec.Quiz != nil {
-		t.Errorf("spec defaults wrong: %+v", spec)
+		// Print only the fields being asserted, never the whole spec (Task 13
+		// review: its first field is APIKey, and this is one os.Getenv away from
+		// printing a real key into CI output).
+		t.Errorf("spec defaults wrong: voice=%q sampleRate=%d backendModel=%q quiz=%v",
+			spec.Voice, spec.SampleRate, spec.BackendModel, spec.Quiz != nil)
 	}
 	if _, err := buildGPTLiveSpec(gptLiveSpecInput{Metadata: bs.Metadata, Workspace: t.TempDir()}); err == nil {
 		t.Error("missing OPENAI_API_KEY must be an error")
@@ -53,7 +57,10 @@ func TestGPTLiveMetadataAbsentBlockIsNotAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spec.Voice != "marin" || spec.SampleRate != 16000 {
-		t.Errorf("defaults wrong for an absent gptlive block: %+v", spec)
+		// Print only the fields being asserted, never the whole spec (Task 13
+		// review: its first field is APIKey, and this is one os.Getenv away from
+		// printing a real key into CI output).
+		t.Errorf("defaults wrong for an absent gptlive block: voice=%q sampleRate=%d", spec.Voice, spec.SampleRate)
 	}
 }
 

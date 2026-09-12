@@ -1137,6 +1137,18 @@ func main() {
 					ttsSampleRate: sessionTTSSampleRate,
 					gptLiveSpec:   gptLiveSpec,
 				})
+			} else {
+				// Without a job ID, roomRuntimeByJobID has no key to store this
+				// spec under, so RoomFactory's lookup below will miss and the
+				// session will silently run the cascade instead — at whatever
+				// sample rate ttsSampleRate already held, not the gptlive one just
+				// selected above (Task 13 review, fold-in item). This should never
+				// happen in production (the worker always assigns a job before
+				// bridgeFactory runs), but a silent wrong-pipeline session is a lot
+				// harder to diagnose than a log line, so warn loudly if it ever does.
+				logger.WarnCF("livekit", "gptlive: spec selected but no job ID to key it by; RoomFactory will not see it and this session will run the cascade instead", map[string]any{
+					"room": roomName,
+				})
 			}
 			logger.InfoCF("livekit", "gptlive: session spec selected", map[string]any{
 				"room":               roomName,
