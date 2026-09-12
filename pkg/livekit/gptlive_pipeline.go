@@ -3,6 +3,8 @@ package livekit
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -125,14 +127,18 @@ func newGPTLivePipeline(rs *RoomSession, spec GPTLiveSessionSpec) *gptLivePipeli
 	if spec.Quiz != nil {
 		// Score (agent_bridge-style contract documented on QuizTrackerConfig) calls
 		// this synchronously, in-process, after releasing its own lock — never
-		// concurrently with itself — so appending straight to the session here needs
-		// no extra synchronization on this pipeline's side. By the time any quiz
-		// tool can fire, p.sess is already set: it is only reachable through a
-		// function call the model made over this same p.sess, which Start assigns
-		// before the session can receive one.
+		// concurrently with itself. In practice a quiz tool can only fire through
+		// a function call the model made over an already-dialed p.sess, so this
+		// read would be safe even unguarded — but Start writes p.sess without a
+		// lock too (Task 12 review round 2, New Important 2), so this still reads
+		// it under p.mu and copies it to a local before use, matching every other
+		// reader of p.sess/p.cancel now.
 		spec.Quiz.OnDirective(func(d string) {
-			if p.sess != nil {
-				p.sess.AppendInstructions(d)
+			p.mu.Lock()
+			sess := p.sess
+			p.mu.Unlock()
+			if sess != nil {
+				sess.AppendInstructions(d)
 			}
 		})
 	}
@@ -180,6 +186,18 @@ func (w gptLiveTrackWriter) Close() error { return nil }
 // after sess.Close returns — is what stops these goroutines. ctx itself is
 // still respected for the dial: gptlive.Dial returns promptly if it is
 // cancelled before the model answers.
+//
+// Because the pipeline object now exists from NewRoomSession (Task 12 review,
+// Critical 1), leave() can run — and call Close — while this call is still
+// blocked inside gptlive.Dial (up to ~16s with retries). If that happens,
+// Close finds p.sess and p.cancel both still nil and does nothing; without
+// the check right after they are assigned below (Task 12 review round 2, New
+// Important 1), this function would go on to spawn four goroutines nothing
+// could ever cancel — closeOnce has already fired, and leave() has already
+// nil'd rs.gptlive, so no second Close call is coming. ctx is what leave()
+// cancels first, before it ever calls Close, so checking ctx.Done() here is
+// sufficient: if it's already closed, Close was already attempted (and
+// failed silently) and this call must finish the job itself.
 func (p *gptLivePipeline) Start(ctx context.Context) error {
 	if p.spec.SampleRate <= 0 {
 		// gptlive.Config.withDefaults fills in 24000 inside the dialed Session,
@@ -204,16 +222,42 @@ func (p *gptLivePipeline) Start(ctx context.Context) error {
 		Backend:      gptlive.ResponsesConfig{Model: p.spec.BackendModel, Instructions: p.spec.Persona.Backend, Tools: defs},
 		Tools:        exec, MaxSessionDuration: p.spec.MaxSessionDuration,
 	})
-	p.startErr = err
 	if err != nil {
+		p.startErr = err
 		close(p.ready)
 		return err
 	}
+	return p.finishStart(ctx, sess)
+}
+
+// finishStart runs once Dial has returned a live session: it publishes
+// p.sess/p.cancel/p.ready and either spawns the pumps or, if ctx is already
+// cancelled, self-closes instead (see Start's doc comment for why). Split out
+// from Start so this decision can be exercised directly in a test without a
+// real dial (TestFinishStartSelfClosesWhenContextAlreadyCancelled).
+func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session) error {
+	// pctx/cancel are created before the lock so the assignment below is a
+	// single critical section; p.cancel is written here and nowhere else.
+	pctx, cancel := context.WithCancel(context.Background())
+	p.mu.Lock()
 	p.sess = sess
+	p.cancel = cancel
+	p.mu.Unlock()
 	close(p.ready)
 
-	pctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
+	select {
+	case <-ctx.Done():
+		// leave() already ran (it cancels rs.ctx, which is what was passed as
+		// ctx here, before it ever calls Close) while Dial was still in
+		// flight. Its Close call found p.sess/p.cancel nil and did nothing;
+		// finish that close now, since nothing else will ever call it again.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		p.Close(closeCtx)
+		closeCancel()
+		return ctx.Err()
+	default:
+	}
+
 	go p.pumpAudioOut(pctx)
 	go p.pumpEvents(pctx)
 	go p.pumpPublish(pctx)
@@ -231,6 +275,16 @@ func (p *gptLivePipeline) Start(ctx context.Context) error {
 // straight to the model at the session's own sample rate. lkmedia has already
 // resampled/downmixed the room track to that rate before this is called, so
 // pkg/gptlive itself never resamples anything.
+//
+// Reads p.sess without p.mu, unlike Close/Greet/SayGoodbyeAndWait/the quiz
+// OnDirective closure (Task 12 review round 2, New Important 2): this is only
+// ever called from the PCMRemoteTrack processing goroutine that
+// lkmedia.NewPCMRemoteTrack spawns, which handleTrackSubscribed only creates
+// after receiving on p.ready — a channel receive that happens-after Start's
+// write to p.sess (which happens before close(p.ready)). That happens-before
+// chain is what the other callers below don't have: they can run before
+// Start ever gets there (Greet/SayGoodbyeAndWait from a data message, the
+// quiz closure from a tool call — none of which wait on p.ready).
 func (p *gptLivePipeline) WriteSample(sample media.PCM16Sample) error {
 	if p.sess != nil {
 		p.sess.PushAudio(pcm16ToBytes(sample))
@@ -248,8 +302,9 @@ func (p *gptLivePipeline) Greet() {
 		return
 	}
 	p.greeted = true
+	sess := p.sess
 	p.mu.Unlock()
-	p.sess.AppendCommentary("Immediately follow the instruction below. Do not wait for the caller to speak first. After that, pause and listen.\n\n" + p.spec.Persona.Greeting)
+	sess.AppendCommentary("Immediately follow the instruction below. Do not wait for the caller to speak first. After that, pause and listen.\n\n" + p.spec.Persona.Greeting)
 }
 
 // SayGoodbyeAndWait is the GPT-Live equivalent of the cascade's farewell:
@@ -268,10 +323,13 @@ func (p *gptLivePipeline) SayGoodbyeAndWait(ctx context.Context, prompt string, 
 	case <-p.burstClosed:
 	default:
 	}
-	if p.sess == nil {
+	p.mu.Lock()
+	sess := p.sess
+	p.mu.Unlock()
+	if sess == nil {
 		return
 	}
-	p.sess.AppendCommentary("Say a short, warm goodbye to the child now, along these lines, then stop talking: " + prompt)
+	sess.AppendCommentary("Say a short, warm goodbye to the child now, along these lines, then stop talking: " + prompt)
 	select {
 	case <-p.burstClosed:
 	case <-time.After(timeout):
@@ -508,8 +566,36 @@ func (p *gptLivePipeline) setState(next string) {
 			return
 		}
 		room.LocalParticipant.SetAttributes(map[string]string{"lk.agent.state": next})
-		_ = p.rs.PublishAgentState(prev, next)
+		// Not p.rs.PublishAgentState(prev, next): that pre-existing, cascade-shared
+		// method still does its own nil-check-then-use on rs.room internally
+		// (room_session.go), which is exactly Critical 3's panic shape one frame
+		// deeper — reachable here because this closure runs on the long-lived
+		// pumpPublish goroutine (Task 12 review round 2, New Important 3).
+		// publishAgentStateOnRoom does the identical publish against the room
+		// already snapshotted above, instead of re-reading rs.room. PublishAgentState
+		// itself is left untouched so cascade callers keep its exact behaviour.
+		_ = publishAgentStateOnRoom(room, prev, next)
 	})
+}
+
+// publishAgentStateOnRoom publishes the same "agent_state_changed" data
+// message PublishAgentState does, but against an already-obtained room rather
+// than reading rs.room itself. Exists only for gptLivePipeline.setState's
+// benefit (see the comment there); RoomSession.PublishAgentState is
+// deliberately left as-is for its cascade callers.
+func publishAgentStateOnRoom(room *lksdk.Room, oldState, newState string) error {
+	if room == nil || room.LocalParticipant == nil {
+		return errors.New("room local participant not ready")
+	}
+	payload := map[string]any{
+		"type": "agent_state_changed",
+		"data": map[string]string{"old_state": oldState, "new_state": newState},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return room.LocalParticipant.PublishData(data, lksdk.WithDataPublishReliable(true))
 }
 
 // publishTranscript mirrors the cascade's lk.transcription text-stream shape
@@ -563,16 +649,23 @@ func (p *gptLivePipeline) BackendTokens() int {
 // Close tears down the underlying gptlive.Session — sess.Close waits for the
 // service's final usage report (the Closed{VoiceSeconds} event; see the note
 // on Start about why the pump goroutines stay alive for this) bounded by ctx —
-// and only then cancels the pump goroutines Start spawned. Called exactly
-// once, from leave(), before persistGPTLiveSession reads VoiceSeconds/
-// BackendTokens/TranscriptSnapshot (Task 12 review, Important 4: persisting
-// before Close would read a stale voiceSeconds, since Close is what makes the
-// final update arrive at all).
+// and only then cancels the pump goroutines Start spawned. Called from
+// leave() before persistGPTLiveSession reads VoiceSeconds/BackendTokens/
+// TranscriptSnapshot (Task 12 review, Important 4: persisting before Close
+// would read a stale voiceSeconds, since Close is what makes the final update
+// arrive at all) — and, once more, from finishStart's own self-close path if
+// leave()'s call found p.sess/p.cancel still nil (Task 12 review round 2, New
+// Important 1). Reads p.sess/p.cancel under p.mu rather than directly (New
+// Important 2): Start(/finishStart) writes them from a different goroutine
+// than whichever one calls Close.
 func (p *gptLivePipeline) Close(ctx context.Context) {
-	if p.sess != nil {
-		_ = p.sess.Close(ctx)
+	p.mu.Lock()
+	sess, cancel := p.sess, p.cancel
+	p.mu.Unlock()
+	if sess != nil {
+		_ = sess.Close(ctx)
 	}
-	if p.cancel != nil {
-		p.cancel()
+	if cancel != nil {
+		cancel()
 	}
 }

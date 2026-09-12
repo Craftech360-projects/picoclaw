@@ -2,11 +2,16 @@ package livekit
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/livekit/media-sdk"
 	lkproto "github.com/livekit/protocol/livekit"
 	"github.com/sipeed/picoclaw/pkg/gptlive"
@@ -233,5 +238,152 @@ func TestDriveSegmenterSerializesFeedAndTick(t *testing.T) {
 	}
 	if c != o {
 		t.Fatalf("closes (%d) != opens (%d): the open burst was never closed", c, o)
+	}
+}
+
+// newMinimalFakeGPTLiveServer answers just enough of the GPT-Live protocol —
+// session.start with session.started, session.close with session.closed — to
+// let gptlive.Dial succeed and gptlive.Session.Close return promptly, so
+// TestFinishStartSelfClosesWhenContextAlreadyCancelled can obtain a real
+// *gptlive.Session without a slow dial or a 5-second Close timeout. This is
+// not pkg/gptlive's own fakeLive test helper (unexported to that package's
+// own test binary, not importable here) — just the minimum needed here.
+func newMinimalFakeGPTLiveServer(t *testing.T) string {
+	t.Helper()
+	var upgrader websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var ev map[string]any
+			if err := json.Unmarshal(data, &ev); err != nil {
+				continue
+			}
+			switch ev["type"] {
+			case "session.start":
+				_ = conn.WriteJSON(map[string]any{"type": "session.started", "session": map[string]any{"id": "test"}})
+			case "session.close":
+				_ = conn.WriteJSON(map[string]any{"type": "session.closed", "reason": "close_requested", "usage": map[string]any{"seconds": 0}})
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// TestFinishStartSelfClosesWhenContextAlreadyCancelled covers Task 12 review
+// round 2's New Important 1: because gptLivePipeline now exists from
+// NewRoomSession (Critical 1's fix), leave() can call Close while Start is
+// still blocked inside gptlive.Dial (up to ~16s with retries). Close finds
+// p.sess and p.cancel both nil at that point and does nothing. Before this
+// fix, Start would then go on to assign p.sess, spawn four goroutines on a
+// context nothing could ever cancel (closeOnce already spent, rs.gptlive
+// already nil'd), and the greeting timer would have the model speak into a
+// room that no longer exists three seconds later.
+//
+// finishStart is the extracted piece of Start that runs after Dial returns a
+// live session; this test calls it directly with an already-cancelled ctx
+// (standing in for rs.ctx after leave() has run) and a real *gptlive.Session
+// obtained from a minimal fake server. It asserts both required outcomes:
+// finishStart reports an error (so Join propagates it and the worker's normal
+// "Join failed" cleanup runs), and no pump goroutine was actually spawned —
+// checked by pushing directly onto p.publish and confirming nothing consumes
+// it, since only pumpPublish ever reads that channel.
+func TestFinishStartSelfClosesWhenContextAlreadyCancelled(t *testing.T) {
+	url := newMinimalFakeGPTLiveServer(t)
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer sess.Close(context.Background())
+
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // stands in for leave()'s rs.cancel(), already called before Close
+
+	if err := p.finishStart(ctx, sess); err == nil {
+		t.Fatal("finishStart() with an already-cancelled context must return an error, not spawn the pumps")
+	}
+
+	// If pumpPublish were running (i.e. the pumps leaked), it would consume
+	// this within microseconds; nothing should be listening on p.publish at all.
+	consumed := make(chan struct{})
+	p.publish <- func() { close(consumed) }
+	select {
+	case <-consumed:
+		t.Fatal("a pump goroutine consumed from p.publish — the pumps were not supposed to be spawned")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestConcurrentAccessDuringFinishStartDoesNotRace covers Task 12 review round
+// 2's New Important 2: Start (now finishStart) wrote p.sess/p.cancel without a
+// lock while Close, Greet, SayGoodbyeAndWait and the quiz OnDirective closure
+// read them from other goroutines. This was reachable in theory before this
+// fix round, but became reachable in practice once Critical 1's fix made
+// leave() (via Close) — and a "ready_for_greeting" or "end_prompt" data
+// message (via Greet/SayGoodbyeAndWait) — able to genuinely run concurrently
+// with the dial window. This races real calls to Greet, SayGoodbyeAndWait and
+// Close against finishStart's assignment; the only assertion that matters is
+// what -race reports (none, once every reader/writer goes through p.mu).
+func TestConcurrentAccessDuringFinishStartDoesNotRace(t *testing.T) {
+	url := newMinimalFakeGPTLiveServer(t)
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000, Persona: GPTLivePersona{Greeting: "hi"}})
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		_ = p.finishStart(context.Background(), sess)
+	}()
+	go func() {
+		defer wg.Done()
+		p.Greet()
+	}()
+	go func() {
+		defer wg.Done()
+		p.SayGoodbyeAndWait(context.Background(), "bye", 50*time.Millisecond)
+	}()
+	go func() {
+		defer wg.Done()
+		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p.Close(closeCtx)
+	}()
+	wg.Wait()
+
+	// Whichever interleaving occurred, make sure the session and any pumps
+	// that did get spawned are torn down before the test ends. Close is
+	// idempotent-safe to call again.
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	p.Close(closeCtx)
+}
+
+// TestPublishAgentStateOnRoomMatchesPublishAgentStateForNilRoom covers Task 12
+// review round 2's New Important 3: setState's closure used to call
+// p.rs.PublishAgentState(prev, next), which internally re-reads rs.room (a
+// second, separate unguarded read from the one setState already snapshotted
+// via roomSnapshot) — the same nil-check-then-use shape Critical 3 fixed
+// elsewhere, reachable here because this runs on the long-lived pumpPublish
+// goroutine. publishAgentStateOnRoom takes the room as a parameter instead, so
+// this checks it still behaves the same as PublishAgentState for the one case
+// both need to get right: a nil room is an error, not a panic.
+func TestPublishAgentStateOnRoomMatchesPublishAgentStateForNilRoom(t *testing.T) {
+	if err := publishAgentStateOnRoom(nil, "listening", "speaking"); err == nil {
+		t.Error("expected an error for a nil room, matching RoomSession.PublishAgentState's own nil-room behavior")
 	}
 }
