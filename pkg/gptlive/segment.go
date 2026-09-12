@@ -6,6 +6,9 @@ const segmentIdle = 800 * time.Millisecond
 
 // Segmenter turns the continuous output stream into bursts: open while the gate
 // says the model is audibly speaking, closed on silence or when frames stop coming.
+//
+// Not safe for concurrent use: Feed and Tick must be serialized, e.g. by calling
+// both only from the single audio-processing goroutine that owns this Segmenter.
 type Segmenter struct {
 	gate     *AdaptiveNoiseGate
 	open     bool
