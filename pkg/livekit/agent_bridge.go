@@ -1469,6 +1469,15 @@ func (ab *AgentBridge) doorDirective() string {
 	if q == nil {
 		return ""
 	}
+	return doorDirectiveText(q, tries)
+}
+
+// doorDirectiveText is the Door ladder for one question after `tries` misses. It is
+// pure so the GPT-Live quiz tool and the cascade bridge share one wording.
+func doorDirectiveText(q *QuizQuestion, tries int) string {
+	if q == nil {
+		return ""
+	}
 	// No authored ladder means there is no Doors behaviour to drive. Carry the
 	// try count instead, because the model cannot know it.
 	//
