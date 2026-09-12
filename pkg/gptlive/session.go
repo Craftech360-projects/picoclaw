@@ -107,6 +107,7 @@ type Session struct {
 	speechMu sync.Mutex // guards speech across the read goroutine and idle timers
 	speech   map[string]*speech
 
+	delegationsMu    sync.Mutex // guards delegations and callToDelegation across the read goroutine and tool goroutines
 	delegations      map[string]*delegatedResponse
 	callToDelegation map[string]string
 
