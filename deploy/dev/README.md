@@ -30,7 +30,9 @@ Two repos, one host:
 
 | pm2 name | repo | path |
 |---|---|---|
-| `picoclaw-livekit` | picoclaw | `/root/picoclaw` |
+| `picoclaw-livekit` | picoclaw | `/root/picoclaw` — the cascade worker, agent `cheeko-agent`. **Currently stopped**, see below. |
+| `picoclaw-gptlive` | picoclaw | `/root/picoclaw` — the Go GPT-Live worker (`PICOCLAW_LIVEKIT_PIPELINE=gptlive`), holds agent `cheeko-agent` |
+| `cheeko-gptlive` | cheeko-backend | the Python GPT-Live worker, agent `cheeko-gptlive`. Different name, so it does not conflict. |
 | `manager-api` | cheeko-backend | `/root/xiaozhi-esp32-server/main/manager-api-node` |
 | `gw-0` … `gw-3` | cheeko-backend | `/root/xiaozhi-esp32-server/main/mqtt-gateway` |
 | `manager-web`, `admin-dashboard` | cheeko-backend | same repo |
@@ -76,6 +78,43 @@ pm2 restart picoclaw-livekit
 
 Verify: `pm2 describe picoclaw-livekit` shows `online`, and
 `pm2 logs picoclaw-livekit --lines 30 --nostream` has no `panic`/`fatal`.
+
+## Deploy: picoclaw-gptlive (Go, GPT-Live)
+
+Runs picoclaw's characters on OpenAI GPT-Live instead of the cascade. It takes over
+the agent name `cheeko-agent`, which is the name devices and the backend dispatch to,
+so a real device and the normal per-character flow reach it. Registering it under its
+own name instead would only be reachable from the dashboard's GPT-Live tab.
+
+**While this is running, every character on this box is on GPT-Live and there is no
+cascade fallback.** Two workers must never hold `cheeko-agent` at once or LiveKit
+splits dispatches between them, so the cascade app is stopped first.
+
+```bash
+cd /root/picoclaw && git fetch origin feat/gpt-live-go && git checkout feat/gpt-live-go
+export PATH=$PATH:/usr/local/go/bin
+export CGO_LDFLAGS='-lc++ -lc++abi'
+make build-livekit
+pm2 stop picoclaw-livekit
+OPENAI_API_KEY=$(grep -m1 '^OPENAI_API_KEY=' /root/xiaozhi-esp32-server/main/python-agent/.env | cut -d= -f2-) \
+  PICOCLAW_LIVEKIT_PIPELINE=gptlive \
+  pm2 start build/picoclaw-livekit --name picoclaw-gptlive --time -- \
+  --agent-name cheeko-agent --config /root/.picoclaw/config.json --log-level debug
+pm2 save
+```
+
+Verify: `pm2 logs picoclaw-gptlive --lines 40 --nostream` shows `Worker registered`
+with `agent=cheeko-agent`, and `pm2 describe picoclaw-livekit` shows `stopped`.
+
+Rollback, which restores the cascade for every character:
+
+```bash
+pm2 stop picoclaw-gptlive && pm2 start picoclaw-livekit && pm2 save
+```
+
+Safety note: the GPT-Live backend model is offered `read_file`, whose confinement
+comes from `agents.defaults.restrict_to_workspace` in `/root/.picoclaw/config.json`.
+It is `true` on this box. Do not turn it off while this worker is serving children.
 
 ## Deploy: manager-api (Node)
 
