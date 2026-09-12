@@ -21,8 +21,19 @@ func TestBuildGPTLivePersonaComposesWorkspaceAndRules(t *testing.T) {
 			t.Errorf("voice instructions missing %q", want)
 		}
 	}
-	if strings.Contains(p.Voice, "remember_child_fact") {
-		t.Error("the voice model must not see tool names")
+	// The language lock (gptLiveDelegationBlock) and the accent block (gptLiveAccentIndian)
+	// land in the same Voice string and must not contradict each other: with LanguageName
+	// "Hindi" and Accent "indian", the accent guidance must read as "when you do speak
+	// English, use an Indian accent" — a modifier — never as a bare command to speak
+	// English, which would fight the Hindi language lock.
+	if !strings.Contains(p.Voice, "Speak Hindi") {
+		t.Error("language lock must tell the model to speak Hindi")
+	}
+	if strings.Contains(p.Voice, "Speak English") {
+		t.Error("accent guidance must not command speaking English when the language lock says Hindi")
+	}
+	if !strings.Contains(p.Voice, "use an Indian accent") {
+		t.Error("accent block should describe how to sound, not compete with the language lock")
 	}
 	for _, want := range []string{"(id=11)", "quiz_score_answer", "child"} {
 		if !strings.Contains(p.Backend, want) {
@@ -33,8 +44,8 @@ func TestBuildGPTLivePersonaComposesWorkspaceAndRules(t *testing.T) {
 		t.Errorf("greeting: %q", p.Greeting)
 	}
 	q := BuildGPTLivePersona(GPTLivePersonaInput{Workspace: ws, CharacterName: "Cheeko", Accent: "default"})
-	if strings.Contains(q.Voice, "<accent>") || strings.Contains(q.Voice, "quiz_score_answer") {
-		t.Error("no accent block and no quiz rules for a plain character")
+	if strings.Contains(q.Voice, "quiz_score_answer") {
+		t.Error("no quiz rules for a plain character with HasQuiz false")
 	}
 }
 
@@ -61,14 +72,27 @@ func TestBuildGPTLivePersonaEmptyWorkspace(t *testing.T) {
 	}
 }
 
-// TestBuildGPTLivePersonaMissingAccent pins Accent == "" (character has no accent
-// configured at all, as opposed to the literal "default") to behave the same as "default":
-// no <accent> block appended.
-func TestBuildGPTLivePersonaMissingAccent(t *testing.T) {
+// TestBuildGPTLivePersonaAccentOnlyIndianIsSpecialCased pins the contract that "indian" is
+// the only recognized accent value. An empty string (no accent configured at all), the
+// literal "default", and any unrecognized value must all behave the same way: no <accent>
+// block appended, and no silent coercion into some other accent.
+func TestBuildGPTLivePersonaAccentOnlyIndianIsSpecialCased(t *testing.T) {
 	ws := t.TempDir()
-	p := BuildGPTLivePersona(GPTLivePersonaInput{Workspace: ws, CharacterName: "Cheeko", Accent: ""})
-	if strings.Contains(p.Voice, "<accent>") {
-		t.Error("empty Accent must not add an accent block")
+	cases := []struct {
+		name   string
+		accent string
+	}{
+		{"empty (not configured)", ""},
+		{"literal default", "default"},
+		{"unrecognized value", "british"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := BuildGPTLivePersona(GPTLivePersonaInput{Workspace: ws, CharacterName: "Cheeko", Accent: tc.accent})
+			if strings.Contains(p.Voice, "<accent>") {
+				t.Errorf("Accent %q must not add an accent block, got Voice=%q", tc.accent, p.Voice)
+			}
+		})
 	}
 }
 

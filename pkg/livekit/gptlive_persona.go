@@ -29,10 +29,16 @@ type GPTLivePersona struct {
 	Greeting string // commentary sent when the device is ready
 }
 
+// gptLiveAccentIndian is a modifier on HOW to speak English, not a competing language
+// instruction: it must never read as an imperative to speak English, because it can be
+// combined with a language lock (gptLiveDelegationBlock) that names a different language,
+// e.g. Hindi. The two must not contradict each other in the composed Voice string.
 const gptLiveAccentIndian = `
 <accent>
-Speak Indian English: an Indian accent with Indian intonation and rhythm, and the everyday
+When you speak English, use an Indian accent: Indian intonation and rhythm, and the everyday
 phrasing a child in India hears at home and at school. Keep it natural and warm, never a caricature.
+This is about how to sound in English, not which language to use — follow the language
+instruction above for that.
 </accent>`
 
 // gptLiveDelegationBlock is the per-session equivalent of the cascade's per-turn voice
