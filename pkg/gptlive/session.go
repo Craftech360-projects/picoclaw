@@ -103,7 +103,9 @@ type Session struct {
 
 	historyMu sync.Mutex
 	history   []InputItem
-	speech    map[string]*speech
+
+	speechMu sync.Mutex // guards speech across the read goroutine and idle timers
+	speech   map[string]*speech
 
 	delegations      map[string]*delegatedResponse
 	callToDelegation map[string]string
