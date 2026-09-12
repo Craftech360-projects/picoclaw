@@ -53,6 +53,28 @@ const greetingFallbackDelay = 3 * time.Second
 // the model to finish speaking its goodbye before leaving anyway.
 const farewellBurstCloseTimeout = 6 * time.Second
 
+// gptLiveDirectiveSupersedes prefixes every Door directive pushed into the
+// voice model's live instructions.
+//
+// The ADR sanctions AppendInstructions as the mechanism, and append is all the
+// protocol offers — there is no replace and no remove. So over a ten-question
+// session with misses the instructions accumulate 10-30 "## This Question"
+// blocks, each naming a different question id, all of them still reading as
+// current. The cascade never had this problem because it used per-turn system
+// messages, which replace by construction.
+//
+// Two ways to make only the latest one authoritative. Re-sending a single
+// consolidated block is the tidier model, but it does not actually help here:
+// a consolidated block is still APPENDED, so the instructions grow at the same
+// rate and every superseded block is still sitting above it verbatim. The
+// prefix below is chosen instead because it is the only one that addresses the
+// real failure — the model cannot tell which block is current — it costs one
+// constant line per directive, it needs no extra state to rebuild, and it
+// carries the rule at every insertion point rather than in one place a future
+// caller can bypass.
+const gptLiveDirectiveSupersedes = "IMPORTANT: this block REPLACES every earlier \"## This Question\" block in these instructions. " +
+	"Those are finished questions; ignore all of them. Only the block below is current.\n\n"
+
 // gptLivePipeline is the GPT-Live analogue of AudioPipeline: it owns the
 // gptlive.Session for one room, pumps model audio out to the room's local
 // track, pumps model events into transcript/state bookkeeping, and feeds room
@@ -114,13 +136,20 @@ type gptLivePipeline struct {
 	// WaitForEventsDrain reads it from whichever goroutine calls Close/leave(),
 	// finishStart writes it from its own goroutine.
 	eventsPumpStarted bool
-	state             string
-	greeted           bool
-	agentText         map[string]string // burst id -> latest full text
-	openAgentIDs      []string          // transcript ids seen since the burst opened
-	transcript        []PersistedChatMessage
-	voiceSeconds      float64
-	backendTokens     int
+	// closing is set by Close before it asks the service to end the session, so
+	// pumpEvents can tell a channel close WE caused from one the service caused
+	// on its own (see leaveIfServiceEnded).
+	closing bool
+	state   string
+	greeted bool
+	// pendingGreet records a Greet() that arrived before the session was dialed
+	// (see Greet and finishStart).
+	pendingGreet  bool
+	agentText     map[string]string // burst id -> latest full text
+	openAgentIDs  []string          // transcript ids seen since the burst opened
+	transcript    []PersistedChatMessage
+	voiceSeconds  float64
+	backendTokens int
 	// backendInputTokens/backendOutputTokens are the Input/Output breakdown of
 	// every summed BackendUsage event (backendTokens is their Total, which the
 	// backend computes independently — see onEvent's BackendUsage case).
@@ -162,7 +191,7 @@ func newGPTLivePipeline(rs *RoomSession, spec GPTLiveSessionSpec) *gptLivePipeli
 			sess := p.sess
 			p.mu.Unlock()
 			if sess != nil {
-				sess.AppendInstructions(d)
+				sess.AppendInstructions(gptLiveDirectiveSupersedes + d)
 			}
 		})
 	}
@@ -317,6 +346,16 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session
 		case <-pctx.Done():
 		}
 	}()
+	// A "ready_for_greeting" that landed while Dial was still in flight was
+	// recorded rather than acted on (see Greet); honour it now, so the child
+	// does not wait out the fallback timer above for a greeting the gateway
+	// already asked for. Greet is idempotent, so this racing the timer is fine.
+	p.mu.Lock()
+	pendingGreet := p.pendingGreet
+	p.mu.Unlock()
+	if pendingGreet {
+		p.Greet()
+	}
 	return nil
 }
 
@@ -344,9 +383,22 @@ func (p *gptLivePipeline) WriteSample(sample media.PCM16Sample) error {
 // Greet asks the voice model to speak the character's greeting immediately.
 // Idempotent: only the first caller (the "ready_for_greeting" data message or
 // the fallback timer, whichever comes first) has any effect.
+//
+// A call that lands before the session is dialed is REMEMBERED, not dropped.
+// Join connects the room and publishes the local track before it calls Start,
+// so the gateway's "ready_for_greeting" can arrive across the whole dial window
+// (a 10s timeout with 3 retries at 2s). Returning silently in that window left
+// the child waiting on the 3-second fallback timer, which does not even start
+// until finishStart has spawned it — so the greeting could be seconds late for
+// no reason. finishStart replays the flag the moment the session exists.
 func (p *gptLivePipeline) Greet() {
 	p.mu.Lock()
-	if p.greeted || p.sess == nil {
+	if p.greeted {
+		p.mu.Unlock()
+		return
+	}
+	if p.sess == nil {
+		p.pendingGreet = true
 		p.mu.Unlock()
 		return
 	}
@@ -411,6 +463,19 @@ func (p *gptLivePipeline) pumpAudioOut(ctx context.Context) {
 // under concurrent producers without a real dialed session.
 func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byte, ticks <-chan time.Time) {
 	frameDur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(p.spec.SampleRate) }
+	// leave() closes the local track before Close's cancel() has stopped this
+	// loop, so every audio frame still queued at that moment fails to write —
+	// a burst of identical warnings on EVERY teardown, one per frame. Log the
+	// first and count the rest, then report the total once on the way out.
+	writeErrs := 0
+	defer func() {
+		if writeErrs > 1 {
+			logger.WarnCF("livekit", "gptlive: further writes to the local track failed", map[string]any{
+				"room":       p.rs.roomName(),
+				"suppressed": writeErrs - 1,
+			})
+		}
+	}()
 	for {
 		select {
 		case pcm, ok := <-audio:
@@ -420,7 +485,10 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			p.seg.Feed(pcm, frameDur(len(pcm)))
 			if p.localTrack != nil {
 				if err := p.localTrack.WriteSample(bytesToPCM16(pcm)); err != nil {
-					logger.WarnCF("livekit", "gptlive: write to local track", map[string]any{"error": err.Error()})
+					writeErrs++
+					if writeErrs == 1 {
+						logger.WarnCF("livekit", "gptlive: write to local track", map[string]any{"error": err.Error()})
+					}
 				}
 			}
 		case now := <-ticks:
@@ -474,6 +542,7 @@ func (p *gptLivePipeline) pumpEvents(ctx context.Context) {
 		select {
 		case ev, ok := <-p.sess.Events():
 			if !ok {
+				p.leaveIfServiceEnded()
 				return
 			}
 			p.onEvent(ev)
@@ -493,6 +562,43 @@ func (p *gptLivePipeline) pumpEvents(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// leaveIfServiceEnded tears the room down when p.sess.Events() closed without
+// this side having asked for it.
+//
+// onEvent's Error{Recoverable:false} case is NOT enough on its own: run()
+// returns nil, emitting no Error at all, whenever classify sees closedEv
+// already closed (gptlive/session.go) — which is exactly the path taken when
+// the SERVICE ends the session by itself: its own duration cap, a quota trip,
+// an operator action. run then closes the event and audio channels, pumpEvents
+// and pumpAudioOut observe that and return, and before this existed nothing
+// published a state change, disconnected the room or persisted anything. The
+// child was left in a connected room with an agent that would never speak
+// again.
+//
+// p.closing (set by Close, before it asks the service to end the session) is
+// the discriminator: a channel close we caused is an ordinary teardown that
+// leave() is already driving, and calling Leave from here would be re-entrant.
+// Leave itself is closeOnce-guarded and nil-safe, so the redundant call after
+// an unrecoverable Error (which already scheduled one) is harmless.
+func (p *gptLivePipeline) leaveIfServiceEnded() {
+	if !p.shouldLeaveOnEventsClose() {
+		return
+	}
+	logger.WarnCF("livekit", "gptlive: session ended by the service; leaving the room", map[string]any{
+		"room": p.rs.roomName(),
+	})
+	p.setState("listening")
+	go p.rs.Leave()
+}
+
+// shouldLeaveOnEventsClose is leaveIfServiceEnded's decision, split out so it
+// can be exercised without a dialed session.
+func (p *gptLivePipeline) shouldLeaveOnEventsClose() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closing
 }
 
 // drainEvents receives from events until it reports closed, calling onEvent
@@ -559,19 +665,9 @@ func (p *gptLivePipeline) onEvent(ev gptlive.Event) {
 		}
 	case gptlive.VoiceUsage:
 		// Seconds is the session's running total to date, not a delta since the
-		// last update, so the latest value replaces rather than accumulates.
-		//
-		// FLAG for Task 13 (raised again in review): this assumes VoiceUsage.Seconds
-		// never resets. MaxSessionDuration deliberately forces a reconnect mid-call
-		// (see gptlive.Session.run/errReconnectTimer), and neither this task nor the
-		// review that followed it could confirm from pkg/gptlive or the wire
-		// protocol whether a reconnected session's usage counter restarts at zero.
-		// If it does, assigning (this code) under-reports after a reconnect and
-		// summing over-reports across repeated updates before one — Task 13 must
-		// confirm the actual wire behaviour before billing on VoiceSeconds().
-		p.mu.Lock()
-		p.voiceSeconds = e.Seconds
-		p.mu.Unlock()
+		// last update, so the latest value replaces rather than accumulates —
+		// but only upwards. See recordVoiceSeconds.
+		p.recordVoiceSeconds(e.Seconds)
 	case gptlive.BackendUsage:
 		// Total/Input/Output are all per backend response (one per delegation),
 		// so summing each across every response completed this session gives the
@@ -585,9 +681,14 @@ func (p *gptLivePipeline) onEvent(ev gptlive.Event) {
 		p.backendOutputTokens += e.Output
 		p.mu.Unlock()
 	case gptlive.Closed:
-		p.mu.Lock()
-		p.voiceSeconds = e.VoiceSeconds
-		p.mu.Unlock()
+		// Monotonic, NOT an unconditional assignment: gptlive.Session's
+		// handleEvent sets VoiceSeconds to 0 whenever session.closed arrives
+		// with no usage object at all (ServerEvent.Usage is a pointer), and
+		// leave() is deliberately ordered Close -> WaitForEventsDrain -> persist
+		// so this is the LAST write before persistGPTLiveSession reads it.
+		// Overwriting here with a zero would post sessionDurationSeconds 0 for
+		// every session, silently and forever.
+		p.recordVoiceSeconds(e.VoiceSeconds)
 	case gptlive.Error:
 		logger.WarnCF("livekit", "gptlive: session error", map[string]any{"error": e.Err.Error(), "recoverable": e.Recoverable})
 		if !e.Recoverable {
@@ -602,6 +703,31 @@ func (p *gptLivePipeline) onEvent(ev gptlive.Event) {
 			go p.rs.Leave()
 		}
 	}
+}
+
+// recordVoiceSeconds is the single writer of p.voiceSeconds, and it only ever
+// accepts a LARGER value. Both events that carry a voice-seconds figure —
+// VoiceUsage (the running total to date) and Closed (the service's final
+// report) — are cumulative session totals, so a smaller number can only be a
+// counter that lost history, never real billing going backwards. Two ways that
+// happens, both of which used to silently destroy the session's usage:
+//
+//   - session.closed with no usage object. gptlive.Session's handleEvent then
+//     emits Closed{VoiceSeconds: 0}, and this is the last write leave() sees.
+//   - a reconnect. gptlive.Session.run sets `reconnecting` on ANY recoverable
+//     failure and resetForReconnect starts a fresh server session, so the first
+//     usage.updated after a blip reports that new session's seconds, not the
+//     call's. Keeping the high-water mark under-reports the post-blip audio;
+//     accepting the reset would throw away everything before it. Neither this
+//     repo nor the wire protocol can currently confirm which the service does
+//     (our own fake server hard-codes a constant), so this takes the bounded
+//     error over the unbounded one.
+func (p *gptLivePipeline) recordVoiceSeconds(secs float64) {
+	p.mu.Lock()
+	if secs > p.voiceSeconds {
+		p.voiceSeconds = secs
+	}
+	p.mu.Unlock()
 }
 
 func (p *gptLivePipeline) onBurstOpen() { p.setState("speaking") }
@@ -656,23 +782,24 @@ func (p *gptLivePipeline) setState(next string) {
 			return
 		}
 		room.LocalParticipant.SetAttributes(map[string]string{"lk.agent.state": next})
-		// Not p.rs.PublishAgentState(prev, next): that pre-existing, cascade-shared
-		// method still does its own nil-check-then-use on rs.room internally
-		// (room_session.go), which is exactly Critical 3's panic shape one frame
-		// deeper — reachable here because this closure runs on the long-lived
-		// pumpPublish goroutine (Task 12 review round 2, New Important 3).
-		// publishAgentStateOnRoom does the identical publish against the room
-		// already snapshotted above, instead of re-reading rs.room. PublishAgentState
-		// itself is left untouched so cascade callers keep its exact behaviour.
+		// Not p.rs.PublishAgentState(prev, next): that would re-read rs.room
+		// rather than use the room already snapshotted above, and leave() clears
+		// that field concurrently — the very nil-check-then-use race this
+		// closure, running on the long-lived pumpPublish goroutine, must not
+		// lose (Task 12 review round 2, New Important 3).
+		// publishAgentStateOnRoom is now the single implementation of this
+		// publish; RoomSession.PublishAgentState is a one-line wrapper over it
+		// (room_session.go), so a future change to the payload can no longer
+		// reach gptlive sessions and silently miss cascade ones.
 		_ = publishAgentStateOnRoom(room, prev, next)
 	})
 }
 
-// publishAgentStateOnRoom publishes the same "agent_state_changed" data
-// message PublishAgentState does, but against an already-obtained room rather
-// than reading rs.room itself. Exists only for gptLivePipeline.setState's
-// benefit (see the comment there); RoomSession.PublishAgentState is
-// deliberately left as-is for its cascade callers.
+// publishAgentStateOnRoom is THE "agent_state_changed" data publish, for both
+// pipelines: it takes the room as a parameter rather than reading rs.room, so
+// gptLivePipeline.setState can publish against a room it has already
+// snapshotted (see the comment there), and RoomSession.PublishAgentState is a
+// one-line wrapper over it for every cascade caller.
 func publishAgentStateOnRoom(room *lksdk.Room, oldState, newState string) error {
 	if room == nil || room.LocalParticipant == nil {
 		return errors.New("room local participant not ready")
@@ -792,6 +919,9 @@ func (p *gptLivePipeline) WaitForEventsDrain(timeout time.Duration) {
 func (p *gptLivePipeline) Close(ctx context.Context) {
 	p.mu.Lock()
 	sess, cancel := p.sess, p.cancel
+	// Set before sess.Close, so pumpEvents can never see the resulting channel
+	// close and mistake it for a service-initiated end (leaveIfServiceEnded).
+	p.closing = true
 	p.mu.Unlock()
 	if sess != nil {
 		_ = sess.Close(ctx)

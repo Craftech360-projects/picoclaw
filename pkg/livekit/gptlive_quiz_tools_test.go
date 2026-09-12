@@ -131,15 +131,179 @@ func TestQuizMissesWalkTheLadderAndRevealAtTheEnd(t *testing.T) {
 	}
 }
 
+// TestQuizCorrectAtDoorThreeIsRevealed asserts BOTH halves of what a Door-3
+// correct answer must do, because for a long time only the first half was
+// checked and the second half was broken (final whole-branch review, Critical
+// 1). The verdict is downgraded to `revealed` per ADR-0009's mastery rule —
+// and recordLocked used to take that downgraded verdict string as its signal
+// that the ladder had ended, calling doorDirectiveText(q, 2) for a question
+// whose ladder runs to 3. That returns the Door-3 line: "say this explanation
+// ... then ask the question again and wait". The question had just been closed
+// and pendingLocked had already moved to 12, so the directive handed back to
+// the backend model (and pushed into the voice model's live instructions via
+// OnDirective) told it to re-ask a finished question immediately before asking
+// the next one — and any quiz_score_answer for it came back "already scored".
+//
+// The old version of this test discarded the returned directive entirely,
+// which is exactly why the suite stayed green with that bug in place.
 func TestQuizCorrectAtDoorThreeIsRevealed(t *testing.T) {
 	rec := newQuizAnswerRecorder()
 	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz",
 		AnswerReporter: rec.report})
 	tr.Score("11", "miss", "six")
 	tr.Score("11", "miss", "ten")
-	tr.Score("11", "correct", "eight")
+	directive, err := tr.Score("11", "correct", "eight")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if call := rec.take(t); call.result != "revealed" {
 		t.Errorf("mastery rule: Door 3 correct is revealed, got %+v", call)
+	}
+	if strings.Contains(directive, "ask the question again") || strings.Contains(directive, "four legs each side") {
+		t.Errorf("a correct answer closes question 11; the directive must not re-ask or re-explain it: %q", directive)
+	}
+	if strings.Contains(directive, "question 11") {
+		t.Errorf("question 11 is closed and pending has moved on; the directive must not name it at all: %q", directive)
+	}
+	if !strings.Contains(directive, "Ask question 12 plainly") {
+		t.Errorf("the directive must move the session on to the next pending question: %q", directive)
+	}
+}
+
+// TestQuizCorrectAtUnauthoredDoorTwoDoesNotReaskTheClosedQuestion is the same
+// Critical 1 bug one try earlier. A question with no authored Door 2 (fewer
+// than two choices) but a TeachText has DoorFor(1) == doorGuided, so a correct
+// answer on the SECOND try is downgraded to `revealed` with tries == 1 — while
+// ladderExhausted for that shape is still `tries >= doorGuided`. Gating the
+// terminal wording on the verdict therefore produced the Door-3 re-ask at
+// tries == 1. Gating it on the ladder actually being exhausted does not.
+func TestQuizCorrectAtUnauthoredDoorTwoDoesNotReaskTheClosedQuestion(t *testing.T) {
+	batch := &QuizBatch{Level: 1, Band: "6-8", Bank: "quiz", Questions: []QuizQuestion{
+		{ID: 21, IDString: "21", Text: "What sound does thunder follow?", Answer: "lightning", TeachText: "light travels faster than sound"},
+		{ID: 22, IDString: "22", Text: "What colour is grass?", Answer: "green"},
+	}}
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	if _, err := tr.Score("21", "miss", "rain"); err != nil {
+		t.Fatal(err)
+	}
+	directive, err := tr.Score("21", "correct", "lightning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(directive, "question 21") {
+		t.Errorf("question 21 was just closed; the directive must not name it: %q", directive)
+	}
+	if !strings.Contains(directive, "Ask question 22 plainly") {
+		t.Errorf("the directive must move on to question 22: %q", directive)
+	}
+}
+
+// TestQuizExhaustedLadderStillCarriesTheTerminalWording is the guard on the
+// other side of Critical 1's fix: narrowing the terminal gate from the verdict
+// string to ladderExhausted must not stop the genuinely-exhausted case from
+// telling the voice to stop, score the question and move on. Both ladder
+// shapes are checked — the authored three-Door one and the unauthored
+// two-miss one — because they take different branches of doorDirectiveText.
+func TestQuizExhaustedLadderStillCarriesTheTerminalWording(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	tr.Score("11", "miss", "six")
+	tr.Score("11", "miss", "ten")
+	directive, err := tr.Score("11", "miss", "twelve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(directive, "all three tries") {
+		t.Errorf("an exhausted authored ladder must still end with the terminal wording: %q", directive)
+	}
+
+	// Question 12 has no choices and no teach text: its ladder ends at two misses.
+	tr.Score("12", "miss", "purple")
+	directive, err = tr.Score("12", "miss", "orange")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(directive, "result=revealed") {
+		t.Errorf("an exhausted unauthored ladder must still carry the reveal instruction: %q", directive)
+	}
+}
+
+// TestQuizTrackerWithoutABatchDoesNotPanic covers Minor 4: find, pendingLocked
+// and Status all dereference cfg.Batch, which was safe only because
+// buildGPTLiveSpec (one package away) refuses to build a tracker without one.
+func TestQuizTrackerWithoutABatchDoesNotPanic(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Workspace: t.TempDir()})
+	if got := tr.Status(); !strings.Contains(got, "all questions done") {
+		t.Errorf("Status() with no batch = %q", got)
+	}
+	if _, err := tr.Score("11", "correct", "eight"); err == nil {
+		t.Error("Score() with no batch must report the question is not in today's batch, not panic")
+	}
+	tr.FlushPendingAttempts() // must not panic either
+}
+
+// TestQuizFlushPendingAttemptsReportsTheUnfinishedQuestion covers Important 5:
+// QuizTrackerConfig.AttemptReporter is wired by main.go but was never invoked
+// anywhere on the gptlive path, so a child who tried a question twice and then
+// stopped produced no attempt rows at all. persistGPTLiveSession now calls this
+// at teardown, the way the cascade calls flushPendingQuizAttempts.
+func TestQuizFlushPendingAttemptsReportsTheUnfinishedQuestion(t *testing.T) {
+	type call struct {
+		id       int64
+		attempts []QuizAttempt
+	}
+	calls := make(chan call, 4)
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz",
+		AttemptReporter: func(questionID int64, attempts []QuizAttempt) {
+			calls <- call{id: questionID, attempts: attempts}
+		}})
+
+	// Nothing tried yet: nothing to report.
+	tr.FlushPendingAttempts()
+	select {
+	case c := <-calls:
+		t.Fatalf("expected no attempt report before any try, got %+v", c)
+	default:
+	}
+
+	tr.Score("11", "miss", "six")
+	tr.Score("11", "miss", "ten")
+	tr.FlushPendingAttempts()
+
+	select {
+	case c := <-calls:
+		if c.id != 11 {
+			t.Errorf("attempt report question id = %d, want 11", c.id)
+		}
+		if len(c.attempts) != 2 {
+			t.Errorf("attempt report carried %d attempts, want the 2 unresolved tries: %+v", len(c.attempts), c.attempts)
+		}
+	default:
+		t.Fatal("AttemptReporter was never invoked for the question the session ended on")
+	}
+
+	// Idempotent: a second flush finds nothing.
+	tr.FlushPendingAttempts()
+	select {
+	case c := <-calls:
+		t.Fatalf("a second flush must report nothing, got %+v", c)
+	default:
+	}
+}
+
+// TestQuizStateTypesWrittenNamesTheMemoTypeOnceScored covers the other half of
+// the character-progress fix (Important 2): CollectStateMemos treats an empty
+// written-set as "this session persisted nothing", and on the gptlive path the
+// AgentBridge never writes state — the tracker does — so without this the
+// progress POST would collect no memos for Quizzy/Bujho/Ginti.
+func TestQuizStateTypesWrittenNamesTheMemoTypeOnceScored(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_riddle"})
+	if got := tr.StateTypesWritten(); len(got) != 0 {
+		t.Errorf("nothing scored yet, want no state types, got %v", got)
+	}
+	tr.Score("11", "correct", "eight")
+	got := tr.StateTypesWritten()
+	if !got["daily_riddle"] {
+		t.Errorf("StateTypesWritten() = %v, want daily_riddle after a scored question", got)
 	}
 }
 

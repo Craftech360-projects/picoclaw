@@ -54,18 +54,69 @@ func TestPipelineIgnoresInterimUserTranscriptInSnapshot(t *testing.T) {
 	}
 }
 
-func TestPipelineVoiceSecondsTracksLatestUsageNotSum(t *testing.T) {
+// TestPipelineVoiceSecondsIsMonotonic covers the final whole-branch review's
+// Critical 2. VoiceUsage.Seconds and Closed.VoiceSeconds are both cumulative
+// session totals, not deltas, so summing them would overcount — but the
+// previous version of this test asserted plain assignment, which is what let
+// the bug it now covers ship: the Closed case overwrote the running total
+// UNCONDITIONALLY, including with zero. gptlive.Session's handleEvent sets
+// VoiceSeconds to 0 whenever session.closed arrives with no usage object at
+// all (ServerEvent.Usage is a pointer), and leave() is deliberately ordered
+// Close -> WaitForEventsDrain -> persist precisely so that is the LAST write
+// before persistGPTLiveSession reads it. Every session would have posted
+// sessionDurationSeconds 0, silently. The same line is the reconnect hazard:
+// a fresh server session's first usage.updated reports its own seconds, not
+// the call's, and would have replaced the pre-blip total.
+func TestPipelineVoiceSecondsIsMonotonic(t *testing.T) {
 	p := &gptLivePipeline{}
 	p.onEvent(gptlive.VoiceUsage{Seconds: 5})
 	p.onEvent(gptlive.VoiceUsage{Seconds: 12})
-	// VoiceUsage.Seconds is the session's running total to date, not a delta —
-	// summing successive updates would overcount, so the latest value must win.
 	if got := p.VoiceSeconds(); got != 12 {
 		t.Errorf("VoiceSeconds() = %v, want 12 (latest, not summed)", got)
+	}
+	// A reconnect's restarted counter must not throw the session's seconds away.
+	p.onEvent(gptlive.VoiceUsage{Seconds: 2})
+	if got := p.VoiceSeconds(); got != 12 {
+		t.Errorf("VoiceSeconds() after a lower (post-reconnect) usage report = %v, want 12", got)
 	}
 	p.onEvent(gptlive.Closed{Reason: "close_requested", VoiceSeconds: 20})
 	if got := p.VoiceSeconds(); got != 20 {
 		t.Errorf("VoiceSeconds() after Closed = %v, want 20", got)
+	}
+	// The failure this exists for: session.closed with no usage object.
+	p.onEvent(gptlive.Closed{Reason: "close_requested", VoiceSeconds: 0})
+	if got := p.VoiceSeconds(); got != 20 {
+		t.Fatalf("VoiceSeconds() after a Closed carrying no usage = %v, want 20 — a usage-less "+
+			"session.closed must never erase the session's billed seconds", got)
+	}
+}
+
+// TestPersistedVoiceSecondsSurviveAUsageLessClose is the end-to-end half of
+// Critical 2, through the exact sequence leave() runs (Close ->
+// WaitForEventsDrain -> read), against a fake server whose session.closed
+// carries NO usage object — the shape this repo cannot rule out, and the one
+// our other fake servers hide by always hard-coding a number.
+func TestPersistedVoiceSecondsSurviveAUsageLessClose(t *testing.T) {
+	url := newFakeGPTLiveServerWithoutCloseUsage(t)
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000})
+	if err := p.finishStart(context.Background(), sess); err != nil {
+		t.Fatalf("finishStart() error = %v", err)
+	}
+	// A usage report mid-session, exactly as usage.updated would deliver it.
+	p.onEvent(gptlive.VoiceUsage{Seconds: 42})
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	p.Close(closeCtx)
+	cancel()
+	p.WaitForEventsDrain(2 * time.Second)
+
+	if got := p.VoiceSeconds(); got != 42 {
+		t.Fatalf("VoiceSeconds() = %v, want 42 — the final session.closed carried no usage object and "+
+			"must not have overwritten the session's billed seconds with zero", got)
 	}
 }
 
@@ -439,9 +490,24 @@ func TestConcurrentAccessDuringFinishStartDoesNotRace(t *testing.T) {
 // goroutine. publishAgentStateOnRoom takes the room as a parameter instead, so
 // this checks it still behaves the same as PublishAgentState for the one case
 // both need to get right: a nil room is an error, not a panic.
+// Minor 1 of the final whole-branch review then made RoomSession.PublishAgentState
+// a one-line wrapper over publishAgentStateOnRoom, so the two can no longer drift:
+// a payload change now reaches cascade and gptlive sessions alike, instead of
+// only whichever copy was edited. This asserts the one observable behaviour the
+// cascade depends on and the wrapper had to preserve exactly — a room that is
+// not ready is an error, never a panic — for both entry points.
 func TestPublishAgentStateOnRoomMatchesPublishAgentStateForNilRoom(t *testing.T) {
 	if err := publishAgentStateOnRoom(nil, "listening", "speaking"); err == nil {
 		t.Error("expected an error for a nil room, matching RoomSession.PublishAgentState's own nil-room behavior")
+	}
+	rs := &RoomSession{roomInfo: &lkproto.Room{Name: "room-no-room"}}
+	err := rs.PublishAgentState("listening", "speaking")
+	if err == nil {
+		t.Fatal("RoomSession.PublishAgentState with no room must still return an error, as it always did")
+	}
+	if err.Error() != "room local participant not ready" {
+		t.Errorf("PublishAgentState nil-room error = %q, want the unchanged %q",
+			err.Error(), "room local participant not ready")
 	}
 }
 
@@ -552,6 +618,267 @@ func TestDrainEventsProcessesBufferedEventsBeforeReturning(t *testing.T) {
 	closed, ok := got[1].(gptlive.Closed)
 	if !ok || closed.VoiceSeconds != 20 {
 		t.Errorf("got[1] = %#v, want gptlive.Closed{VoiceSeconds: 20} sent last", got[1])
+	}
+}
+
+// newFakeGPTLiveServerWithoutCloseUsage answers session.close with a
+// session.closed that carries NO usage object at all — which is what makes
+// gptlive.Session emit Closed{VoiceSeconds: 0}. Every other fake server in
+// this file hard-codes a number there, which is exactly why Critical 2 was
+// invisible to the suite.
+func newFakeGPTLiveServerWithoutCloseUsage(t *testing.T) string {
+	t.Helper()
+	var upgrader websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var ev map[string]any
+			if err := json.Unmarshal(data, &ev); err != nil {
+				continue
+			}
+			switch ev["type"] {
+			case "session.start":
+				_ = conn.WriteJSON(map[string]any{"type": "session.started", "session": map[string]any{"id": "test"}})
+			case "session.close":
+				_ = conn.WriteJSON(map[string]any{"type": "session.closed", "reason": "close_requested"})
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// newFakeGPTLiveServerEndingItsOwnSession answers session.start with
+// session.started and then, unprompted, ends the session itself: a
+// session.closed nobody asked for, followed by dropping the connection. That
+// is the SERVICE-initiated end — its own duration cap, a quota trip, an
+// operator action — and it is the one path that emits no gptlive.Error at all,
+// because classify sees closedEv already closed and run() returns nil.
+func newFakeGPTLiveServerEndingItsOwnSession(t *testing.T) string {
+	t.Helper()
+	var upgrader websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var ev map[string]any
+			if err := json.Unmarshal(data, &ev); err != nil {
+				continue
+			}
+			if ev["type"] == "session.start" {
+				_ = conn.WriteJSON(map[string]any{"type": "session.started", "session": map[string]any{"id": "test"}})
+				_ = conn.WriteJSON(map[string]any{
+					"type": "session.closed", "reason": "service_ended", "usage": map[string]any{"seconds": 11},
+				})
+				return // drop the connection, the way a service that is done with you does
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// TestServiceInitiatedSessionEndLeavesTheRoom covers the final whole-branch
+// review's Important 1. onEvent's Error{Recoverable:false} case was the only
+// thing that called rs.Leave(), but run() emits no Error whatsoever when the
+// SERVICE ends the session on its own: classify sees closedEv already closed
+// and returns nil, run returns, the event and audio channels close, and
+// pumpEvents/pumpAudioOut simply observed their channels close and returned.
+// Nothing published a state change, disconnected the room, or persisted
+// anything — the child sat in a connected room with an agent that would never
+// speak again.
+//
+// rs.ctx being cancelled is the observable: RoomSession.leave() cancels it
+// first thing, so its Done channel closing proves Leave actually ran.
+func TestServiceInitiatedSessionEndLeavesTheRoom(t *testing.T) {
+	rs, err := NewRoomSession(RoomSessionConfig{
+		RoomInfo:  &lkproto.Room{Name: "room-service-end"},
+		ServerURL: "ws://localhost:7880",
+		GPTLive:   &GPTLiveSessionSpec{SampleRate: 24000},
+	})
+	if err != nil {
+		t.Fatalf("NewRoomSession() error = %v", err)
+	}
+	// Join is what normally creates rs.ctx/rs.cancel, and it needs a real
+	// LiveKit server; stand them up directly so leave()'s very first act —
+	// cancelling rs.ctx — is observable without one.
+	rs.ctx, rs.cancel = context.WithCancel(context.Background())
+
+	url := newFakeGPTLiveServerEndingItsOwnSession(t)
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	p := rs.gptlive
+	if err := p.finishStart(context.Background(), sess); err != nil {
+		t.Fatalf("finishStart() error = %v", err)
+	}
+
+	select {
+	case <-rs.ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the service ended the session and nothing tore the room session down: rs.ctx was never " +
+			"cancelled, so the child would still be sitting in a connected room with a silent agent")
+	}
+}
+
+// TestPipelineCloseDoesNotLeaveTheRoomItself is Important 1's other half: an
+// ordinary teardown (leave() -> Close) also closes the event channel, and
+// pumpEvents must NOT read that as a service-initiated end and schedule a
+// second, re-entrant Leave. p.closing is the discriminator.
+func TestPipelineCloseDoesNotLeaveTheRoomItself(t *testing.T) {
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000})
+	if !p.shouldLeaveOnEventsClose() {
+		t.Fatal("a pipeline nobody has closed must treat an events-channel close as a service-initiated end")
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	p.Close(closeCtx) // p.sess is nil, so this only records that a close was requested
+	cancel()
+	if p.shouldLeaveOnEventsClose() {
+		t.Fatal("after Close, the events-channel close is OUR doing: leave() is already driving the teardown " +
+			"and calling Leave from pumpEvents would be re-entrant")
+	}
+}
+
+// TestGreetBeforeDialIsReplayedByFinishStart covers Important 4. Join connects
+// the room and publishes the local track BEFORE it calls Start, so the
+// gateway's "ready_for_greeting" data message can land across the entire dial
+// window (a 10s timeout with 3 retries at 2s). Greet used to return silently
+// when p.sess was still nil, recording nothing, so the child then waited out
+// the 3-second fallback timer — which does not even start until finishStart
+// spawns it.
+func TestGreetBeforeDialIsReplayedByFinishStart(t *testing.T) {
+	url := newMinimalFakeGPTLiveServer(t)
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{APIKey: "test", BaseURL: url})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer sess.Close(context.Background())
+
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000, Persona: GPTLivePersona{Greeting: "hi"}})
+	p.Greet() // the ready_for_greeting that arrives mid-dial
+	p.mu.Lock()
+	pending, greeted := p.pendingGreet, p.greeted
+	p.mu.Unlock()
+	if !pending || greeted {
+		t.Fatalf("a Greet before the dial must be remembered, not performed or dropped: pendingGreet=%v greeted=%v", pending, greeted)
+	}
+
+	if err := p.finishStart(context.Background(), sess); err != nil {
+		t.Fatalf("finishStart() error = %v", err)
+	}
+	p.mu.Lock()
+	greeted = p.greeted
+	p.mu.Unlock()
+	if !greeted {
+		t.Fatal("finishStart must replay the pending greeting immediately, not leave the child waiting " +
+			"for the 3-second fallback timer it only just started")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	p.Close(closeCtx)
+	cancel()
+}
+
+// TestQuizDirectivesPushedToTheVoiceModelDeclareTheySupersede covers Important
+// 3. AppendInstructions only ever appends and the protocol offers no replace,
+// so a ten-question session with misses accumulates 10-30 live "## This
+// Question" blocks, each naming a different question id and all of them
+// reading as current. Every directive therefore carries an explicit supersedes
+// line, so only the last one is authoritative.
+func TestQuizDirectivesPushedToTheVoiceModelDeclareTheySupersede(t *testing.T) {
+	var mu sync.Mutex
+	var appended []string
+	var upgrader websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var ev map[string]any
+			if err := json.Unmarshal(data, &ev); err != nil {
+				continue
+			}
+			switch ev["type"] {
+			case "session.start":
+				_ = conn.WriteJSON(map[string]any{"type": "session.started", "session": map[string]any{"id": "test"}})
+			case "session.instructions.append":
+				content, _ := ev["content"].(string)
+				mu.Lock()
+				appended = append(appended, content)
+				mu.Unlock()
+			case "session.close":
+				_ = conn.WriteJSON(map[string]any{"type": "session.closed", "reason": "close_requested", "usage": map[string]any{"seconds": 1}})
+			}
+		}
+	}))
+	defer srv.Close()
+
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{
+		APIKey: "test", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http"),
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	tracker := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000, Quiz: tracker})
+	if err := p.finishStart(context.Background(), sess); err != nil {
+		t.Fatalf("finishStart() error = %v", err)
+	}
+
+	if _, err := tracker.Score("11", "miss", "six"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tracker.Score("11", "correct", "eight"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pushes travel over the websocket, so give the server a moment to see
+	// them before closing; Close itself also flushes the outgoing queue.
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	p.Close(closeCtx)
+	cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The greeting (Persona.Greeting is empty here, so none is sent) aside,
+	// every instructions.append on this session is a Door directive.
+	var directives []string
+	for _, c := range appended {
+		if strings.Contains(c, "## This Question") {
+			directives = append(directives, c)
+		}
+	}
+	if len(directives) != 2 {
+		t.Fatalf("expected one Door directive pushed per scored turn, got %d: %q", len(directives), directives)
+	}
+	for i, d := range directives {
+		if !strings.HasPrefix(d, gptLiveDirectiveSupersedes) {
+			t.Errorf("directive %d reaches the voice model without declaring that it supersedes the earlier "+
+				"ones, so all of them keep reading as current: %q", i, d)
+		}
 	}
 }
 

@@ -670,13 +670,32 @@ func (ab *AgentBridge) ExpireStaleTranscript(sessionKey string) {
 // FinalizeSessionSummary summarizes the completed voice session even when the
 // rolling context threshold was not reached during the call.
 func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey string) (string, int, error) {
+	if ab == nil {
+		return "", 0, nil
+	}
+	return ab.FinalizeSessionSummaryFrom(ctx, sessionKey, ab.TranscriptSnapshot())
+}
+
+// FinalizeSessionSummaryFrom is FinalizeSessionSummary for a session whose
+// turns this bridge never saw, so it cannot supply the fallback transcript
+// itself. That is every gptlive session: the gptLivePipeline owns the
+// transcript and the bridge is only present for its provider, workspace and
+// session store, so ab.TranscriptSnapshot() is empty and the summary — and with
+// it the MEMORY.md append that is the only cross-session continuity a character
+// has — would always come out blank.
+//
+// fallback is used exactly where ab.TranscriptSnapshot() was used before: only
+// when the session store has no history for sessionKey.
+func (ab *AgentBridge) FinalizeSessionSummaryFrom(
+	ctx context.Context, sessionKey string, fallback []PersistedChatMessage,
+) (string, int, error) {
 	if ab == nil || ab.sessions == nil {
 		return "", 0, nil
 	}
 
 	history := ab.sessions.GetHistory(sessionKey)
 	if len(history) == 0 {
-		for _, msg := range ab.TranscriptSnapshot() {
+		for _, msg := range fallback {
 			role := "assistant"
 			if msg.ChatType == chatTypeUser {
 				role = "user"

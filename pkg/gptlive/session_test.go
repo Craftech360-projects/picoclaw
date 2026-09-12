@@ -223,3 +223,49 @@ func TestCloseJoinsReadGoroutineBeforeClosingChannels(t *testing.T) {
 		t.Fatal("s.Audio() never closed after Close returned")
 	}
 }
+
+// TestCloseReturnsImmediatelyWhenTheRunLoopAlreadyExited covers Minor 7 of the
+// final whole-branch review. On the unrecoverable-error path (MaxRetries
+// exhausted, or a fatal protocol error) run() has already returned and closed
+// s.done, so nothing is left reading s.out. Close still sent session.close into
+// that queue and then waited the full sessionCloseTimeout — five seconds — for
+// a session.closed that could never arrive, on every single failed session.
+//
+// The fake server here answers session.start and then reports a FATAL protocol
+// error, which is precisely that path: run emits one non-recoverable Error and
+// returns. Close must then notice the run loop is gone and return promptly.
+func TestCloseReturnsImmediatelyWhenTheRunLoopAlreadyExited(t *testing.T) {
+	var f *fakeLive
+	f = newFakeLive(t, func(c *websocketConn, ev map[string]any) {
+		if ev["type"] == EventSessionStart {
+			f.send(c, map[string]any{"type": EventSessionStarted, "session": map[string]any{"id": "dead_test"}})
+			f.send(c, map[string]any{"type": EventError, "error": map[string]any{
+				"type": "invalid_request_error", "code": "invalid_api_key", "message": "bad key",
+			}})
+		}
+	})
+	s, err := Dial(context.Background(), testConfig(f.url()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the run loop to actually exit, which is the state this is about.
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run loop never exited after the fatal protocol error")
+	}
+
+	start := time.Now()
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// sessionCloseTimeout is 5s; anything near it means Close waited for a
+	// session.closed reply that nothing could ever send.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Close took %v after the run loop had already exited; it must not wait out "+
+			"sessionCloseTimeout (%v) for a reply that can never arrive", elapsed, sessionCloseTimeout)
+	}
+	if got := len(f.received(EventSessionClose)); got != 0 {
+		t.Errorf("Close sent %d session.close events into a queue nobody reads; want 0", got)
+	}
+}

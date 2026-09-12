@@ -57,11 +57,30 @@ func NewQuizTracker(cfg QuizTrackerConfig) *QuizTracker {
 	if cfg.MemoType == "" {
 		cfg.MemoType = "daily_quiz"
 	}
+	if cfg.Batch == nil {
+		// find/pendingLocked/Status all dereference cfg.Batch unguarded. That is
+		// safe today only because buildGPTLiveSpec refuses to build a tracker
+		// without a batch — an invariant held by one caller, one package away.
+		// An empty batch makes it structural instead: find returns nil ("not in
+		// today's batch"), pendingLocked returns nil ("all questions done"), and
+		// nothing panics.
+		cfg.Batch = &QuizBatch{}
+	}
 	return &QuizTracker{cfg: cfg, reported: map[int64]bool{}, tries: map[int64]int{}, attempts: map[int64][]QuizAttempt{}}
 }
 
 // OnDirective registers the pipeline callback that pushes a Door directive to the voice model.
 func (t *QuizTracker) OnDirective(fn func(string)) { t.onDirective = fn }
+
+// Workspace is the session workspace this tracker writes its MEMO state into.
+// persistGPTLiveSession needs it to collect that state for character progress
+// when the AgentBridge has no workspace of its own to offer.
+func (t *QuizTracker) Workspace() string {
+	if t == nil {
+		return ""
+	}
+	return t.cfg.Workspace
+}
 
 func (t *QuizTracker) find(id string) *QuizQuestion {
 	id = strings.TrimSpace(id)
@@ -194,8 +213,28 @@ func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive s
 		id, v, attempts := q.ID, verdict, append([]QuizAttempt(nil), t.attempts[q.ID]...)
 		answerCB = func() { t.cfg.AnswerReporter(id, v, attempts) }
 	}
+	// The terminal line is gated on the LADDER being exhausted, not on the
+	// verdict string. Those are not the same condition: Score downgrades a
+	// correct answer given at Door 3 to `revealed` (ADR-0009's mastery rule),
+	// and a Door-3 correct answer arrives with tries == 2 — one short of
+	// exhaustion. Gating on `verdict == "revealed"` therefore called
+	// doorDirectiveText(q, 2), which takes neither the no-ladder branch nor the
+	// `tries >= doorGuided` terminal branch and falls through to
+	// `switch q.DoorFor(2)` -> doorGuided: "say this explanation ... then ask
+	// the question again and wait". The question was just closed (it is in
+	// t.reported and pendingLocked has already moved on), so the voice was told
+	// to re-ask a finished question immediately before asking the next one, and
+	// any quiz_score_answer for it came back "already scored". With an
+	// unauthored Door 2 (len(ChoiceOrder) < 2 with TeachText set) DoorFor(1) is
+	// already doorGuided, so the same thing happened one try earlier.
+	//
+	// ladderExhausted is the same predicate the "miss" case already uses to
+	// decide a miss is terminal, so the terminal wording appears exactly when
+	// the tries really did run out. This mirrors the cascade, which downgrades
+	// the verdict only and recomputes doorDirective() from an already-advanced
+	// pendingQuizID (agent_bridge.go).
 	terminal := ""
-	if verdict == "revealed" && t.tries[q.ID] > 0 {
+	if t.ladderExhausted(q) && t.tries[q.ID] > 0 {
 		terminal = doorDirectiveText(q, t.tries[q.ID]) // the "all tries used" wording
 	}
 	next := t.pendingLocked()
@@ -218,6 +257,57 @@ func (t *QuizTracker) nextDirectiveLocked(q *QuizQuestion) (directive string, cb
 		cb = func() { onDirective(d) }
 	}
 	return d, cb
+}
+
+// FlushPendingAttempts reports the tries for the question this session ended
+// on without ever resolving — the gptlive equivalent of the cascade's
+// flushPendingQuizAttempts (agent_bridge.go), which fires at teardown for
+// exactly the same reason. Without it a child who answers a question twice and
+// then puts the toy down produces no attempt rows at all, because
+// AnswerReporter only ever fires for a question that reached a verdict.
+//
+// Called from persistGPTLiveSession at teardown. Synchronous on purpose, like
+// the cascade's: a goroutine here would race teardown and usually lose.
+//
+// Safe to call more than once: the buffered attempts are removed under the
+// lock, so a second call finds nothing. It deliberately does NOT mark the
+// question reported — the question was not scored, only its tries recorded.
+func (t *QuizTracker) FlushPendingAttempts() {
+	if t == nil || t.cfg.AttemptReporter == nil {
+		return
+	}
+	t.mu.Lock()
+	var (
+		id       int64
+		attempts []QuizAttempt
+	)
+	if q := t.pendingLocked(); q != nil {
+		id = q.ID
+		attempts = append([]QuizAttempt(nil), t.attempts[q.ID]...)
+		delete(t.attempts, q.ID)
+	}
+	t.mu.Unlock()
+	if id == 0 || len(attempts) == 0 {
+		return
+	}
+	t.cfg.AttemptReporter(id, attempts)
+}
+
+// StateTypesWritten names the MEMO state types this tracker persisted, in the
+// shape sendCharacterProgress/CollectStateMemos expect. On the gptlive path
+// the AgentBridge never writes state (the tracker's own recordLocked calls
+// maybePersistQuizState directly), so bridge.StateTypesWritten() is empty and
+// character progress would collect nothing without this.
+func (t *QuizTracker) StateTypesWritten() map[string]bool {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.reported) == 0 || strings.TrimSpace(t.cfg.MemoType) == "" {
+		return nil
+	}
+	return map[string]bool{t.cfg.MemoType: true}
 }
 
 // RecordWonder reports the child's Wonder answer. RecordWonder touches no

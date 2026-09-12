@@ -15,11 +15,24 @@ import (
 
 // gptLiveSharedTools are copied from the worker's registry when present, for
 // every character's GPT-Live backend model. exec, write_file, list_dir and
-// web_fetch are deliberately absent from this release: a backend model
-// talking directly to a child gets no shell, no arbitrary filesystem access,
-// no directory listing and no outbound fetch. remember_child_fact (below) is
-// the only write path offered, and it writes to one fixed, tool-internal
-// path rather than anything the model names.
+// web_fetch are deliberately absent from this release: a backend model talking
+// directly to a child gets no shell, no filesystem WRITES it can aim, no
+// directory listing and no outbound fetch. remember_child_fact (below) is the
+// only write path offered, and it writes to one fixed, tool-internal path
+// rather than anything the model names.
+//
+// read_file is the one exception, and it is read-only rather than
+// unreachable: it takes a path from the model, and whether that path is
+// confined to the workspace is decided entirely by the shared tool instance
+// this copies — pkg/tools' read_file only rejects an escaping path when its
+// RestrictToWorkspace flag is set (agents.defaults.restrict_to_workspace).
+// This list does NOT enforce that; it inherits it. An earlier version of this
+// comment claimed "no arbitrary filesystem access", which overstated it: with
+// the restriction off, a backend model can read any file the worker process
+// can. Asserting the flag here was considered and rejected for this wave —
+// pkg/livekit cannot see the tool's configuration without reaching into
+// pkg/tools' concrete type, and silently dropping read_file from characters
+// on an unrestricted deployment is a behaviour change, not a comment fix.
 var gptLiveSharedTools = []string{"get_time_date", "get_weather", "read_file"}
 
 const (

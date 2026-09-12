@@ -222,10 +222,24 @@ func (s *Session) Close(ctx context.Context) error {
 	s.closing = true
 	startSent := s.startSent
 	s.mu.Unlock()
+	// Only ask the service to end the session while the run loop is still
+	// there to write it. On the unrecoverable-error path (MaxRetries exhausted,
+	// or a fatal protocol error) run has already returned and closed s.done, so
+	// nothing is left reading s.out: session.close would go into a queue nobody
+	// drains, and the wait below would then burn the full sessionCloseTimeout
+	// waiting for a session.closed that can never arrive. That is a fixed 5s of
+	// teardown on every failed session. s.done is also one of the wait cases,
+	// for the run loop that exits between this check and the wait.
+	select {
+	case <-s.done:
+		startSent = false
+	default:
+	}
 	if startSent {
 		s.send(simpleEvent{Type: EventSessionClose, EventID: newEventID("close_")})
 		select {
 		case <-s.closedEv:
+		case <-s.done:
 		case <-time.After(sessionCloseTimeout):
 		case <-ctx.Done():
 		}

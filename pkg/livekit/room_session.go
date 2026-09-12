@@ -307,26 +307,25 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	return nil
 }
 
-// PublishAgentState publishes a JSON agent state change to the LiveKit data channel
+// PublishAgentState publishes a JSON agent state change to the LiveKit data channel.
+//
+// The body used to be duplicated byte-for-byte in publishAgentStateOnRoom
+// (gptlive_pipeline.go), which exists because setState must publish against a
+// room it has already snapshotted rather than re-reading rs.room. Two copies of
+// one wire payload is how a future field gets added to the gptlive sessions and
+// silently not to the cascade ones, so the payload now lives in exactly one
+// place and this is a wrapper over it.
+//
+// Behaviour for cascade callers is unchanged: identical payload, identical
+// reliable publish, identical "room local participant not ready" error for a
+// nil room or nil LocalParticipant. The only difference is that the room is now
+// read once under rs.mu (roomSnapshot) instead of twice unguarded — which
+// removes a nil-check-then-use window rather than changing any outcome. No
+// caller holds rs.mu across this call (handleEndPrompt releases it before
+// calling; AudioPipeline.publishState goes through ap.session), so the added
+// lock cannot deadlock.
 func (rs *RoomSession) PublishAgentState(oldState, newState string) error {
-	if rs.room == nil || rs.room.LocalParticipant == nil {
-		return errors.New("room local participant not ready")
-	}
-
-	payload := map[string]any{
-		"type": "agent_state_changed",
-		"data": map[string]string{
-			"old_state": oldState,
-			"new_state": newState,
-		},
-	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	return rs.room.LocalParticipant.PublishData(data, lksdk.WithDataPublishReliable(true))
+	return publishAgentStateOnRoom(rs.roomSnapshot(), oldState, newState)
 }
 
 // PublishSpeechCreated publishes the generated speech text back to the LiveKit data channel
@@ -406,7 +405,7 @@ func (rs *RoomSession) leave() {
 		// two simultaneously-ready cases). Wait for pumpEvents to have actually
 		// exited before reading anything it wrote.
 		gptlivePipeline.WaitForEventsDrain(2 * time.Second)
-		rs.persistGPTLiveSession(gptlivePipeline)
+		rs.persistGPTLiveSession(gptlivePipeline, bridge)
 	}
 
 	// persistPostSessionData reads bridge.UsageSnapshot()/TranscriptSnapshot(),
@@ -416,8 +415,13 @@ func (rs *RoomSession) leave() {
 	// persist" early return. Gating on gptlivePipeline == nil explicitly (Task
 	// 13 review, fold-in item) makes that skip a real invariant of this
 	// function rather than an accident of persistPostSessionData's current
-	// guard, which a future change to that guard (e.g. Critical 1's fix here
-	// widening it) could otherwise silently break.
+	// guard, which a future change to that guard could otherwise silently break.
+	//
+	// The gptlive branch above is not a subset of this one any more: since the
+	// final whole-branch review (Important 2) persistGPTLiveSession runs the
+	// whole tail — character progress, the session summary and its MEMORY.md
+	// append, the trace bundle — off the pipeline's own transcript. The two
+	// calls remain mutually exclusive so neither session type can ever run both.
 	if gptlivePipeline == nil {
 		// Persist usage + transcript before bridge/session teardown.
 		rs.persistPostSessionData(bridge)
@@ -1287,12 +1291,11 @@ func (rs *RoomSession) roomSnapshot() *lksdk.Room {
 	return rs.room
 }
 
-// persistGPTLiveSession persists the GPT-Live transcript and usage counters
-// to the same manager-API path persistPostSessionData uses for the cascade
-// (sendChatHistory, sendSessionEnd, sendUsageSummary — see
-// post_session_persistence.go). pipeline is passed explicitly (rather than
-// read from rs.gptlive) because leave() has already cleared that field by the
-// time this is called.
+// persistGPTLiveSession is the GPT-Live analogue of persistPostSessionData: it
+// runs the same post-session tail for a gptlive session that the cascade runs
+// for its own (see post_session_persistence.go). pipeline and bridge are both
+// passed explicitly, rather than read from rs.gptlive/rs.bridge, because
+// leave() has already cleared both fields by the time this is called.
 //
 // Callers must synchronize on pipeline.WaitForEventsDrain before calling this
 // (leave() does, right after Close): pumpEvents' own ctx.Done() branch now
@@ -1312,19 +1315,22 @@ func (rs *RoomSession) roomSnapshot() *lksdk.Room {
 // entirely when both are zero, so reporting only the total would silently
 // drop every gptlive session's usage — voice seconds, token total, and
 // duration alike — with no error, ever reaching /device/token-usage.
-func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline) {
-	if rs == nil || pipeline == nil || strings.TrimSpace(rs.managerAPIURL) == "" || strings.TrimSpace(rs.deviceMAC) == "" {
+// The rest of the tail — character progress, the LLM session summary and its
+// MEMORY.md append, and the trace bundle — is NOT optional on this path (final
+// whole-branch review, Important 2). This used to be the only thing that ran
+// for a gptlive session, and persistPostSessionData was skipped entirely, so
+// all four were lost. On the dev box, where every character runs gptlive, that
+// means memory/MEMORY.md is read at session start (pkg/agent/context.go) and
+// never written again except by remember_child_fact — cross-session continuity
+// degrading for every character from day one, with no trace bundle to diagnose
+// it — plus kid_character_state frozen for the quiz characters and no summary
+// for the parent app to show. bridge is still non-nil here (main.go builds it
+// normally on this path), which is what makes the summary reachable at all.
+func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline, bridge *AgentBridge) {
+	if rs == nil || pipeline == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	messages := pipeline.TranscriptSnapshot()
-	if err := rs.sendChatHistory(ctx, messages); err != nil {
-		logger.WarnCF("livekit", "gptlive: chat history upload failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
-	}
-	if err := rs.sendSessionEnd(ctx, len(messages)); err != nil {
-		logger.WarnCF("livekit", "gptlive: session end failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
-	}
 	usage := UsageSnapshot{
 		SessionDurationSeconds: pipeline.VoiceSeconds(),
 		MessageCount:           len(messages),
@@ -1332,9 +1338,120 @@ func (rs *RoomSession) persistGPTLiveSession(pipeline *gptLivePipeline) {
 		OutputTokens:           pipeline.BackendOutputTokens(),
 		TotalTokens:            pipeline.BackendTokens(),
 	}
-	if err := rs.sendUsageSummary(ctx, usage); err != nil {
-		logger.WarnCF("livekit", "gptlive: usage summary failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+
+	// The attempt rows for a question the child never finished. On the cascade
+	// this fires from AgentBridge.Close via flushPendingQuizAttempts; nothing
+	// on this path ever invoked QuizTrackerConfig.AttemptReporter, which
+	// main.go has been wiring up all along, so a child who put the toy down
+	// mid-question produced no attempt rows at all (final review, Important 5).
+	// Before the manager-enabled gate below: the reporter owns its own
+	// endpoint and its own no-op-when-unconfigured behaviour.
+	if rs.gptLiveSpec != nil && rs.gptLiveSpec.Quiz != nil {
+		rs.gptLiveSpec.Quiz.FlushPendingAttempts()
 	}
+
+	managerPersistenceEnabled := strings.TrimSpace(rs.managerAPIURL) != "" && strings.TrimSpace(rs.deviceMAC) != ""
+	if managerPersistenceEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := rs.sendChatHistory(ctx, messages); err != nil {
+			logger.WarnCF("livekit", "gptlive: chat history upload failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+		}
+		if err := rs.sendSessionEnd(ctx, len(messages)); err != nil {
+			logger.WarnCF("livekit", "gptlive: session end failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+		}
+		if err := rs.sendUsageSummary(ctx, usage); err != nil {
+			logger.WarnCF("livekit", "gptlive: usage summary failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+		}
+		rs.sendGPTLiveCharacterProgress(ctx, bridge, messages)
+		cancel()
+	} else {
+		logger.InfoCF("livekit", "gptlive: manager persistence disabled; file-memory mode only", map[string]any{"room": rs.roomName()})
+	}
+
+	rs.persistGPTLiveSessionTail(bridge, messages, usage, managerPersistenceEnabled)
+}
+
+// sendGPTLiveCharacterProgress is persistPostSessionData's character-progress
+// block for a gptlive session. The one real difference from the cascade is
+// where the written-state set comes from: on this path the QuizTracker writes
+// memory/state/<type>.md itself (recordLocked -> maybePersistQuizState) and the
+// AgentBridge never sees it, so bridge.StateTypesWritten() is empty and
+// CollectStateMemos — which treats an empty set as "this session persisted
+// nothing", deliberately, to stop one character relabelling another's state —
+// would collect nothing at all. The tracker's own StateTypesWritten() supplies
+// the missing type.
+func (rs *RoomSession) sendGPTLiveCharacterProgress(ctx context.Context, bridge *AgentBridge, messages []PersistedChatMessage) {
+	workspace := ""
+	var contentBank *ContentPayload
+	written := map[string]bool{}
+	if bridge != nil {
+		if bridge.agentInstance != nil {
+			workspace = strings.TrimSpace(bridge.agentInstance.Workspace)
+		}
+		contentBank = bridge.contentBank
+		for k, v := range bridge.StateTypesWritten() {
+			written[k] = v
+		}
+	}
+	if rs.gptLiveSpec != nil && rs.gptLiveSpec.Quiz != nil {
+		for k, v := range rs.gptLiveSpec.Quiz.StateTypesWritten() {
+			written[k] = v
+		}
+		if workspace == "" {
+			workspace = strings.TrimSpace(rs.gptLiveSpec.Quiz.Workspace())
+		}
+	}
+	if workspace == "" {
+		return
+	}
+	if err := rs.sendCharacterProgress(ctx, workspace, contentBank, messages, written); err != nil {
+		logger.WarnCF("livekit", "gptlive: character progress failed", map[string]any{"room": rs.roomName(), "error": err.Error()})
+	}
+}
+
+// persistGPTLiveSessionTail is the part of persistPostSessionData that does not
+// depend on the manager API being configured: the LLM session summary, its
+// MEMORY.md append (file-memory mode's ONLY cross-session continuity), the
+// summary upload when the manager is configured, and the trace bundle.
+//
+// The transcript is passed in explicitly and threaded down to
+// FinalizeSessionSummaryFrom, because the bridge's own TranscriptSnapshot — the
+// fallback the cascade relies on — is empty on this path: the gptlive pipeline
+// owns the transcript, the bridge never sees a turn.
+func (rs *RoomSession) persistGPTLiveSessionTail(
+	bridge *AgentBridge, messages []PersistedChatMessage, usage UsageSnapshot, managerPersistenceEnabled bool,
+) {
+	if bridge == nil {
+		return
+	}
+	summary := ""
+	summaryMessageCount := 0
+	if bridge.TeardownPreempted() {
+		// Same reasoning as the cascade: the next session is already waiting on
+		// the workspace lock and would clobber this MEMORY.md write anyway.
+		logger.InfoCF("livekit", "gptlive: skipping session summary on preempted handoff", map[string]any{"room": rs.roomName()})
+	} else {
+		summary, summaryMessageCount = rs.finalizeAndPersistSessionSummaryFrom(bridge, messages)
+	}
+
+	if summary != "" {
+		if err := rs.persistSummaryToMemoryFile(bridge, summary, summaryMessageCount); err != nil {
+			logger.WarnCF("livekit", "gptlive: failed to persist session summary to MEMORY.md", map[string]any{
+				"room": rs.roomName(), "error": err.Error(),
+			})
+		}
+		if managerPersistenceEnabled {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if err := rs.sendSessionSummary(ctx, summary, summaryMessageCount); err != nil {
+				logger.WarnCF("livekit", "gptlive: failed to persist session summary to manager", map[string]any{
+					"room": rs.roomName(), "error": err.Error(),
+				})
+			}
+			cancel()
+		}
+	}
+
+	rs.exportSessionTraceBundle(bridge, usage, bridge.SessionQualitySnapshot())
 }
 
 func (rs *RoomSession) roomName() string {

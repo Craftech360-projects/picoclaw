@@ -266,10 +266,22 @@ func (rs *RoomSession) finalizeAndPersistSessionSummary(bridge *AgentBridge) (st
 	if rs == nil || bridge == nil {
 		return "", 0
 	}
+	// bridge.TranscriptSnapshot() is exactly what FinalizeSessionSummary used
+	// internally as its fallback, so this is the same call it always made.
+	return rs.finalizeAndPersistSessionSummaryFrom(bridge, bridge.TranscriptSnapshot())
+}
+
+// finalizeAndPersistSessionSummaryFrom is finalizeAndPersistSessionSummary with
+// the fallback transcript supplied by the caller, for the gptlive path where
+// the bridge holds none of the session's turns (see FinalizeSessionSummaryFrom).
+func (rs *RoomSession) finalizeAndPersistSessionSummaryFrom(bridge *AgentBridge, transcript []PersistedChatMessage) (string, int) {
+	if rs == nil || bridge == nil {
+		return "", 0
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	summary, messageCount, err := bridge.FinalizeSessionSummary(ctx, rs.sessionKeyForParticipant(""))
+	summary, messageCount, err := bridge.FinalizeSessionSummaryFrom(ctx, rs.sessionKeyForParticipant(""), transcript)
 	if err != nil {
 		logger.WarnCF("livekit", "Failed to finalize session summary", map[string]any{
 			"room":  rs.roomName(),
