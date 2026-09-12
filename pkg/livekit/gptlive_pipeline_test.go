@@ -230,7 +230,7 @@ func TestDriveSegmenterSerializesFeedAndTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		p.driveSegmenter(ctx, audio, ticks)
+		p.driveSegmenter(ctx, audio, ticks, nil)
 		close(done)
 	}()
 
@@ -299,6 +299,255 @@ func TestDriveSegmenterSerializesFeedAndTick(t *testing.T) {
 	}
 	if c != o {
 		t.Fatalf("closes (%d) != opens (%d): the open burst was never closed", c, o)
+	}
+}
+
+// fakeTrackWriter is a deterministic stand-in for *lkmedia.PCMLocalTrack in
+// the lead-buffer tests below: it implements localOutTrackWriter and simply
+// records every sample handed to it, in order, so a test can assert exactly
+// which chunks driveSegmenter actually wrote and when — without a real
+// LiveKit track and without any sleep-based timing.
+type fakeTrackWriter struct {
+	mu      sync.Mutex
+	written []media.PCM16Sample
+}
+
+func (f *fakeTrackWriter) WriteSample(s media.PCM16Sample) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.written = append(f.written, append(media.PCM16Sample(nil), s...))
+	return nil
+}
+
+func (f *fakeTrackWriter) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.written)
+}
+
+// pcmChunk builds a fixed-amplitude PCM16 chunk of the given sample count, as
+// wire bytes — the same shape driveSegmenter reads off its audio channel.
+func pcmChunk(amplitude int16, samples int) []byte {
+	s := make(media.PCM16Sample, samples)
+	for i := range s {
+		s[i] = amplitude
+	}
+	return pcm16ToBytes(s)
+}
+
+// driveSegmenterHarness drives driveSegmenter with unbuffered audio/ticks
+// channels, which is what makes the lead-buffer tests below deterministic
+// with no sleeps: driveSegmenter is a single sequential goroutine (that
+// invariant is exactly what TestDriveSegmenterSerializesFeedAndTick guards),
+// so it can only be blocked back at the top of its select — ready to receive
+// the next send — once the previous case's entire body, including any
+// flush/write it triggered, has fully run. Consequently, the mere fact that
+// one more unbuffered send on EITHER channel completed is proof the previous
+// one was completely processed; tests use a throwaway tick as that barrier
+// immediately before reading track state.
+type driveSegmenterHarness struct {
+	audio chan []byte
+	ticks chan time.Time
+	track *fakeTrackWriter
+	done  chan struct{}
+}
+
+func newDriveSegmenterHarness(t *testing.T, p *gptLivePipeline) *driveSegmenterHarness {
+	t.Helper()
+	h := &driveSegmenterHarness{
+		audio: make(chan []byte),
+		ticks: make(chan time.Time),
+		track: &fakeTrackWriter{},
+		done:  make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-h.done:
+		case <-time.After(2 * time.Second):
+			t.Error("driveSegmenter did not return after cleanup cancelled its context")
+		}
+	})
+	go func() {
+		p.driveSegmenter(ctx, h.audio, h.ticks, h.track)
+		close(h.done)
+	}()
+	return h
+}
+
+func (h *driveSegmenterHarness) send(pcm []byte)    { h.audio <- pcm }
+func (h *driveSegmenterHarness) tick(now time.Time) { h.ticks <- now }
+func (h *driveSegmenterHarness) barrier()           { h.ticks <- time.Unix(0, 0) }
+
+// TestDriveSegmenterHoldsWritesUntilLeadReached covers requirement 1 of the
+// playout-jitter fix (see audioLeadBuffer's doc comment for the starvation
+// chain this addresses): chunks arriving after the buffer was empty — session
+// start, here — must be held, unwritten, until audioLeadBuffer's worth has
+// queued, not written to the track the instant each one arrives. It doubles
+// as the "Feed is called only for chunks actually written" check: Segmenter.
+// Open() can only ever become true once Feed has actually run on the loud
+// chunk, so it staying false through the whole priming window is direct
+// evidence Feed was never called on it early.
+func TestDriveSegmenterHoldsWritesUntilLeadReached(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}}
+	p.seg = gptlive.NewSegmenter(func() {}, func() {})
+	h := newDriveSegmenterHarness(t, p)
+
+	loud := pcmChunk(30000, 800) // 100ms at 8kHz
+	quiet := pcmChunk(0, 800)    // 100ms of silence
+
+	// 400ms queued (loud + 3 quiet): under the 500ms lead, so nothing should
+	// have reached the track, and the burst the loud chunk would open on its
+	// own must not have opened either.
+	h.send(loud)
+	h.send(quiet)
+	h.send(quiet)
+	h.send(quiet)
+	h.barrier()
+
+	if got := h.track.count(); got != 0 {
+		t.Fatalf("track wrote %d samples before the lead was reached, want 0 (still priming)", got)
+	}
+	if p.seg.Open() {
+		t.Fatal("Segmenter opened before the loud chunk was ever fed — Feed must not run during priming")
+	}
+
+	// The 5th chunk (500ms total) crosses the lead: the whole primed queue
+	// must flush at once, in order.
+	h.send(quiet)
+	h.barrier()
+
+	if got := h.track.count(); got != 5 {
+		t.Fatalf("track wrote %d samples once the lead was reached, want 5 (the whole primed queue)", got)
+	}
+	if !p.seg.Open() {
+		t.Fatal("Segmenter never opened even after the loud chunk was flushed to the track")
+	}
+}
+
+// TestDriveSegmenterMidUtteranceDrainRearmsLead covers requirement 2: once
+// the buffer this loop built up is fully spent against wall-clock time — a
+// real gap in GPT-Live's own delivery, simulated here with a single large
+// tick jump instead of an actual pause — a chunk arriving right after must
+// not be dribbled straight to the track (that dribble is exactly the
+// short-lived padding the gateway's isSilent check drops). It must instead
+// be held again until a fresh lead has queued.
+func TestDriveSegmenterMidUtteranceDrainRearmsLead(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}}
+	p.seg = gptlive.NewSegmenter(func() {}, func() {})
+	h := newDriveSegmenterHarness(t, p)
+
+	// Loud throughout, deliberately: this test is about the lead-queue state
+	// machine, not the gate's own open/close logic, so keeping the burst open
+	// for the whole test avoids the two interacting.
+	loud := pcmChunk(30000, 800) // 100ms at 8kHz
+
+	// Reach the lead: 5 x 100ms = 500ms.
+	for i := 0; i < 5; i++ {
+		h.send(loud)
+	}
+	t0 := time.Unix(0, 0)
+	h.tick(t0) // barrier, and establishes lastTick for the decay below
+
+	if got := h.track.count(); got != 5 {
+		t.Fatalf("track wrote %d samples after reaching the lead, want 5", got)
+	}
+
+	// A gap of a full second empties the ~500ms of buffered-ahead playout
+	// this loop had built up.
+	h.tick(t0.Add(time.Second))
+
+	// A single chunk arriving right after that drain must NOT be dribbled
+	// straight to the track.
+	h.send(loud)
+	h.tick(t0.Add(time.Second)) // barrier (zero further decay: same instant)
+
+	if got := h.track.count(); got != 5 {
+		t.Fatalf("track wrote %d samples right after a single post-drain chunk, want 5 (still re-priming, not dribbling)", got)
+	}
+
+	// Refill to the lead — 4 more chunks, 500ms total with the one already
+	// queued above — and the whole re-primed queue must flush together.
+	for i := 0; i < 4; i++ {
+		h.send(loud)
+	}
+	h.tick(t0.Add(time.Second))
+
+	if got := h.track.count(); got != 10 {
+		t.Fatalf("track wrote %d samples after refilling the lead post-drain, want 10 (5 initial + 5 re-primed)", got)
+	}
+}
+
+// TestDriveSegmenterChannelCloseFlushesRemainder covers requirement 3's
+// channel-close half: whatever is still queued, priming or not, must be
+// flushed to the track when the audio channel closes — the tail of the last
+// utterance must never be abandoned just because a fresh lead never finished
+// queuing before the session ended.
+func TestDriveSegmenterChannelCloseFlushesRemainder(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}}
+	p.seg = gptlive.NewSegmenter(func() {}, func() {})
+	h := newDriveSegmenterHarness(t, p)
+
+	loud := pcmChunk(30000, 800)
+	h.send(loud)
+	h.send(loud)
+	h.barrier()
+
+	if got := h.track.count(); got != 0 {
+		t.Fatalf("track wrote %d samples before channel close, want 0 (still priming)", got)
+	}
+
+	close(h.audio)
+
+	select {
+	case <-h.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("driveSegmenter did not return after the audio channel closed")
+	}
+
+	if got := h.track.count(); got != 2 {
+		t.Fatalf("track wrote %d samples after channel close, want 2 (the queued tail must be flushed, not abandoned)", got)
+	}
+}
+
+// TestDriveSegmenterContextCancelDrainsQueue covers requirement 3's other
+// half: an ordinary teardown (ctx cancelled from Close, per driveSegmenter's
+// own doc comment) must also drain whatever is queued rather than abandoning
+// it, and must return promptly rather than hang.
+func TestDriveSegmenterContextCancelDrainsQueue(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}}
+	p.seg = gptlive.NewSegmenter(func() {}, func() {})
+
+	loud := pcmChunk(30000, 800)
+	audio := make(chan []byte)
+	ticks := make(chan time.Time)
+	track := &fakeTrackWriter{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.driveSegmenter(ctx, audio, ticks, track)
+		close(done)
+	}()
+
+	audio <- loud
+	audio <- loud
+	ticks <- time.Unix(0, 0) // barrier
+
+	if got := track.count(); got != 0 {
+		t.Fatalf("track wrote %d samples before cancel, want 0 (still priming)", got)
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("driveSegmenter did not return after ctx was cancelled")
+	}
+
+	if got := track.count(); got != 2 {
+		t.Fatalf("track wrote %d samples after ctx cancel, want 2 (queued audio must not be abandoned on teardown)", got)
 	}
 }
 
