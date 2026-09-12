@@ -362,16 +362,47 @@ func (s *Session) classify(err error) error {
 	return fmt.Errorf("gptlive: connection closed unexpectedly: %w", err)
 }
 
+// run dials, drives one connection via runOnce until it fails, and either reconnects
+// (retrying with backoff, or immediately after a MaxSessionDuration timer) or gives up.
+// It never retries a fatal protocol error, and it never retries past cfg.MaxRetries.
 func (s *Session) run() {
 	defer close(s.done)
 	defer s.closeChannelsWhenIdle()
-	conn, err := dialWebsocket(s.ctx, s.cfg)
-	if err != nil {
-		s.emit(Error{Err: err, Recoverable: false})
-		return
-	}
-	if err := s.runOnce(conn); err != nil {
-		s.emit(Error{Err: err, Recoverable: false})
+	retries := 0
+	reconnecting := false
+	for {
+		if s.ctx.Err() != nil {
+			return
+		}
+		conn, err := dialWebsocket(s.ctx, s.cfg)
+		if err == nil {
+			if reconnecting {
+				s.resetForReconnect()
+				s.emit(Reconnected{})
+			}
+			err = s.runOnce(conn)
+			if err == nil {
+				return // our own close, or ctx cancelled
+			}
+			if errors.Is(err, errReconnectTimer) {
+				reconnecting = true
+				retries = 0
+				continue
+			}
+		}
+		if isFatal(err) || retries >= s.cfg.MaxRetries {
+			s.emit(Error{Err: err, Recoverable: false})
+			return
+		}
+		s.emit(Error{Err: err, Recoverable: true})
+		logger.WarnCF("gptlive", "connection failed, retrying", map[string]any{"error": err.Error(), "retry": retries + 1})
+		retries++
+		reconnecting = true
+		select {
+		case <-time.After(s.cfg.RetryInterval):
+		case <-s.ctx.Done():
+			return
+		}
 	}
 }
 
