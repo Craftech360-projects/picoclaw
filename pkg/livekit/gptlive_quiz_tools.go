@@ -13,13 +13,30 @@ import (
 
 // QuizTrackerConfig wires the tracker to the same bank and reporters the cascade uses.
 type QuizTrackerConfig struct {
-	Batch           *QuizBatch
-	Workspace       string
-	MemoType        string // "daily_quiz" | "daily_riddle" | "daily_math"
-	AnswerReporter  func(questionID int64, result string, attempts []QuizAttempt)
+	Batch     *QuizBatch
+	Workspace string
+	MemoType  string // "daily_quiz" | "daily_riddle" | "daily_math"
+
+	// AnswerReporter is typed to match NewQuizAnswerReporter exactly, so a
+	// caller may wire that reporter in directly. It is invoked on its own
+	// background goroutine, after Score has released its internal lock and
+	// already returned the directive to the tool caller. The real reporter
+	// retries over the network and can take several seconds — that latency
+	// must never sit on the tool-call path a child is waiting on, so do not
+	// make this call synchronously, and do not rely on separate
+	// AnswerReporter calls being ordered relative to each other, to
+	// WonderReporter, or to Score's return.
+	AnswerReporter func(questionID int64, result string, attempts []QuizAttempt)
+
 	AttemptReporter func(questionID int64, attempts []QuizAttempt)
-	WonderReporter  func(question, answer, code string)
-	Now             func() time.Time
+
+	// WonderReporter is typed to match NewWonderQuestionReporter exactly, for
+	// the same reason and under the same contract as AnswerReporter: invoked
+	// on its own background goroutine, not on the caller's, and never
+	// assumed to be ordered against anything else.
+	WonderReporter func(question, answer, code string)
+
+	Now func() time.Time
 }
 
 // QuizTracker owns the game state a GPT-Live session cannot hold in prose: which
@@ -83,14 +100,19 @@ func (t *QuizTracker) Status() string {
 
 // Score records one answer. "miss" is not terminal until the ladder is exhausted.
 //
-// State mutation happens under t.mu; any reporter or OnDirective callback the
-// caller supplied is invoked only AFTER the lock is released. Firing a
-// caller-supplied callback while holding t.mu risks deadlock if the callback
-// re-enters the tracker (Status/Score), and firing it from an unsynchronized
-// goroutine gives an observer (a test polling a plain variable, for instance)
-// no happens-before edge to see the write by. Calling it synchronously, once
-// unlocked, avoids both: this mirrors how the cascade's own
-// flushWonderQuestion calls its reporter — unlocked, not backgrounded.
+// State mutation happens under t.mu; every callback the caller supplied is
+// invoked only AFTER the lock is released — never while holding t.mu, which
+// would risk deadlock if a callback re-entered the tracker (Status/Score).
+//
+// AnswerReporter is then dispatched on its own goroutine, matching the live
+// cascade (agent_bridge.go dispatches quizAnswerReporter with `go`, unlocked)
+// and the reporter's own documented rationale: it can retry over the network
+// for several seconds, and a dropped report is cheaper than seconds of dead
+// air after a child's answer is scored. OnDirective, by contrast, is called
+// synchronously: it is an in-process handoff of the next Door directive with
+// no I/O, so there is no latency to protect against, and calling it inline
+// keeps the pipeline's notion of "the active directive" consistent with the
+// same string Score just returned.
 func (t *QuizTracker) Score(questionID, result, transcript string) (string, error) {
 	t.mu.Lock()
 	q := t.find(questionID)
@@ -138,10 +160,10 @@ func (t *QuizTracker) Score(questionID, result, transcript string) (string, erro
 		return "", err
 	}
 	if answerCB != nil {
-		answerCB()
+		go answerCB()
 	}
 	if nextCB != nil {
-		nextCB()
+		nextCB() // in-process, no I/O: safe and preferable to call inline
 	}
 	return directive, nil
 }
@@ -155,8 +177,8 @@ func (t *QuizTracker) ladderExhausted(q *QuizQuestion) bool {
 }
 
 // recordLocked writes the same MEMO line the cascade parses, then reports.
-// Caller holds t.mu. It never invokes a callback itself — it returns one
-// (answerCB) for the caller to run once unlocked, per the note on Score.
+// Caller holds t.mu. It never invokes a callback itself - it returns one
+// (answerCB) for the caller to dispatch once unlocked, per the note on Score.
 func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive string, err error, answerCB func(), nextCB func()) {
 	answered := t.cfg.Batch.AnsweredToday + len(t.reported) + 1
 	memo := fmt.Sprintf("MEMO: type=%s | date=%s | scored_q=%s | scored_text=%s | result=%s | answered=%d",
@@ -198,12 +220,14 @@ func (t *QuizTracker) nextDirectiveLocked(q *QuizQuestion) (directive string, cb
 	return d, cb
 }
 
-// RecordWonder reports the child's Wonder answer. Called synchronously and
-// without holding t.mu — RecordWonder touches no tracker state, and the
-// cascade's own equivalent (flushWonderQuestion) reports the same way.
+// RecordWonder reports the child's Wonder answer. RecordWonder touches no
+// tracker state, so there is no lock to release first, but WonderReporter is
+// still dispatched on its own goroutine per its contract comment on
+// QuizTrackerConfig: the real reporter is a network call and must not block
+// whatever called RecordWonder (the quiz_record_wonder tool).
 func (t *QuizTracker) RecordWonder(question, answer, code string) {
 	if t.cfg.WonderReporter != nil {
-		t.cfg.WonderReporter(question, answer, code)
+		go t.cfg.WonderReporter(question, answer, code)
 	}
 }
 
