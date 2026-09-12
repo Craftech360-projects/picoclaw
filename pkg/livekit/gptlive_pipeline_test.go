@@ -882,6 +882,91 @@ func TestQuizDirectivesPushedToTheVoiceModelDeclareTheySupersede(t *testing.T) {
 	}
 }
 
+// TestGreetSendsShortNudgeNotFullGreetingPrompt covers the production fix directly at
+// Greet's call site: a real session logged "gptlive: invalid_request_error
+// (invalid_value): Context append text must not exceed 500 tokens" because Greet used to
+// append "<instruction prefix> + Persona.Greeting" as commentary, and a 2455-byte
+// manager-supplied greeting prompt blew through the service's per-append cap — the append
+// was rejected outright and the child was never greeted. The full guidance now lives in
+// Persona.Voice instead (sent once, uncapped, at session start; see
+// TestBuildGPTLivePersonaVoiceCarriesFullGreetingGuidance), so Greet's own commentary must
+// be short regardless of how long the greeting prompt is, and must never embed it.
+func TestGreetSendsShortNudgeNotFullGreetingPrompt(t *testing.T) {
+	var mu sync.Mutex
+	var commentary []string
+	var upgrader websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var ev map[string]any
+			if err := json.Unmarshal(data, &ev); err != nil {
+				continue
+			}
+			switch ev["type"] {
+			case "session.start":
+				_ = conn.WriteJSON(map[string]any{"type": "session.started", "session": map[string]any{"id": "test"}})
+			case "session.commentary.append":
+				content, _ := ev["content"].(string)
+				mu.Lock()
+				commentary = append(commentary, content)
+				mu.Unlock()
+			case "session.close":
+				_ = conn.WriteJSON(map[string]any{"type": "session.closed", "reason": "close_requested", "usage": map[string]any{"seconds": 1}})
+			}
+		}
+	}))
+	defer srv.Close()
+
+	sess, err := gptlive.Dial(context.Background(), gptlive.Config{
+		APIKey: "test", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http"),
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	// A long greeting prompt, sized like the one that actually blew the cap in production.
+	longGreeting := strings.Repeat("Ask the child about their day at school and what they had for lunch. ", 40)
+	if len(longGreeting) < 2000 {
+		t.Fatalf("test fixture too small to stand in for the 2455-byte production prompt: %d bytes", len(longGreeting))
+	}
+	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{
+		SampleRate: 24000,
+		Persona:    GPTLivePersona{Greeting: longGreeting},
+	})
+	if err := p.finishStart(context.Background(), sess); err != nil {
+		t.Fatalf("finishStart() error = %v", err)
+	}
+	p.Greet()
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	p.Close(closeCtx)
+	cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(commentary) != 1 {
+		t.Fatalf("expected exactly one commentary append from Greet, got %d: %q", len(commentary), commentary)
+	}
+	got := commentary[0]
+	if strings.Contains(got, longGreeting) {
+		t.Fatalf("Greet's commentary embeds the full greeting prompt; it must only nudge the model toward the "+
+			"guidance already sent in Voice: %q", got)
+	}
+	// 500 tokens at ~4 chars/token is roughly 2000 characters; the nudge must sit
+	// comfortably under that regardless of how long any character's greeting prompt is.
+	if len(got) > 300 {
+		t.Errorf("Greet's commentary is %d chars, want a short nudge well under the service's per-append cap: %q", len(got), got)
+	}
+}
+
 // TestWaitForEventsDrainNoOpWhenPumpsNeverStarted covers the other half of
 // WaitForEventsDrain's contract: a pipeline whose pumps were never spawned —
 // exercised here with the same bare &gptLivePipeline{} the pure-logic tests

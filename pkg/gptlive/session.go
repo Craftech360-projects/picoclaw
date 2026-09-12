@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -160,11 +162,69 @@ func (s *Session) PushAudio(pcm []byte) {
 }
 
 func (s *Session) AppendInstructions(text string) {
-	s.send(encodeAppend(EventInstructionsAppend, text, nil))
+	s.send(encodeAppend(EventInstructionsAppend, boundAppendContent("instructions", text), nil))
 }
-func (s *Session) AppendThinking(text string) { s.send(encodeAppend(EventThinkingAppend, text, nil)) }
+func (s *Session) AppendThinking(text string) {
+	s.send(encodeAppend(EventThinkingAppend, boundAppendContent("thinking", text), nil))
+}
 func (s *Session) AppendCommentary(text string) {
-	s.send(encodeAppend(EventCommentaryAppend, text, nil))
+	s.send(encodeAppend(EventCommentaryAppend, boundAppendContent("commentary", text), nil))
+}
+
+// maxAppendChars is a defensive cap on every context append this session sends
+// (session.instructions.append, session.thinking.append, session.commentary.append),
+// enforced here because the 500-token-per-append limit is a fact of the GPT-Live
+// protocol itself, not something every caller can be trusted to respect. A real
+// session hit it in production: "gptlive: invalid_request_error (invalid_value):
+// Context append text must not exceed 500 tokens", with the append rejected
+// outright and the child never greeted. The same path also carries the quiz
+// Door directives pushed through AppendInstructions, which accumulate in size
+// across a session as each directive declares itself superseding the last.
+//
+// Tokenizers vary by content and language, so this estimates a generous ~4
+// characters per token and keeps only 80% of that budget as headroom against
+// the estimate being wrong in either direction: 500 tokens * 4 chars/token *
+// 0.8 = 1600 characters. A truncated append that still reaches the model is
+// strictly better than a rejected one that leaves a child in silence.
+const maxAppendChars = 1600
+
+// boundAppendContent truncates content that would risk exceeding the service's
+// per-append token cap, logging which channel was truncated and by how much —
+// never the content itself, which may carry a child's own words or an API key
+// fragment injected upstream. Content within budget passes through unchanged.
+func boundAppendContent(channel, content string) string {
+	if utf8.RuneCountInString(content) <= maxAppendChars {
+		return content
+	}
+	kept := truncateAppendContent(content, maxAppendChars)
+	logger.WarnCF("gptlive", "truncating oversized context append", map[string]any{
+		"channel":         channel,
+		"original_chars":  utf8.RuneCountInString(content),
+		"kept_chars":      utf8.RuneCountInString(kept),
+		"truncated_chars": utf8.RuneCountInString(content) - utf8.RuneCountInString(kept),
+	})
+	return kept
+}
+
+// truncateAppendContent cuts content to at most n runes, preferring to end at a
+// sentence boundary (. ! ?) and falling back to a word boundary (whitespace) so
+// the result reads as a complete-ish thought rather than stopping mid-word.
+// Slicing on runes (not bytes) keeps a multi-byte character — Hindi text is a
+// realistic case here, given the language lock GPT-Live personas can carry —
+// from being split in the middle.
+func truncateAppendContent(content string, n int) string {
+	runes := []rune(content)
+	if n <= 0 || len(runes) <= n {
+		return content
+	}
+	cut := string(runes[:n])
+	if idx := strings.LastIndexAny(cut, ".!?"); idx > 0 {
+		return strings.TrimSpace(cut[:idx+1])
+	}
+	if idx := strings.LastIndexAny(cut, " \n\t"); idx > 0 {
+		return strings.TrimSpace(cut[:idx])
+	}
+	return strings.TrimSpace(cut)
 }
 func (s *Session) MuteInput() {
 	s.send(simpleEvent{Type: EventInputAudioMute, EventID: newEventID("mute_")})

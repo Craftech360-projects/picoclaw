@@ -391,6 +391,16 @@ func (p *gptLivePipeline) WriteSample(sample media.PCM16Sample) error {
 // the child waiting on the 3-second fallback timer, which does not even start
 // until finishStart has spawned it — so the greeting could be seconds late for
 // no reason. finishStart replays the flag the moment the session exists.
+//
+// This sends only a short nudge, NOT the greeting prompt itself: the greeting
+// prompt (manager-supplied, arbitrarily long) already lives in Persona.Voice's
+// <greeting_guidance> section, sent once at session start over a channel with
+// no length cap. A real session logged "gptlive: invalid_request_error
+// (invalid_value): Context append text must not exceed 500 tokens" and the
+// child was never greeted, because this used to append the full guidance as
+// commentary — a channel the service caps per-append. A short, fixed nudge is
+// comfortably under that cap regardless of how long any character's greeting
+// guidance is.
 func (p *gptLivePipeline) Greet() {
 	p.mu.Lock()
 	if p.greeted {
@@ -405,7 +415,7 @@ func (p *gptLivePipeline) Greet() {
 	p.greeted = true
 	sess := p.sess
 	p.mu.Unlock()
-	sess.AppendCommentary("Immediately follow the instruction below. Do not wait for the caller to speak first. After that, pause and listen.\n\n" + p.spec.Persona.Greeting)
+	sess.AppendCommentary("Greet the child now, following your greeting guidance from the session instructions. Do not wait for them to speak first. After that, pause and listen.")
 }
 
 // SayGoodbyeAndWait is the GPT-Live equivalent of the cascade's farewell:

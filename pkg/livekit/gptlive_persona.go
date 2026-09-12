@@ -26,7 +26,7 @@ type GPTLivePersonaInput struct {
 type GPTLivePersona struct {
 	Voice    string // the voice model's instructions
 	Backend  string // the backend Responses model's instructions
-	Greeting string // commentary sent when the device is ready
+	Greeting string // full greeting instruction; also folded into Voice's <greeting_guidance> section
 }
 
 // gptLiveAccentIndian is a modifier on HOW to speak English, not a competing language
@@ -65,6 +65,20 @@ func gptLiveDelegationBlock(language string, hasQuiz bool) string {
 	return b.String()
 }
 
+// gptLiveGreetingGuidance renders, for the Voice channel, what the model should say the
+// first time it is asked to greet the child. Session-start instructions (Voice) carry no
+// length cap, unlike a session.commentary.append (capped at 500 tokens by the service —
+// see the "gptlive: session error ... Context append text must not exceed 500 tokens"
+// production log this fixes). A manager-supplied greeting_prompt can run well past that
+// cap, so the full guidance belongs here; Greet (gptlive_pipeline.go) then only ever sends
+// a short nudge that points back at this section instead of repeating the guidance itself.
+func gptLiveGreetingGuidance(characterName, greetingPrompt string) string {
+	return "<greeting_guidance>\n" +
+		"The first time you are asked to greet the child, open the conversation using this guidance:\n\n" +
+		buildGreetingInstruction(characterName, greetingPrompt) +
+		"\n</greeting_guidance>"
+}
+
 // BuildGPTLivePersona composes the voice instructions, backend instructions and greeting
 // commentary for a GPT-Live session. It is called once at session start; nothing it
 // produces changes for the rest of the session.
@@ -77,6 +91,7 @@ func BuildGPTLivePersona(in GPTLivePersonaInput) GPTLivePersona {
 	if in.Accent == "indian" {
 		parts = append(parts, strings.TrimSpace(gptLiveAccentIndian))
 	}
+	parts = append(parts, gptLiveGreetingGuidance(in.CharacterName, in.GreetingPrompt))
 	backend := "You handle the work a voice model delegates while it talks to a child aged 3 to 16. " +
 		"Use tools when current information is required or when the child says something worth remembering. " +
 		"Reply with one or two short, friendly, child-safe sentences the voice model can read out."

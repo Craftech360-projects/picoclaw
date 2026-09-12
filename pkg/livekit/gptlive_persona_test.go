@@ -115,6 +115,30 @@ func TestBuildGPTLivePersonaAbsentBankBlock(t *testing.T) {
 	}
 }
 
+// TestBuildGPTLivePersonaVoiceCarriesFullGreetingGuidance covers the production fix: a real
+// session logged "gptlive: invalid_request_error (invalid_value): Context append text must
+// not exceed 500 tokens" because Greet used to append the full manager-supplied
+// greeting_prompt as commentary, a channel the service caps per-append — a 2455-byte prompt
+// blew straight through it and the child was never greeted. Session-start instructions
+// (Voice) carry no such cap, so the greeting guidance must appear there in full, however
+// long the prompt is; this reproduces a prompt sized like the one that failed in production.
+func TestBuildGPTLivePersonaVoiceCarriesFullGreetingGuidance(t *testing.T) {
+	ws := t.TempDir()
+	longPrompt := strings.Repeat("Ask the child about their day at school and what they had for lunch. ", 40)
+	if len(longPrompt) < 2000 {
+		t.Fatalf("test fixture too small to stand in for the 2455-byte production prompt: %d bytes", len(longPrompt))
+	}
+	p := BuildGPTLivePersona(GPTLivePersonaInput{
+		Workspace: ws, CharacterName: "Tenali", GreetingPrompt: longPrompt,
+	})
+	if !strings.Contains(p.Voice, "<greeting_guidance>") {
+		t.Error("Voice must carry a labelled greeting_guidance section")
+	}
+	if !strings.Contains(p.Voice, longPrompt) {
+		t.Error("Voice must carry the full greeting prompt verbatim, uncapped, unlike a context append")
+	}
+}
+
 // TestBuildGPTLivePersonaEmptyGreetingPrompt pins the fallback greeting used when the
 // character has no configured greeting_prompt: buildGreetingInstruction's generic
 // "introduce yourself" text, not an empty or malformed string.
