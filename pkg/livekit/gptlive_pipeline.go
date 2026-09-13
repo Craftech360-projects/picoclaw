@@ -70,11 +70,38 @@ const farewellBurstCloseTimeout = 6 * time.Second
 // fine on the same gateway, buffers about a second ahead of playout; we
 // buffered nothing.
 //
-// 500ms is deliberately less than that second, but it is not free: every
-// reply reaches the child roughly this much later than it would with zero
-// lead. That added latency is the accepted trade for smooth, un-dropped
-// playout — a stuttering greeting is worse than a marginally slower one.
-const audioLeadBuffer = 500 * time.Millisecond
+// 500ms was deliberately less than that second, but it was not free: every
+// reply reached the child roughly that much later than it would with zero
+// lead. That added latency was the accepted trade for smooth, un-dropped
+// playout — a stuttering greeting is worse than a marginally slower one — for
+// as long as the burstiness it was covering for was believed to be real and
+// upstream.
+//
+// It was not, or at least not entirely. GPT-Live audio jitter was root-caused
+// (see pkg/gptlive/session.go's EventOutputAudioDelta comment) to the read
+// goroutine there blocking on a slow downstream consumer, which throttled the
+// websocket read itself via TCP backpressure — what this pipeline measured as
+// OpenAI's own arrival rate was largely our own consumption rate. A
+// standalone probe against OpenAI's real delivery (dev box, 4 configs at
+// 16kHz/24kHz, with/without delegation, short/20KB instructions, ~44s of
+// continuous speech each) measured an arrival ratio of 0.988-1.001 with ZERO
+// gaps over 200ms in every config, against 0.66 measured on this worker at
+// the same time under the same load. OpenAI delivers, for all practical
+// purposes, in real time with nothing bursty to absorb.
+//
+// Now that pkg/gptlive's read goroutine can never be blocked by a slow
+// consumer (it hands audio to an internal queue that never blocks, drained
+// into Audio() by a separate goroutine — see audioQueue in session.go), the
+// jitter this buffer was actually covering for is gone at the source. What is
+// left to absorb is purely local: goroutine-scheduling gaps between that
+// feeder, this loop, and the local track's own playout ticker — on the order
+// of a scheduling quantum, not hundreds of milliseconds. So the lead is CUT,
+// not removed outright, to exactly one driveSegmenter tick: enough slack to
+// smooth a missed scheduling window (the same reasoning the 100ms ticker
+// period below already rests on) without paying for jitter that the probe
+// shows does not exist upstream anymore. This recovers 400 of the previous
+// 500ms of reply latency.
+const audioLeadBuffer = 100 * time.Millisecond
 
 // audioLeadQueueCap bounds how much audio driveSegmenter will hold in its
 // pre-lead queue, so a source that never lets audioLeadBuffer's duration
@@ -583,27 +610,46 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 	// fresh run of arrivals begins, logged once per Segmenter burst so the
 	// next dev-box test yields direct evidence of whether OpenAI delivers
 	// faster or slower than real time.
+	//
+	// The window this measures is first-arrival to last-arrival, deliberately
+	// NOT "first arrival to now": logArrivalRatio runs when the Segmenter
+	// closes the burst, which is segmentIdle (800ms, segment.go) after the
+	// last Feed, and Feed itself now happens at write time, up to
+	// audioLeadBuffer (~500ms) after the chunk it feeds actually arrived.
+	// Neither of those delays has anything to do with how fast audio arrived
+	// off the websocket, so counting them into elapsed drags a true ratio near
+	// 1.0 down to something that looks like OpenAI delivering below realtime
+	// when it isn't. lastArrivalAt is stamped on every arrival (not on Feed),
+	// so lastArrivalAt.Sub(arrivalStart) covers only the arrivals themselves.
 	var arrivalStart time.Time
+	var lastArrivalAt time.Time
 	arrivalBytes := 0
 	logArrivalRatio := func() {
 		if arrivalStart.IsZero() || p.spec.SampleRate <= 0 {
 			return
 		}
-		elapsed := time.Since(arrivalStart)
+		arrivalSpan := lastArrivalAt.Sub(arrivalStart)
+		burstWall := time.Since(arrivalStart)
 		bytesSeen := arrivalBytes
 		arrivalStart = time.Time{}
+		lastArrivalAt = time.Time{}
 		arrivalBytes = 0
-		if elapsed <= 0 {
+		if arrivalSpan <= 0 {
+			// A single-chunk run (or clock oddity) has zero arrival span: no
+			// meaningful rate to report, and dividing by it would be either a
+			// crash or a nonsense ratio.
 			return
 		}
 		expectedBytesPerSec := float64(p.spec.SampleRate) * 2 // PCM16 mono: 2 bytes/sample
-		actualBytesPerSec := float64(bytesSeen) / elapsed.Seconds()
+		actualBytesPerSec := float64(bytesSeen) / arrivalSpan.Seconds()
 		logger.DebugCF("livekit", "gptlive: audio arrival rate vs realtime", map[string]any{
-			"room":           p.rs.roomName(),
-			"ratio":          actualBytesPerSec / expectedBytesPerSec,
-			"bytes_received": bytesSeen,
-			"elapsed_ms":     elapsed.Milliseconds(),
-			"sample_rate":    p.spec.SampleRate,
+			"room":            p.rs.roomName(),
+			"ratio":           actualBytesPerSec / expectedBytesPerSec,
+			"bytes_received":  bytesSeen,
+			"elapsed_ms":      arrivalSpan.Milliseconds(),
+			"arrival_span_ms": arrivalSpan.Milliseconds(),
+			"burst_wall_ms":   burstWall.Milliseconds(),
+			"sample_rate":     p.spec.SampleRate,
 		})
 	}
 
@@ -648,6 +694,7 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			if arrivalStart.IsZero() {
 				arrivalStart = time.Now()
 			}
+			lastArrivalAt = time.Now()
 			arrivalBytes += len(pcm)
 			if priming {
 				leadQueue = append(leadQueue, pcm)

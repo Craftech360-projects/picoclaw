@@ -114,8 +114,58 @@ type Session struct {
 	callToDelegation map[string]string
 	toolWG           sync.WaitGroup // one per in-flight executeCall goroutine; see closeChannelsWhenIdle
 
+	// audioQueue/eventQueue decouple the read goroutine from s.audio/s.events:
+	// handleEvent pushes into these (which never blocks — see handoff.go) and
+	// a dedicated feeder goroutine each (started in Dial, stopped in
+	// closeChannelsWhenIdle) drains them into the real channels, which IS
+	// allowed to block on a slow consumer. This is the fix for the root cause
+	// documented on handleEvent's EventOutputAudioDelta case: before this, a
+	// blocking send straight into s.audio from the read goroutine let a slow
+	// downstream consumer stall the socket read itself, which OpenAI's own
+	// TCP backpressure then throttled — measured on the dev box as our
+	// pipeline's consumption rate, misread as OpenAI's delivery rate.
+	//
+	// Both are nil on a bare &Session{} built directly by a test (see
+	// transcript_test.go/delegation_test.go's newTestSession) rather than
+	// through Dial; emit and handleEvent fall back to the old direct-select
+	// behaviour in that case, which is what those tests were already written
+	// against and still exercises the exact same event-building logic.
+	audioQueue      *handoffQueue[[]byte]
+	audioFeederStop chan struct{}
+	audioFeederDone chan struct{}
+	audioDropLog    dropRateLimiter
+
+	eventQueue      *handoffQueue[Event]
+	eventFeederStop chan struct{}
+	eventFeederDone chan struct{}
+	eventDropLog    dropRateLimiter
+
 	done chan struct{} // closed when the run loop exits
 }
+
+// audioHandoffCapSeconds bounds how much undelivered model audio audioQueue
+// will hold when Audio()'s consumer falls behind, so a stalled consumer leaks
+// a few seconds of PCM, never an unbounded amount. A few seconds is already
+// generous slack — driveSegmenter's own lead buffer (pkg/livekit) only ever
+// needs a few hundred milliseconds of it — and is chosen in SECONDS, not
+// bytes or chunk count, so the actual memory bound (computed in Dial, once
+// the session's sample rate is known) means the same thing at 16kHz and
+// 24kHz.
+const audioHandoffCapSeconds = 3 * time.Second
+
+// eventHandoffCap bounds how many undelivered Events eventQueue will hold
+// when Events()'s consumer falls behind. Events arrive far less densely than
+// audio (at most one per transcript delta, tool call, or usage update, versus
+// one audio delta roughly every few tens of milliseconds), so a count-based
+// cap this generous is only ever reached by a consumer that has stopped
+// reading entirely for a long time — at which point dropping the oldest
+// backlog first is the same trade audioQueue makes: current information over
+// stale.
+const eventHandoffCap = 4096
+
+// dropLogInterval is how often a sustained overflow (audio or events) is
+// allowed to log at all; see dropRateLimiter.
+const dropLogInterval = 5 * time.Second
 
 // Dial connects, sends session.start and returns once the service answers with
 // session.started. The returned session reconnects on its own until Close.
@@ -130,6 +180,39 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 		delegations: map[string]*delegatedResponse{}, callToDelegation: map[string]string{},
 		done: make(chan struct{}),
 	}
+	audioCapBytes := int64(audioHandoffCapSeconds.Seconds() * float64(cfg.SampleRate) * 2) // PCM16 mono: 2 bytes/sample
+	s.audioDropLog = dropRateLimiter{interval: dropLogInterval}
+	s.audioQueue = newHandoffQueue[[]byte](audioCapBytes, func(pcm []byte) int64 { return int64(len(pcm)) }, func(items int, bytes int64) {
+		if ok, totalItems, totalBytes := s.audioDropLog.add(items, bytes); ok {
+			logger.WarnCF("gptlive", "dropping oldest buffered audio: downstream audio consumer is stalled", map[string]any{
+				"dropped_chunks": totalItems,
+				"dropped_bytes":  totalBytes,
+				"dropped_ms":     float64(totalBytes) / float64(cfg.SampleRate*2) * 1000,
+				"sample_rate":    cfg.SampleRate,
+				"cap_seconds":    audioHandoffCapSeconds.Seconds(),
+			})
+		}
+	})
+	s.audioFeederStop = make(chan struct{})
+	s.audioFeederDone = make(chan struct{})
+
+	s.eventDropLog = dropRateLimiter{interval: dropLogInterval}
+	s.eventQueue = newHandoffQueue[Event](eventHandoffCap, func(Event) int64 { return 1 }, func(items int, _ int64) {
+		if ok, totalItems, _ := s.eventDropLog.add(items, 0); ok {
+			logger.WarnCF("gptlive", "dropping oldest buffered event: downstream event consumer is stalled", map[string]any{
+				"dropped_events": totalItems,
+				"cap_events":     eventHandoffCap,
+			})
+		}
+	})
+	s.eventFeederStop = make(chan struct{})
+	s.eventFeederDone = make(chan struct{})
+
+	// flushOnStop=false for audio (drop whatever is still queued at teardown —
+	// see feedHandoff's own doc comment), true for events (a final Error/
+	// Closed/FunctionResult must still be delivered; see the same comment).
+	go feedHandoff(s.audioQueue, s.audio, s.audioFeederStop, s.audioFeederDone, false)
+	go feedHandoff(s.eventQueue, s.events, s.eventFeederStop, s.eventFeederDone, true)
 	go s.run()
 	select {
 	case <-s.started:
@@ -247,7 +330,17 @@ func (s *Session) send(v any) {
 	}
 }
 
+// emit hands ev to whatever is reading Events(). When s.eventQueue exists
+// (every Session built by Dial), this never blocks — see eventQueue's own doc
+// comment on the Session struct for why that matters when emit is called from
+// the read goroutine. Falls back to the old direct-select behaviour when
+// eventQueue is nil, which is only the case for a bare &Session{} a test
+// builds without going through Dial (see the struct field's comment).
 func (s *Session) emit(ev Event) {
+	if s.eventQueue != nil {
+		s.eventQueue.push(ev)
+		return
+	}
 	select {
 	case s.events <- ev:
 	case <-s.ctx.Done():
@@ -480,23 +573,47 @@ func (s *Session) run() {
 	}
 }
 
-// closeChannelsWhenIdle closes events and audio once every executeCall goroutine
-// spawned by onResponseEvent has returned, so a FunctionResult in flight can never be
-// sent on an already-closed s.events (that send is a ready case in emit's select and
-// Go can pick it, which panics). By the time run calls this, the read goroutine has
-// already exited (runOnce only returns after it does), so no new tool goroutine can
-// start; toolWG can only count down from here.
+// closeChannelsWhenIdle closes events and audio once nothing can ever push to
+// either of them again, so a send from a feeder or an in-flight executeCall
+// goroutine can never land on an already-closed channel (that send is a ready
+// case in a select, and Go can pick it, which panics).
 //
-// The wait is bounded by sessionCloseTimeout, the same bound Close already applies to
-// waiting for session.closed, so a tool that ignores ctx cancellation and never
-// returns cannot hang Close forever: run (and so Close's <-s.done) proceeds once that
-// bound passes. The channels themselves are only ever closed once toolWG actually
-// reaches zero, so that stalled call still cannot make emit panic later — the close is
-// simply finished in the background instead of inline.
+// audioQueue's only producer is the read goroutine, which run's own doc
+// comment guarantees has already exited by the time this runs (runOnce only
+// returns after stopReader has joined it) — so audioFeederStop can be closed
+// immediately, with no need to wait on anything first, and the feeder
+// goroutine (feedHandoff, given audioFeederStop) is asked to stop and drained
+// via audioFeederDone before s.audio itself is closed below.
+//
+// eventQueue can still receive a push after that: an executeCall goroutine
+// (delegation.go) calls emit(FunctionResult{...}) after its own tool finishes,
+// which can be arbitrarily later than the read goroutine exiting. toolWG (Add
+// in onResponseEvent, Done deferred in executeCall) is what tracks every one
+// of those, so eventFeederStop is only closed — and only then can
+// eventFeederDone be waited on — once toolWG reaches zero; only after that is
+// it safe to close s.events.
+//
+// The toolWG wait is bounded by sessionCloseTimeout, the same bound Close
+// already applies to waiting for session.closed, so a tool that ignores ctx
+// cancellation and never returns cannot hang Close forever: run (and so
+// Close's <-s.done) proceeds once that bound passes, and the channels
+// themselves are only ever closed once toolWG actually reaches zero — that
+// stalled call still cannot make emit panic later, since the close is simply
+// finished in the background instead of inline.
 func (s *Session) closeChannelsWhenIdle() {
+	close(s.audioFeederStop)
+	audioIdle := make(chan struct{})
+	go func() {
+		<-s.audioFeederDone
+		close(audioIdle)
+	}()
+
 	idle := make(chan struct{})
 	go func() {
 		s.toolWG.Wait()
+		close(s.eventFeederStop)
+		<-s.eventFeederDone
+		<-audioIdle
 		close(idle)
 	}()
 	select {
@@ -530,6 +647,20 @@ func (s *Session) handleEvent(ev ServerEvent) error {
 		s.mu.Unlock()
 		s.emit(SessionStarted{ID: s.ID()})
 	case EventOutputAudioDelta:
+		// ROOT CAUSE (proven by a standalone probe against OpenAI, dev box: 4
+		// configs, each ~44s, arrival ratio 0.988-1.001 with zero gaps >200ms
+		// regardless of sample rate/delegation/prompt size, against 0.66 for
+		// this worker at the same time): this used to block here — a
+		// `select { case s.audio <- pcm: case <-s.ctx.Done(): }` straight into
+		// the buffered channel Audio() exposes. Once a slow downstream
+		// consumer let that buffer fill, THIS select stopped completing, which
+		// stopped ReadMessage below from ever being called again, which is
+		// what actually throttled the socket — TCP backpressure then made
+		// OpenAI itself appear to slow down, when the real bottleneck was here
+		// the whole time. audioQueue.push (handoff.go) never blocks no matter
+		// how far behind the consumer is, so this can no longer stall the read
+		// loop; a separate feeder goroutine (started in Dial) does the
+		// blocking hand-off into s.audio instead, where it belongs.
 		if ev.Delta == "" {
 			return nil
 		}
@@ -537,9 +668,16 @@ func (s *Session) handleEvent(ev ServerEvent) error {
 		if err != nil || len(pcm) == 0 {
 			return nil
 		}
-		select {
-		case s.audio <- pcm:
-		case <-s.ctx.Done():
+		if s.audioQueue != nil {
+			s.audioQueue.push(pcm)
+		} else {
+			// Only reachable from a bare &Session{} a test built without Dial
+			// (see the struct field's comment); every real, dialed session has
+			// audioQueue set.
+			select {
+			case s.audio <- pcm:
+			case <-s.ctx.Done():
+			}
 		}
 	case EventInputTranscriptDelta:
 		s.onTranscriptDelta("user", ev)

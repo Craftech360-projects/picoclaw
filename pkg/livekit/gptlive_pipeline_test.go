@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +19,7 @@ import (
 	"github.com/livekit/media-sdk"
 	lkproto "github.com/livekit/protocol/livekit"
 	"github.com/sipeed/picoclaw/pkg/gptlive"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 func TestPCM16SampleToBytesIsLittleEndian(t *testing.T) {
@@ -302,6 +307,128 @@ func TestDriveSegmenterSerializesFeedAndTick(t *testing.T) {
 	}
 }
 
+// TestLogArrivalRatioUsesArrivalSpanNotBurstWallClock guards the fix to the
+// "gptlive: audio arrival rate vs realtime" DEBUG log. Before the fix,
+// logArrivalRatio measured time.Since(arrivalStart) at burst-close time, which
+// bakes in two delays that have nothing to do with how fast audio arrived off
+// the websocket: the Segmenter's own segmentIdle wait (800ms, segment.go)
+// after the last Feed, and however long the lead buffer held that last chunk
+// before Feed ran on it (up to audioLeadBuffer). That contamination is exactly
+// why a true near-1.0 arrival ratio was being reported as 0.67-0.78.
+//
+// logArrivalRatio is an unexported closure and arrivalStart/lastArrivalAt are
+// both stamped with a bare time.Now() rather than an injectable clock, so this
+// test cannot hand it synthetic arrival timestamps directly. Adding a clock
+// seam purely to make this exactly deterministic would be more surgery than
+// this diagnostic-only fix warrants, so instead this test drives two real
+// arrivals with a small, deliberate real gap between them, then adds a much
+// larger real delay before forcing the burst closed with a synthetic tick, and
+// asserts on the log line's own fields: arrival_span_ms must reflect only the
+// first (small) gap, while burst_wall_ms — kept alongside it for comparison —
+// is inflated by the second, unrelated delay. That is the one invariant a
+// regression back to time.Since(arrivalStart) would break, and the tolerances
+// below are generous enough not to flake on a loaded CI box.
+func TestLogArrivalRatioUsesArrivalSpanNotBurstWallClock(t *testing.T) {
+	prevLevel := logger.GetLevel()
+	logger.SetLevel(logger.DEBUG)
+	logPath := filepath.Join(t.TempDir(), "arrival.log")
+	if err := logger.EnableFileLogging(logPath); err != nil {
+		t.Fatalf("EnableFileLogging: %v", err)
+	}
+	t.Cleanup(func() {
+		logger.DisableFileLogging()
+		logger.SetLevel(prevLevel)
+	})
+
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}}
+	p.seg = gptlive.NewSegmenter(func() {}, func() {})
+	h := newDriveSegmenterHarness(t, p)
+
+	loud := pcmChunk(30000, 800) // 100ms at 8kHz; opens and holds the burst open
+
+	h.send(loud) // first arrival
+	const arrivalGap = 40 * time.Millisecond
+	time.Sleep(arrivalGap)
+	h.send(loud) // last arrival
+	h.barrier()  // confirms the second Feed has fully run before we proceed
+
+	const postArrivalDelay = 200 * time.Millisecond
+	time.Sleep(postArrivalDelay) // stands in for the segmentIdle + lead-buffer wait
+
+	// Force the burst closed with a synthetic tick far past segmentIdle,
+	// independent of the real sleeps above (same backstop pattern used in
+	// TestDriveSegmenterSerializesFeedAndTick).
+	h.tick(time.Now().Add(2 * time.Second))
+	h.barrier() // confirms logArrivalRatio has fully run and been written to the file
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	line := ""
+	for _, l := range strings.Split(string(raw), "\n") {
+		if strings.Contains(l, "audio arrival rate vs realtime") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no arrival-ratio log line found in:\n%s", raw)
+	}
+
+	numField := func(name string) float64 {
+		t.Helper()
+		re := regexp.MustCompile(`"` + name + `":(-?[0-9.]+)`)
+		m := re.FindStringSubmatch(line)
+		if m == nil {
+			t.Fatalf("field %q not found in log line: %s", name, line)
+		}
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatalf("parsing field %q (%q): %v", name, m[1], err)
+		}
+		return v
+	}
+
+	arrivalSpanMs := numField("arrival_span_ms")
+	burstWallMs := numField("burst_wall_ms")
+	elapsedMs := numField("elapsed_ms")
+	ratio := numField("ratio")
+	bytesReceived := numField("bytes_received")
+
+	if elapsedMs != arrivalSpanMs {
+		t.Errorf("elapsed_ms (%v) must equal arrival_span_ms (%v): ratio must be computed from the arrival span, not burst-close wall time", elapsedMs, arrivalSpanMs)
+	}
+	if arrivalSpanMs <= 0 {
+		t.Fatalf("arrival_span_ms = %v, want > 0", arrivalSpanMs)
+	}
+	if arrivalSpanMs >= float64(postArrivalDelay.Milliseconds()) {
+		t.Errorf("arrival_span_ms = %v is as large as the post-arrival delay (%dms): the burst-close/lead-buffer wait leaked into the arrival window", arrivalSpanMs, postArrivalDelay.Milliseconds())
+	}
+	if want := arrivalSpanMs + float64(postArrivalDelay.Milliseconds())/2; burstWallMs < want {
+		t.Errorf("burst_wall_ms = %v does not reflect the post-arrival delay (arrival_span_ms=%v, delay=%dms, want >= %v)", burstWallMs, arrivalSpanMs, postArrivalDelay.Milliseconds(), want)
+	}
+
+	if bytesReceived != 3200 {
+		t.Errorf("bytes_received = %v, want 3200 (two 1600-byte loud chunks)", bytesReceived)
+	}
+	expectedBytesPerSec := float64(8000) * 2
+	// wantRatio is reconstructed from arrival_span_ms, but that field is
+	// logged via time.Duration.Milliseconds() — truncating, not rounding — so
+	// it is always <= the exact span the production ratio was actually
+	// computed from. Over a ~40ms window that truncation alone is already a
+	// few percent, and real-clock scheduling (especially on a loaded or
+	// Windows box, where sleep granularity can itself run several ms long)
+	// adds more on top; an exact/near-exact comparison here does not test
+	// anything this test's own doc comment doesn't already disclaim ("generous
+	// enough not to flake"), so the tolerance below is relative and generous
+	// rather than the fixed 1e-6 absolute diff this used to check.
+	wantRatio := (bytesReceived / (arrivalSpanMs / 1000)) / expectedBytesPerSec
+	const relTolerance = 0.10
+	if relDiff := (ratio - wantRatio) / wantRatio; relDiff > relTolerance || relDiff < -relTolerance {
+		t.Errorf("ratio = %v, want %v +/- %.0f%% (computed from arrival_span_ms, which truncates rather than rounds)", ratio, wantRatio, relTolerance*100)
+	}
+}
+
 // fakeTrackWriter is a deterministic stand-in for *lkmedia.PCMLocalTrack in
 // the lead-buffer tests below: it implements localOutTrackWriter and simply
 // records every sample handed to it, in order, so a test can assert exactly
@@ -394,12 +521,13 @@ func TestDriveSegmenterHoldsWritesUntilLeadReached(t *testing.T) {
 	p.seg = gptlive.NewSegmenter(func() {}, func() {})
 	h := newDriveSegmenterHarness(t, p)
 
-	loud := pcmChunk(30000, 800) // 100ms at 8kHz
-	quiet := pcmChunk(0, 800)    // 100ms of silence
+	loud := pcmChunk(30000, 160) // 20ms at 8kHz
+	quiet := pcmChunk(0, 160)    // 20ms of silence
 
-	// 400ms queued (loud + 3 quiet): under the 500ms lead, so nothing should
-	// have reached the track, and the burst the loud chunk would open on its
-	// own must not have opened either.
+	// 80ms queued (loud + 3 quiet): under the 100ms lead (audioLeadBuffer, cut
+	// from 500ms — see its own doc comment), so nothing should have reached
+	// the track, and the burst the loud chunk would open on its own must not
+	// have opened either.
 	h.send(loud)
 	h.send(quiet)
 	h.send(quiet)
@@ -413,7 +541,7 @@ func TestDriveSegmenterHoldsWritesUntilLeadReached(t *testing.T) {
 		t.Fatal("Segmenter opened before the loud chunk was ever fed — Feed must not run during priming")
 	}
 
-	// The 5th chunk (500ms total) crosses the lead: the whole primed queue
+	// The 5th chunk (100ms total) crosses the lead: the whole primed queue
 	// must flush at once, in order.
 	h.send(quiet)
 	h.barrier()
@@ -441,9 +569,10 @@ func TestDriveSegmenterMidUtteranceDrainRearmsLead(t *testing.T) {
 	// Loud throughout, deliberately: this test is about the lead-queue state
 	// machine, not the gate's own open/close logic, so keeping the burst open
 	// for the whole test avoids the two interacting.
-	loud := pcmChunk(30000, 800) // 100ms at 8kHz
+	loud := pcmChunk(30000, 160) // 20ms at 8kHz
 
-	// Reach the lead: 5 x 100ms = 500ms.
+	// Reach the lead: 5 x 20ms = 100ms (audioLeadBuffer, cut from 500ms — see
+	// its own doc comment).
 	for i := 0; i < 5; i++ {
 		h.send(loud)
 	}
@@ -454,7 +583,7 @@ func TestDriveSegmenterMidUtteranceDrainRearmsLead(t *testing.T) {
 		t.Fatalf("track wrote %d samples after reaching the lead, want 5", got)
 	}
 
-	// A gap of a full second empties the ~500ms of buffered-ahead playout
+	// A gap of a full second empties the ~100ms of buffered-ahead playout
 	// this loop had built up.
 	h.tick(t0.Add(time.Second))
 
@@ -467,7 +596,7 @@ func TestDriveSegmenterMidUtteranceDrainRearmsLead(t *testing.T) {
 		t.Fatalf("track wrote %d samples right after a single post-drain chunk, want 5 (still re-priming, not dribbling)", got)
 	}
 
-	// Refill to the lead — 4 more chunks, 500ms total with the one already
+	// Refill to the lead — 4 more chunks, 100ms total with the one already
 	// queued above — and the whole re-primed queue must flush together.
 	for i := 0; i < 4; i++ {
 		h.send(loud)
@@ -489,7 +618,7 @@ func TestDriveSegmenterChannelCloseFlushesRemainder(t *testing.T) {
 	p.seg = gptlive.NewSegmenter(func() {}, func() {})
 	h := newDriveSegmenterHarness(t, p)
 
-	loud := pcmChunk(30000, 800)
+	loud := pcmChunk(30000, 160) // 20ms at 8kHz: 2 of them stay under the 100ms lead (audioLeadBuffer)
 	h.send(loud)
 	h.send(loud)
 	h.barrier()
@@ -519,7 +648,7 @@ func TestDriveSegmenterContextCancelDrainsQueue(t *testing.T) {
 	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}}
 	p.seg = gptlive.NewSegmenter(func() {}, func() {})
 
-	loud := pcmChunk(30000, 800)
+	loud := pcmChunk(30000, 160) // 20ms at 8kHz: 2 of them stay under the 100ms lead (audioLeadBuffer)
 	audio := make(chan []byte)
 	ticks := make(chan time.Time)
 	track := &fakeTrackWriter{}
