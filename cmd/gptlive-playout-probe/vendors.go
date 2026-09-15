@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	neturl "net/url"
@@ -297,7 +298,9 @@ func (s geminiSession) Greet(text string) {
 // handshakeErr reports a failed dial without ever echoing the key (Gemini's rides in the URL).
 func handshakeErr(vendor, key string, resp *http.Response, err error) error {
 	if resp != nil {
-		return fmt.Errorf("%s: websocket handshake refused: HTTP %d", vendor, resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512)) // e.g. xAI's "used all available credits"
+		return fmt.Errorf("%s: websocket handshake refused: HTTP %d: %s", vendor, resp.StatusCode,
+			strings.ReplaceAll(strings.TrimSpace(string(body)), key, "***"))
 	}
 	return fmt.Errorf("%s: dial: %s", vendor, strings.ReplaceAll(err.Error(), key, "***"))
 }
