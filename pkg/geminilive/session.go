@@ -53,6 +53,9 @@ type Session struct {
 	userText  string
 	agentText string
 	warnedDir bool
+	// modelSpoke: the current model turn has produced output, so the pipeline may already be
+	// playing (and could close) an agent burst before the turn ends
+	modelSpoke bool
 }
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
@@ -84,9 +87,11 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 // connect dials, sends setup (carrying the resumption handle once there is one) and waits for setupComplete.
 func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 	// the key rides in the URL (Gemini's only API-key auth): never log this string
-	ws, err := realtimeconn.Dial(ctx, s.cfg.BaseURL+"?key="+url.QueryEscape(s.cfg.APIKey), nil, s.cfg.APIKey)
+	escaped := url.QueryEscape(s.cfg.APIKey)
+	ws, err := realtimeconn.Dial(ctx, s.cfg.BaseURL+"?key="+escaped, nil, s.cfg.APIKey)
 	if err != nil {
-		return nil, fmt.Errorf("geminilive: %w", err)
+		// Dial scrubs the raw key; the URL carries the escaped form, which differs for keys with + / = etc.
+		return nil, errors.New("geminilive: " + strings.ReplaceAll(err.Error(), escaped, "***"))
 	}
 	if err := ws.WriteJSON(s.setup()); err != nil {
 		_ = ws.Close()
@@ -224,6 +229,7 @@ type serverMessage struct {
 		} `json:"modelTurn"`
 		Interrupted        bool `json:"interrupted"`
 		TurnComplete       bool `json:"turnComplete"`
+		GenerationComplete bool `json:"generationComplete"`
 		InputTranscription *struct {
 			Text string `json:"text"`
 		} `json:"inputTranscription"`
@@ -262,7 +268,9 @@ func (s *Session) handleMessage(raw []byte) {
 			s.mu.Unlock()
 		}
 		if c.ModelTurn != nil || c.OutputTranscription != nil {
-			s.flushUser() // the model answering closes the child's utterance
+			s.mu.Lock()
+			s.modelSpoke = true
+			s.mu.Unlock()
 		}
 		if c.ModelTurn != nil {
 			for _, p := range c.ModelTurn.Parts {
@@ -281,6 +289,12 @@ func (s *Session) handleMessage(raw []byte) {
 			s.mu.Unlock()
 			s.Emit(ev)
 		}
+		// One final user transcript per turn, flushed when the model turn ends: input transcription
+		// often trails the model's first audio, and the pipeline persists the agent's text only when
+		// its audio burst closes (after playout), so this still lands before the agent message.
+		if c.GenerationComplete || c.TurnComplete || c.Interrupted {
+			s.flushUser()
+		}
 		if c.Interrupted {
 			s.Emit(gptlive.Interrupted{})
 		}
@@ -288,11 +302,19 @@ func (s *Session) handleMessage(raw []byte) {
 			s.mu.Lock()
 			s.turn++
 			s.agentText = ""
+			s.modelSpoke = false
 			s.mu.Unlock()
 		}
 	}
 	if tc := m.ToolCall; tc != nil {
-		s.flushUser()
+		s.mu.Lock()
+		spoke := s.modelSpoke
+		s.mu.Unlock()
+		if spoke {
+			// audio already went out this turn and a slow tool can close that burst (and persist the
+			// agent text) before the turn ends: flush now so the user message stays first
+			s.flushUser()
+		}
 		for _, fc := range tc.FunctionCalls {
 			args, _ := json.Marshal(fc.Args)
 			call := gptlive.FunctionCall{CallID: fc.ID, Name: fc.Name, Arguments: string(args)}
@@ -339,6 +361,7 @@ func (s *Session) answer(call gptlive.FunctionCall, args map[string]any) {
 }
 
 func (s *Session) onEnd(err error) {
+	s.flushUser() // an utterance the model never answered is still part of the history
 	if !s.Closing() {
 		s.Emit(gptlive.Error{Err: fmt.Errorf("geminilive: connection lost: %v", err), Recoverable: false})
 	}

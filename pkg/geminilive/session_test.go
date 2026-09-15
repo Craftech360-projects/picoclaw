@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -133,6 +134,87 @@ func TestGeminiSessionToolsTranscriptsAndResumption(t *testing.T) {
 	}
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func nextEvent(t *testing.T, s *Session) gptlive.Event {
+	t.Helper()
+	select {
+	case ev := <-s.Events():
+		return ev
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for an event")
+		return nil
+	}
+}
+
+// Input transcription often trails the model's first audio: the fragments of one utterance must
+// still become exactly one final user transcript, emitted when the model turn ends.
+func TestGeminiOneFinalUserTranscriptPerTurn(t *testing.T) {
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // setup
+		send := func(v any) { _ = c.WriteMessage(websocket.BinaryMessage, []byte(mustJSON(v))) }
+		content := func(v map[string]any) { send(map[string]any{"serverContent": v}) }
+		send(map[string]any{"setupComplete": map[string]any{}})
+		content(map[string]any{"inputTranscription": map[string]any{"text": "what time "}})
+		content(map[string]any{"modelTurn": map[string]any{"parts": []any{map[string]any{"inlineData": map[string]any{"data": base64.StdEncoding.EncodeToString([]byte{1, 0})}}}}})
+		content(map[string]any{"outputTranscription": map[string]any{"text": "It is"}})
+		content(map[string]any{"inputTranscription": map[string]any{"text": "is it"}})
+		content(map[string]any{"outputTranscription": map[string]any{"text": " noon."}})
+		content(map[string]any{"generationComplete": true})
+		content(map[string]any{"turnComplete": true})
+		send(map[string]any{"usageMetadata": map[string]any{"totalTokenCount": 1}})
+		time.Sleep(time.Second)
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	var users []gptlive.UserTranscript
+	agentText := ""
+	for done := false; !done; {
+		switch e := nextEvent(t, s).(type) {
+		case gptlive.UserTranscript:
+			if agentText != "It is noon." {
+				t.Fatalf("user transcript %+v emitted before the model turn ended (agent so far %q)", e, agentText)
+			}
+			users = append(users, e)
+		case gptlive.AgentTranscript:
+			if len(users) > 0 {
+				t.Fatalf("agent transcript %+v after the user final", e)
+			}
+			agentText = e.Text
+		case gptlive.BackendUsage:
+			done = true // sent after turnComplete: the user final must already be out
+		}
+	}
+	if len(users) != 1 || users[0].Text != "what time is it" || !users[0].Final {
+		t.Fatalf("user transcripts = %+v, want one final \"what time is it\"", users)
+	}
+}
+
+func TestGeminiDialErrorScrubsRawAndEscapedKey(t *testing.T) {
+	const key = "a+b/c=d"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// echo the key back in both forms, as a vendor error body might
+		http.Error(w, "bad request "+r.URL.RawQuery+" "+r.URL.Query().Get("key"), http.StatusForbidden)
+	}))
+	defer srv.Close()
+	_, err := Dial(context.Background(), Config{APIKey: key, BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err == nil {
+		t.Fatal("dial succeeded against a refusing server")
+	}
+	if msg := err.Error(); strings.Contains(msg, key) || strings.Contains(msg, url.QueryEscape(key)) {
+		t.Fatalf("error leaks the key: %s", msg)
 	}
 }
 
