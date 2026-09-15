@@ -38,8 +38,21 @@ func Dial(ctx context.Context, url string, header http.Header, secret string) (*
 		return strings.ReplaceAll(s, secret, "***")
 	}
 	if resp != nil {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("websocket handshake refused: HTTP %d: %s", resp.StatusCode, scrub(strings.TrimSpace(string(body))))
+		const maxBody = 512
+		// scrub before cutting: read enough that a secret straddling the cut is still whole
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxBody+len(secret))))
+		msg := scrub(string(body))
+		if len(msg) > maxBody {
+			msg = msg[:maxBody]
+		}
+		// a secret cut off by the read limit or the cut is left as a trailing prefix: mask it
+		for i := len(secret) - 1; i > 0; i-- {
+			if strings.HasSuffix(msg, secret[:i]) {
+				msg = msg[:len(msg)-i] + "***"
+				break
+			}
+		}
+		return nil, fmt.Errorf("websocket handshake refused: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(msg))
 	}
 	return nil, errors.New(scrub(err.Error()))
 }

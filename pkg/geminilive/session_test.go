@@ -151,6 +151,8 @@ func nextEvent(t *testing.T, s *Session) gptlive.Event {
 // Input transcription often trails the model's first audio: the fragments of one utterance must
 // still become exactly one final user transcript, emitted when the model turn ends.
 func TestGeminiOneFinalUserTranscriptPerTurn(t *testing.T) {
+	defer func(d time.Duration) { userFlushDelay = d }(userFlushDelay)
+	userFlushDelay = time.Hour // only the turn end may flush in this test
 	var up websocket.Upgrader
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := up.Upgrade(w, r, nil)
@@ -199,6 +201,61 @@ func TestGeminiOneFinalUserTranscriptPerTurn(t *testing.T) {
 	}
 	if len(users) != 1 || users[0].Text != "what time is it" || !users[0].Final {
 		t.Fatalf("user transcripts = %+v, want one final \"what time is it\"", users)
+	}
+}
+
+// Google Search runs server-side (no toolCall), so the model can go quiet mid-turn long enough for
+// the pipeline to persist the agent's text: the user final must not wait for the turn end.
+func TestGeminiUserTranscriptFlushesBeforeTurnEndDuringServerSideWork(t *testing.T) {
+	defer func(d time.Duration) { userFlushDelay = d }(userFlushDelay)
+	userFlushDelay = 10 * time.Millisecond
+	release := make(chan struct{})
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // setup
+		send := func(v any) { _ = c.WriteMessage(websocket.BinaryMessage, []byte(mustJSON(v))) }
+		content := func(v map[string]any) { send(map[string]any{"serverContent": v}) }
+		send(map[string]any{"setupComplete": map[string]any{}})
+		content(map[string]any{"inputTranscription": map[string]any{"text": "any news today"}})
+		content(map[string]any{"outputTranscription": map[string]any{"text": "Let me look."}})
+		select { // the search is running: no turn end until the test has seen the user final
+		case <-release:
+		case <-time.After(5 * time.Second):
+			return
+		}
+		content(map[string]any{"outputTranscription": map[string]any{"text": " Sunny."}})
+		content(map[string]any{"turnComplete": true})
+		send(map[string]any{"usageMetadata": map[string]any{"totalTokenCount": 1}})
+		time.Sleep(time.Second)
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	for {
+		if e, ok := nextEvent(t, s).(gptlive.UserTranscript); ok {
+			if e.Text != "any news today" || !e.Final {
+				t.Fatalf("user transcript = %+v", e)
+			}
+			break
+		}
+	}
+	close(release)
+	for {
+		switch e := nextEvent(t, s).(type) {
+		case gptlive.UserTranscript:
+			t.Fatalf("second user transcript %+v", e)
+		case gptlive.BackendUsage:
+			return
+		}
 	}
 }
 

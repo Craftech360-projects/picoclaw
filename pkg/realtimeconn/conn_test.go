@@ -84,6 +84,20 @@ func TestDialErrorNeverEchoesTheSecret(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "s3cret") || !strings.Contains(err.Error(), "HTTP 403") {
 		t.Fatalf("err = %v, want an HTTP 403 error with the secret scrubbed", err)
 	}
+
+	// a secret straddling the 512-byte body limit must not leak a prefix either
+	const long = "s3cretKEY-0123456789"
+	for _, pad := range []int{500, 505, 510, 511} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(strings.Repeat("x", pad) + long + strings.Repeat("y", 600)))
+		}))
+		_, err := Dial(context.Background(), wsURL(srv), nil, long)
+		srv.Close()
+		if err == nil || strings.Contains(err.Error(), long[:2]) || strings.HasSuffix(err.Error(), long[:1]) {
+			t.Fatalf("pad %d: err = %v, want no part of the secret", pad, err)
+		}
+	}
 }
 
 type echoExec struct{}

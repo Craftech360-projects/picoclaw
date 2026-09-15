@@ -53,10 +53,16 @@ type Session struct {
 	userText  string
 	agentText string
 	warnedDir bool
-	// modelSpoke: the current model turn has produced output, so the pipeline may already be
-	// playing (and could close) an agent burst before the turn ends
-	modelSpoke bool
+	// flushTimer is started by the current turn's first model output and flushes the user
+	// transcript userFlushDelay later if the turn has not ended by then; nil until that output
+	flushTimer *time.Timer
 }
+
+// userFlushDelay bounds how long the user transcript waits for the model turn to end. Server-side
+// work (Google Search, a slow tool) can pause the model long enough for the pipeline to close the
+// agent's audio burst and persist its text; the user message must be out before that
+// (segmentIdle 800ms plus playout lead). A var so tests can pin it.
+var userFlushDelay = 500 * time.Millisecond
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
 	if cfg.APIKey == "" {
@@ -269,7 +275,12 @@ func (s *Session) handleMessage(raw []byte) {
 		}
 		if c.ModelTurn != nil || c.OutputTranscription != nil {
 			s.mu.Lock()
-			s.modelSpoke = true
+			if s.flushTimer == nil {
+				turn := s.turn
+				s.flushTimer = time.AfterFunc(userFlushDelay, func() {
+					s.Go(func() { s.flushTurn(turn) }) // Go: tracked by Run, and refused once the session is ending
+				})
+			}
 			s.mu.Unlock()
 		}
 		if c.ModelTurn != nil {
@@ -289,10 +300,11 @@ func (s *Session) handleMessage(raw []byte) {
 			s.mu.Unlock()
 			s.Emit(ev)
 		}
-		// One final user transcript per turn, flushed when the model turn ends: input transcription
-		// often trails the model's first audio, and the pipeline persists the agent's text only when
-		// its audio burst closes (after playout), so this still lands before the agent message.
+		// One final user transcript per turn, flushed when the model turn ends or userFlushDelay after
+		// its first output, whichever comes first: input transcription often trails the model's first
+		// audio, and the pipeline persists the agent's text only when its audio burst closes.
 		if c.GenerationComplete || c.TurnComplete || c.Interrupted {
+			s.stopFlushTimer()
 			s.flushUser()
 		}
 		if c.Interrupted {
@@ -302,19 +314,11 @@ func (s *Session) handleMessage(raw []byte) {
 			s.mu.Lock()
 			s.turn++
 			s.agentText = ""
-			s.modelSpoke = false
+			s.flushTimer = nil
 			s.mu.Unlock()
 		}
 	}
 	if tc := m.ToolCall; tc != nil {
-		s.mu.Lock()
-		spoke := s.modelSpoke
-		s.mu.Unlock()
-		if spoke {
-			// audio already went out this turn and a slow tool can close that burst (and persist the
-			// agent text) before the turn ends: flush now so the user message stays first
-			s.flushUser()
-		}
 		for _, fc := range tc.FunctionCalls {
 			args, _ := json.Marshal(fc.Args)
 			call := gptlive.FunctionCall{CallID: fc.ID, Name: fc.Name, Arguments: string(args)}
@@ -337,8 +341,24 @@ func (s *Session) handleMessage(raw []byte) {
 	}
 }
 
-func (s *Session) flushUser() {
+func (s *Session) stopFlushTimer() {
 	s.mu.Lock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) flushUser() { s.flushTurn(-1) }
+
+// flushTurn emits the buffered user text as one final transcript. turn >= 0 flushes only while
+// that turn is still current, so a late timer can't split the next turn's utterance.
+func (s *Session) flushTurn(turn int) {
+	s.mu.Lock()
+	if turn >= 0 && turn != s.turn {
+		s.mu.Unlock()
+		return
+	}
 	text := strings.TrimSpace(s.userText)
 	s.userText = ""
 	id := fmt.Sprintf("gemini-user-%d", s.turn)
@@ -361,7 +381,8 @@ func (s *Session) answer(call gptlive.FunctionCall, args map[string]any) {
 }
 
 func (s *Session) onEnd(err error) {
-	s.flushUser() // an utterance the model never answered is still part of the history
+	s.stopFlushTimer() // Run has stopped accepting Go work, so a timer that already fired is a no-op
+	s.flushUser()      // an utterance the model never answered is still part of the history
 	if !s.Closing() {
 		s.Emit(gptlive.Error{Err: fmt.Errorf("geminilive: connection lost: %v", err), Recoverable: false})
 	}
