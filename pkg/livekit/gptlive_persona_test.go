@@ -359,3 +359,56 @@ func TestBuildGPTLivePersonaSingleModelFoldsToolsIntoOnePrompt(t *testing.T) {
 		t.Error("GPT-Live (SingleModel=false) keeps delegation and backend instructions")
 	}
 }
+
+// TestBuildGPTLivePersonaSingleModelEndsWithRealtimeOverrides covers a live Gemini Quizzy run:
+// the manager's AGENT.md says the model has no tools, has it judge quiz answers itself and
+// asks for a hidden MEMO line the runtime strips. A single realtime model has no text stage,
+// so it spoke the MEMO and never called quiz_score_answer. The override block must come last
+// in Voice (recency wins) for SingleModel only.
+func TestBuildGPTLivePersonaSingleModelEndsWithRealtimeOverrides(t *testing.T) {
+	ws := t.TempDir()
+	agentMD := "You are Quizzy.\nYou do NOT have access to any tools in this session.\n" +
+		"After every assistant turn, add exactly one hidden line beginning with the MEMO tag.\n"
+	if err := os.WriteFile(filepath.Join(ws, "AGENT.md"), []byte(agentMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := GPTLivePersonaInput{Workspace: ws, CharacterName: "Quizzy", HasQuiz: true, SingleModel: true,
+		BankBlock: "1. (id=185) How many legs does a chair have?", GreetingPrompt: "Say hi."}
+	p := BuildGPTLivePersona(in)
+	if !strings.HasSuffix(p.Voice, "</realtime_overrides>") {
+		t.Fatalf("single-model Voice must end with the override block, ends %q", p.Voice[max(0, len(p.Voice)-200):])
+	}
+	start := strings.LastIndex(p.Voice, "<realtime_overrides>")
+	if start < strings.Index(p.Voice, "</greeting_guidance>") || start < strings.Index(p.Voice, "do NOT have access to any tools") {
+		t.Error("the override block must come after every other section")
+	}
+	block := p.Voice[start:]
+	for _, want := range []string{"override", "quiz_score_answer", "question_id", "transcript", "MEMO", "<tools>"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("override block lacks %q: %q", want, block)
+		}
+	}
+	if strings.Contains(p.Voice, "MEMO:") {
+		t.Error("Voice must never contain the literal MEMO: shape")
+	}
+
+	in.HasQuiz, in.BankBlock = false, ""
+	plain := BuildGPTLivePersona(in)
+	if !strings.HasSuffix(plain.Voice, "</realtime_overrides>") || strings.Contains(plain.Voice, "quiz_score_answer") {
+		t.Error("a character without a quiz still gets the override block, without quiz rules")
+	}
+}
+
+// TestBuildGPTLivePersonaGPTLiveHasNoRealtimeOverrides pins GPT-Live's Voice: the override is
+// single-model only, and Voice still ends with the greeting guidance as before.
+func TestBuildGPTLivePersonaGPTLiveHasNoRealtimeOverrides(t *testing.T) {
+	ws := t.TempDir()
+	p := BuildGPTLivePersona(GPTLivePersonaInput{Workspace: ws, CharacterName: "Quizzy", HasQuiz: true,
+		BankBlock: "1. (id=185) How many legs does a chair have?"})
+	if strings.Contains(p.Voice, "realtime_overrides") {
+		t.Error("GPT-Live Voice must not carry the single-model override block")
+	}
+	if !strings.HasSuffix(p.Voice, "</greeting_guidance>") {
+		t.Errorf("GPT-Live Voice must still end with the greeting guidance, ends %q", p.Voice[max(0, len(p.Voice)-200):])
+	}
+}

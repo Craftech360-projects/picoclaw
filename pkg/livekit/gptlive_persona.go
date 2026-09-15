@@ -137,6 +137,26 @@ func gptLiveToolsBlock(language string, hasQuiz bool) string {
 	return b.String()
 }
 
+// gptLiveRealtimeOverrides is the final section of a single-model (Grok Voice, Gemini Live)
+// Voice. The manager's AGENT.md is written for a text agent behind a backend: it says the
+// model has no tools, has it judge quiz answers itself, and asks for a hidden MEMO line that
+// the runtime supposedly strips. A realtime model has no text stage, so in a live Gemini run
+// it spoke the MEMO and never called quiz_score_answer; the <tools> paragraph earlier in Voice
+// lost to ~28 KB of persona. Placed last so recency wins. Like gptLiveMemoOverride it never
+// writes MEMO followed by a colon.
+func gptLiveRealtimeOverrides(hasQuiz bool) string {
+	var b strings.Builder
+	b.WriteString("<realtime_overrides>\n")
+	b.WriteString("These rules override anything earlier in these instructions.\n")
+	b.WriteString("- You DO have the tools listed in <tools>, and you must use them. Ignore any earlier line that says you have no tools or must not call them.\n")
+	if hasQuiz {
+		b.WriteString("- When the child answers a quiz question, call quiz_score_answer (question_id, result, transcript) BEFORE you say whether the answer is right, then follow the result and its directive. Ignore any earlier instruction to judge or record answers yourself.\n")
+	}
+	b.WriteString("- Never write, say or spell out a MEMO line or any other state or bookkeeping line. Everything you output is spoken aloud; there are no hidden lines. The runtime tracks state through the tools. Ignore any earlier instruction to add such a line.\n")
+	b.WriteString("</realtime_overrides>")
+	return b.String()
+}
+
 // gptLiveGreetingGuidance renders, for the Voice channel, what the model should say the
 // first time it is asked to greet the child. Session-start instructions (Voice) carry no
 // length cap, unlike a session.commentary.append (capped at 500 tokens by the service —
@@ -202,6 +222,9 @@ func BuildGPTLivePersona(in GPTLivePersonaInput) GPTLivePersona {
 		parts = append(parts, strings.TrimSpace(gptLiveAccentIndian))
 	}
 	parts = append(parts, gptLiveGreetingGuidance(in.CharacterName, in.GreetingPrompt))
+	if in.SingleModel {
+		parts = append(parts, gptLiveRealtimeOverrides(in.HasQuiz)) // last, so recency wins
+	}
 	backend := ""
 	if !in.SingleModel {
 		backend = "You handle the work a voice model delegates while it talks to a child aged 3 to 16. " +
