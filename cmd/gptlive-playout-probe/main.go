@@ -9,12 +9,14 @@
 //	gptlive-playout-probe -vendor openai -room probe-1 -duration 90s
 //	gptlive-playout-probe -vendor xai -voice eve
 //	gptlive-playout-probe -vendor google -voice Kore -model gemini-3.1-flash-live-preview
+//	gptlive-playout-probe -vendor google -agent cheeko-gemini-go   # join every room dispatched to that name
 package main
 
 import (
 	"context"
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"log"
 	neturl "net/url"
 	"os"
@@ -40,12 +42,24 @@ const (
 
 var yes = true
 
+type config struct {
+	vendor           string
+	spec             vendorSpec
+	dial             dialOptions
+	greeting         string
+	target           time.Duration
+	url, key, secret string
+}
+
 func main() {
 	vendor := flag.String("vendor", "openai", "realtime vendor: openai | xai | google")
-	room := flag.String("room", "gptlive-probe", "LiveKit room to join")
+	room := flag.String("room", "gptlive-probe", "LiveKit room to join (ignored with -agent)")
+	agent := flag.String("agent", "", "act as a dispatchable agent: join every room dispatched to this name (e.g. from the admin dashboard)")
 	voice := flag.String("voice", "", "vendor voice (default: the vendor's default)")
 	model := flag.String("model", "", "vendor model (default: the vendor's default)")
 	silence := flag.Duration("silence", 700*time.Millisecond, "end-of-turn silence for server VAD (xai, google); children pause mid-sentence")
+	prompt := flag.String("prompt", "You are Cheeko, a warm, playful friend for young children. Speak English in short, simple sentences. Keep every reply brief and ask one question at a time.", "system instructions")
+	greeting := flag.String("greeting", "Greet the child in one short, cheerful sentence and ask what they would like to talk about.", "what the model is asked to say first")
 	target := flag.Duration("target", 200*time.Millisecond, "playout lead to hold")
 	runFor := flag.Duration("duration", 0, "exit after this long (0: run until Ctrl+C)")
 	flag.Parse()
@@ -66,7 +80,11 @@ func main() {
 		}
 		return v
 	}
-	url, key, secret := env("LIVEKIT_URL"), env("LIVEKIT_API_KEY"), env("LIVEKIT_API_SECRET")
+	cfg := config{
+		vendor: *vendor, spec: spec, greeting: *greeting, target: *target,
+		dial: dialOptions{key: env(spec.envKey), model: *model, voice: *voice, silence: *silence, instructions: *prompt},
+		url:  env("LIVEKIT_URL"), key: env("LIVEKIT_API_KEY"), secret: env("LIVEKIT_API_SECRET"),
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -75,19 +93,74 @@ func main() {
 		ctx, cancel = context.WithTimeout(ctx, *runFor)
 		defer cancel()
 	}
+	if *agent == "" {
+		if err := runSession(ctx, cfg, *room); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	serveDispatches(ctx, cfg, *agent)
+}
 
-	sess, err := dialVendor(ctx, *vendor, dialOptions{
-		key: env(spec.envKey), model: *model, voice: *voice, silence: *silence,
-		instructions: "You are a warm storyteller. Speak English. When asked for a story, tell it for about a minute without pausing for the listener.",
-	})
+// serveDispatches polls LiveKit for rooms dispatched to agent and runs a session in each.
+// ponytail: polling instead of the agent worker protocol; a few seconds of join delay is fine
+// for local testing, and picoclaw-livekit's worker is the real thing.
+func serveDispatches(ctx context.Context, cfg config, agent string) {
+	rooms := lksdk.NewRoomServiceClient(cfg.url, cfg.key, cfg.secret)
+	dispatches := lksdk.NewAgentDispatchServiceClient(cfg.url, cfg.key, cfg.secret)
+	seen := map[string]bool{}
+	log.Printf("waiting for rooms dispatched to %q (vendor=%s model=%s voice=%s)", agent, cfg.vendor, cfg.dial.model, cfg.dial.voice)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		list, err := rooms.ListRooms(ctx, &livekit.ListRoomsRequest{})
+		if err != nil {
+			log.Printf("list rooms: %v", err)
+			continue
+		}
+		for _, r := range list.Rooms {
+			if seen[r.Name] {
+				continue
+			}
+			ds, err := dispatches.ListDispatch(ctx, &livekit.ListAgentDispatchRequest{Room: r.Name})
+			if err != nil {
+				continue // retried next tick
+			}
+			seen[r.Name] = true
+			for _, d := range ds.AgentDispatches {
+				if d.AgentName == agent {
+					go func(room string) {
+						if err := runSession(ctx, cfg, room); err != nil {
+							log.Printf("room %s: %v", room, err)
+						}
+					}(r.Name)
+					break
+				}
+			}
+		}
+	}
+}
+
+// runSession joins room, talks through the vendor, and returns when ctx ends or everyone else leaves.
+func runSession(parent context.Context, cfg config, room string) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	spec := cfg.spec
+
+	sess, err := dialVendor(ctx, cfg.vendor, cfg.dial)
 	if err != nil {
-		log.Fatalf("dial %s: %v", *vendor, err)
+		return fmt.Errorf("dial %s: %w", cfg.vendor, err)
 	}
 	defer sess.Close()
 
 	track, err := lkmedia.NewPCMLocalTrack(outRate, 1, protoLogger.GetLogger())
 	if err != nil {
-		log.Fatalf("local track: %v", err)
+		return fmt.Errorf("local track: %w", err)
 	}
 
 	mic := &micBuffer{limit: spec.inRate} // 500ms of PCM16 mono
@@ -111,45 +184,55 @@ func main() {
 		log.Printf("%s joined", rp.Identity())
 		once.Do(func() { close(listening) })
 	}
+	var lkRoom *lksdk.Room
+	cb.OnParticipantDisconnected = func(rp *lksdk.RemoteParticipant) {
+		log.Printf("%s left %s", rp.Identity(), room)
+		if lkRoom != nil && len(lkRoom.GetRemoteParticipants()) == 0 {
+			cancel() // the session is over once nobody is left to talk to
+		}
+	}
+	cb.OnDisconnected = cancel
 
-	at := auth.NewAccessToken(key, secret)
-	at.SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: *room})
+	at := auth.NewAccessToken(cfg.key, cfg.secret)
+	at.SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: room})
 	at.SetIdentity("gptlive-probe")
-	at.SetKind(livekit.ParticipantInfo_AGENT) // agent-starter-react waits for an agent participant
+	at.SetKind(livekit.ParticipantInfo_AGENT) // the dashboard and agent-starter-react wait for an agent participant
 	token, err := at.ToJWT()
 	if err != nil {
-		log.Fatalf("token: %v", err)
+		return fmt.Errorf("token: %w", err)
 	}
-	lkRoom, err := lksdk.ConnectToRoomWithToken(url, token, cb)
+	lkRoom, err = lksdk.ConnectToRoomWithToken(cfg.url, token, cb)
 	if err != nil {
-		log.Fatalf("join room: %v", err)
+		return fmt.Errorf("join room %s: %w", room, err)
 	}
 	defer lkRoom.Disconnect()
 	if len(lkRoom.GetRemoteParticipants()) > 0 {
 		once.Do(func() { close(listening) })
 	}
 	if _, err := lkRoom.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{Name: "gptlive-probe"}); err != nil {
-		log.Fatalf("publish: %v", err)
+		return fmt.Errorf("publish: %w", err)
 	}
 	log.Printf("joined %s, vendor=%s model=%s voice=%s in=%dHz target=%s; waiting for a listener",
-		*room, *vendor, *model, *voice, spec.inRate, *target)
-	lt := auth.NewAccessToken(key, secret)
-	lt.SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: *room, CanPublish: &yes, CanSubscribe: &yes})
+		room, cfg.vendor, cfg.dial.model, cfg.dial.voice, spec.inRate, cfg.target)
+	lt := auth.NewAccessToken(cfg.key, cfg.secret)
+	lt.SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: room, CanPublish: &yes, CanSubscribe: &yes})
 	lt.SetIdentity("listener")
 	lt.SetValidFor(time.Hour)
 	if listenerToken, err := lt.ToJWT(); err == nil {
 		// local dev only: the link carries a one-hour join token for this room
-		log.Printf("listen: https://meet.livekit.io/custom?liveKitUrl=%s&token=%s", neturl.QueryEscape(url), listenerToken)
+		log.Printf("listen: https://meet.livekit.io/custom?liveKitUrl=%s&token=%s", neturl.QueryEscape(cfg.url), listenerToken)
 	}
 
 	go func() {
 		select {
 		case <-listening:
-			sess.Greet("Greet the listener in one sentence, then tell a story about a brave little robot for about a minute without stopping.")
+			sess.Greet(cfg.greeting)
 		case <-ctx.Done():
 		}
 	}()
-	play(ctx, sess.Audio(), sess.Interrupted(), track, *target)
+	play(ctx, sess.Audio(), sess.Interrupted(), track, cfg.target)
+	log.Printf("session in %s ended", room)
+	return nil
 }
 
 // micBuffer collects room mic audio (lkmedia.PCMRemoteTrackWriter) for pump.
