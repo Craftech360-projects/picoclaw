@@ -1180,3 +1180,81 @@ func TestWaitForEventsDrainNoOpWhenPumpsNeverStarted(t *testing.T) {
 		t.Fatal("WaitForEventsDrain blocked even though eventsPumpStarted was never set")
 	}
 }
+
+type clearingTrack struct {
+	fakeTrackWriter
+	clears int
+}
+
+func (c *clearingTrack) ClearQueue() {
+	c.mu.Lock()
+	c.clears++
+	c.mu.Unlock()
+}
+
+// A barge-in drops the carried partial frame and asks the track to drop its queue.
+func TestDriveSegmenterClearsPlayoutOnInterrupt(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}, interrupts: make(chan struct{}, 1)}
+	p.seg = gptlive.NewSegmenter(func() {}, func() {})
+	audio, ticks, track := make(chan []byte), make(chan time.Time), &clearingTrack{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.driveSegmenter(ctx, audio, ticks, track)
+		close(done)
+	}()
+
+	audio <- pcmChunk(30000, 100) // a partial frame is carried, not written
+	p.onEvent(gptlive.Interrupted{})
+	for len(p.interrupts) > 0 { // wait until the loop has taken the barge-in
+		time.Sleep(time.Millisecond)
+	}
+	ticks <- time.Now() // barrier: the barge-in case has fully run
+	cancel()
+	<-done
+	if track.clears != 1 {
+		t.Fatalf("ClearQueue calls = %d, want 1", track.clears)
+	}
+	if got := track.samples(); got != 0 {
+		t.Fatalf("wrote %d samples after a barge-in, want the carried partial frame dropped", got)
+	}
+}
+
+func TestInRateFallsBackToTheOutputRate(t *testing.T) {
+	if got := (&gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 24000}}).inRate(); got != 24000 {
+		t.Fatalf("inRate = %d, want 24000", got)
+	}
+	if got := (&gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 24000, InRate: 16000}}).inRate(); got != 16000 {
+		t.Fatalf("inRate = %d, want 16000", got)
+	}
+}
+
+// Start dials the vendor the spec names: here Grok, against a fake Voice Agent endpoint.
+func TestStartDialsTheSpecVendor(t *testing.T) {
+	gotUpdate := make(chan string, 1)
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, msg, _ := c.ReadMessage()
+		gotUpdate <- string(msg)
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	rs := &RoomSession{}
+	p := newGPTLivePipeline(rs, GPTLiveSessionSpec{
+		Vendor: VendorXAI, APIKey: "k", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Voice: "eve", SampleRate: 24000, Persona: GPTLivePersona{Voice: "single prompt"},
+	})
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close(context.Background())
+	if msg := <-gotUpdate; !strings.Contains(msg, `"type":"session.update"`) || !strings.Contains(msg, `"voice":"eve"`) || !strings.Contains(msg, `"single prompt"`) {
+		t.Fatalf("first message = %s", msg)
+	}
+}

@@ -1033,7 +1033,7 @@ func (rs *RoomSession) handleTrackSubscribed(track *webrtc.TrackRemote, rp *lksd
 		// wired straight to the pipeline, resampled to the session's own rate by
 		// lkmedia rather than inside pkg/gptlive.
 		pcmTrack, err := lkmedia.NewPCMRemoteTrack(track, gptLiveTrackWriter{gptlivePipeline},
-			lkmedia.WithTargetSampleRate(gptlivePipeline.spec.SampleRate), lkmedia.WithTargetChannels(1))
+			lkmedia.WithTargetSampleRate(gptlivePipeline.inRate()), lkmedia.WithTargetChannels(1))
 		if err != nil {
 			logger.ErrorCF("livekit", "gptlive: PCM remote track error", map[string]any{"error": err.Error()})
 			return

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,9 @@ import (
 	"github.com/livekit/media-sdk"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	lkmedia "github.com/livekit/server-sdk-go/v2/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/geminilive"
 	"github.com/sipeed/picoclaw/pkg/gptlive"
+	"github.com/sipeed/picoclaw/pkg/grokvoice"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -29,12 +32,40 @@ type GPTLiveSessionSpec struct {
 	APIKey             string
 	Voice              any
 	SampleRate         int
+	Vendor             string // VendorOpenAI (""), VendorXAI or VendorGoogle
+	Model              string // vendor model; "" = the vendor client's default
+	BaseURL            string // vendor endpoint override; "" = the vendor client's default (tests point it at a fake)
+	InRate             int    // mic sample rate sent to the model; 0 = SampleRate (Gemini needs 16000)
 	BackendModel       string
 	Persona            GPTLivePersona
 	Tools              *tools.ToolRegistry
 	Quiz               *QuizTracker
 	WebSearch          bool
 	MaxSessionDuration time.Duration
+}
+
+const (
+	VendorOpenAI = "openai"
+	VendorXAI    = "xai"
+	VendorGoogle = "google"
+)
+
+// realtimeSession is what gptLivePipeline needs from a realtime voice vendor. *gptlive.Session,
+// *grokvoice.Session and *geminilive.Session all satisfy it, and all speak gptlive events.
+type realtimeSession interface {
+	PushAudio(pcm []byte)
+	Audio() <-chan []byte
+	Events() <-chan gptlive.Event
+	AppendInstructions(text string) // a standing rule (quiz Door directive)
+	AppendCommentary(text string)   // something to say now (greeting, goodbye)
+	Close(ctx context.Context) error
+}
+
+func (p *gptLivePipeline) inRate() int {
+	if p.spec.InRate > 0 {
+		return p.spec.InRate
+	}
+	return p.spec.SampleRate
 }
 
 // defaultGPTLiveSampleRate mirrors gptlive.Config.withDefaults' own default.
@@ -86,8 +117,10 @@ const gptLiveDirectiveSupersedes = "IMPORTANT: this block REPLACES every earlier
 type gptLivePipeline struct {
 	rs   *RoomSession
 	spec GPTLiveSessionSpec
-	sess *gptlive.Session
-	seg  *gptlive.Segmenter
+	sess realtimeSession
+	// interrupts carries a vendor's barge-in from pumpEvents to driveSegmenter (buffered 1).
+	interrupts chan struct{}
+	seg        *gptlive.Segmenter
 
 	// mic-in flow counters for driveSegmenter's "audio flow" log (written by WriteSample)
 	micSamples, micLast, micMaxGap, micMaxPush atomic.Int64
@@ -181,7 +214,7 @@ func newGPTLivePipeline(rs *RoomSession, spec GPTLiveSessionSpec) *gptLivePipeli
 	p := &gptLivePipeline{
 		rs: rs, spec: spec, state: "listening", agentText: map[string]string{},
 		ready: make(chan struct{}), publish: make(chan func(), 64), burstClosed: make(chan struct{}, 1),
-		eventsDone: make(chan struct{}),
+		eventsDone: make(chan struct{}), interrupts: make(chan struct{}, 1),
 	}
 	p.seg = gptlive.NewSegmenter(p.onBurstOpen, p.onBurstClose)
 	if spec.Quiz != nil {
@@ -283,18 +316,7 @@ func (p *gptLivePipeline) Start(ctx context.Context) error {
 	}
 	p.localTrack = p.rs.localTrack
 
-	var defs []map[string]any
-	var exec gptlive.ToolExecutor
-	if p.spec.Tools != nil {
-		defs = GPTLiveToolDefs(p.spec.Tools, p.spec.WebSearch)
-		exec = NewRegistryExecutor(p.spec.Tools, p.rs.roomName())
-	}
-	sess, err := gptlive.Dial(ctx, gptlive.Config{
-		APIKey: p.spec.APIKey, Voice: p.spec.Voice, SampleRate: p.spec.SampleRate,
-		Instructions: p.spec.Persona.Voice,
-		Backend:      gptlive.ResponsesConfig{Model: p.spec.BackendModel, Instructions: p.spec.Persona.Backend, Tools: defs},
-		Tools:        exec, MaxSessionDuration: p.spec.MaxSessionDuration,
-	})
+	sess, err := p.dial(ctx)
 	if err != nil {
 		p.startErr = err
 		close(p.ready)
@@ -309,12 +331,56 @@ func (p *gptLivePipeline) Start(ctx context.Context) error {
 	return p.finishStart(ctx, sess)
 }
 
+// dial connects to the spec's vendor with the session's tools.
+func (p *gptLivePipeline) dial(ctx context.Context) (realtimeSession, error) {
+	var defs []map[string]any
+	var exec gptlive.ToolExecutor
+	if p.spec.Tools != nil {
+		defs = GPTLiveToolDefs(p.spec.Tools, p.spec.WebSearch)
+		exec = NewRegistryExecutor(p.spec.Tools, p.rs.roomName())
+	}
+	voice := ""
+	if p.spec.Voice != nil {
+		voice = fmt.Sprint(p.spec.Voice)
+	}
+	switch p.spec.Vendor {
+	case VendorXAI:
+		s, err := grokvoice.Dial(ctx, grokvoice.Config{
+			APIKey: p.spec.APIKey, BaseURL: p.spec.BaseURL, Model: p.spec.Model, Voice: voice,
+			Instructions: p.spec.Persona.Voice, Tools: defs, Executor: exec,
+		})
+		if err != nil {
+			return nil, err // never a typed nil inside the interface
+		}
+		return s, nil
+	case VendorGoogle:
+		s, err := geminilive.Dial(ctx, geminilive.Config{
+			APIKey: p.spec.APIKey, BaseURL: p.spec.BaseURL, Model: p.spec.Model, Voice: voice,
+			Instructions: p.spec.Persona.Voice, Tools: defs, Executor: exec,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	s, err := gptlive.Dial(ctx, gptlive.Config{
+		APIKey: p.spec.APIKey, BaseURL: p.spec.BaseURL, Model: p.spec.Model, Voice: p.spec.Voice, SampleRate: p.spec.SampleRate,
+		Instructions: p.spec.Persona.Voice,
+		Backend:      gptlive.ResponsesConfig{Model: p.spec.BackendModel, Instructions: p.spec.Persona.Backend, Tools: defs},
+		Tools:        exec, MaxSessionDuration: p.spec.MaxSessionDuration,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // finishStart runs once Dial has returned a live session: it publishes
 // p.sess/p.cancel/p.ready and either spawns the pumps or, if ctx is already
 // cancelled, self-closes instead (see Start's doc comment for why). Split out
 // from Start so this decision can be exercised directly in a test without a
 // real dial (TestFinishStartSelfClosesWhenContextAlreadyCancelled).
-func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session) error {
+func (p *gptLivePipeline) finishStart(ctx context.Context, sess realtimeSession) error {
 	// pctx/cancel are created before the lock so the assignment below is a
 	// single critical section; p.cancel is written here and nowhere else.
 	pctx, cancel := context.WithCancel(context.Background())
@@ -403,7 +469,7 @@ func (p *gptLivePipeline) WriteSample(sample media.PCM16Sample) error {
 	p.micMu.Lock()
 	p.micBuf = append(p.micBuf, pcm16ToBytes(sample)...)
 	// ponytail: 500ms cap so a stalled pump can't grow input latency; drops the oldest audio
-	if limit := p.spec.SampleRate; len(p.micBuf) > limit {
+	if limit := p.inRate(); len(p.micBuf) > limit {
 		p.micBuf = append(p.micBuf[:0], p.micBuf[len(p.micBuf)-limit:]...)
 	}
 	p.micMu.Unlock()
@@ -415,7 +481,7 @@ func (p *gptLivePipeline) WriteSample(sample media.PCM16Sample) error {
 // input, so network-shaped mic delivery became network-shaped model output. Until 200ms is
 // buffered, and whenever the mic falls short, it sends silence to keep that clock steady.
 func (p *gptLivePipeline) pumpMicIn(ctx context.Context) {
-	chunk := p.spec.SampleRate / 10 * 2 // 100ms of PCM16 mono
+	chunk := p.inRate() / 10 * 2 // 100ms of PCM16 mono
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	primed := false
@@ -599,7 +665,7 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 		micSamples := p.micSamples.Swap(0)
 		logger.InfoCF("livekit", "gptlive: audio flow", map[string]any{
 			"room":           p.rs.roomName(),
-			"in_ratio":       float64(micSamples) / (float64(p.spec.SampleRate) * elapsed.Seconds()),
+			"in_ratio":       float64(micSamples) / (float64(p.inRate()) * elapsed.Seconds()),
 			"in_max_gap_ms":  time.Duration(p.micMaxGap.Swap(0)).Milliseconds(),
 			"push_max_ms":    time.Duration(p.micMaxPush.Swap(0)).Milliseconds(),
 			"out_ratio":      outArrived.Seconds() / elapsed.Seconds(),
@@ -656,6 +722,11 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			}
 			write(out) // bytesToPCM16 copies, so reusing carry below is safe
 			carry = append(carry[:0], carry[n:]...)
+		case <-p.interrupts: // nil channel on GPT-Live-only test pipelines: never ready
+			if c, ok := track.(interface{ ClearQueue() }); ok {
+				c.ClearQueue()
+			}
+			carry, level, starved = carry[:0], 0, true
 		case now := <-ticks:
 			drain(now)
 			p.seg.Tick(now)
@@ -830,6 +901,11 @@ func (p *gptLivePipeline) onEvent(ev gptlive.Event) {
 	case gptlive.FunctionResult:
 		if e.IsError {
 			logger.WarnCF("livekit", "gptlive: tool error", map[string]any{"name": e.Name, "output": e.Output})
+		}
+	case gptlive.Interrupted:
+		select {
+		case p.interrupts <- struct{}{}:
+		default: // one pending barge-in is enough
 		}
 	case gptlive.VoiceUsage:
 		// Seconds is the session's running total to date, not a delta since the
