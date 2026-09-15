@@ -230,10 +230,12 @@ func (s *Session) AppendInstructions(string) {
 // isGemini31 reports a Gemini 3.1 Live model (the same substring check the LiveKit plugin uses).
 func isGemini31(model string) bool { return strings.Contains(model, "3.1") }
 
-// disableThinkingBudget reports a 2.5 model, whose setup turns thinking off with
+// disableThinkingBudget reports a 2.5 Flash model, whose setup turns thinking off with
 // generationConfig.thinkingConfig.thinkingBudget 0: thinking cost seconds before the first audio.
+// Scoped to Flash, not all of 2.5: a 2.5 Pro Live model's minimum thinking budget is 128, so
+// sending 0 would make it refuse the setup.
 // 3.1 takes thinkingLevel instead of thinkingBudget and already defaults to "minimal", so it is left alone.
-func disableThinkingBudget(model string) bool { return strings.Contains(model, "2.5") }
+func disableThinkingBudget(model string) bool { return strings.Contains(model, "2.5-flash") }
 
 // AppendCommentary makes the model say something now. 3.1 models take realtime text;
 // 2.5 models take a completed user turn.

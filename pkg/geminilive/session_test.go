@@ -20,6 +20,11 @@ import (
 	"github.com/sipeed/picoclaw/pkg/realtimeconn"
 )
 
+// testTimeout bounds blocking receives in these tests so a regression fails
+// fast instead of hanging to the 10-minute go test default (see grokvoice's
+// session_test.go, which uses the same pattern).
+const testTimeout = 5 * time.Second
+
 type exec struct{}
 
 func (exec) Execute(_ context.Context, name string, args map[string]any) (string, bool) {
@@ -312,6 +317,7 @@ func TestGeminiSetupDisablesThinkingOnlyFor25(t *testing.T) {
 	for model, want := range map[string]bool{
 		"gemini-2.5-flash-native-audio-preview-12-2025": true,
 		"gemini-3.1-flash-live-preview":                 false,
+		"gemini-2.5-pro-live-preview":                   false,
 	} {
 		setups := make(chan string, 1)
 		var up websocket.Upgrader
@@ -335,7 +341,12 @@ func TestGeminiSetupDisablesThinkingOnlyFor25(t *testing.T) {
 				GenerationConfig map[string]json.RawMessage `json:"generationConfig"`
 			} `json:"setup"`
 		}
-		raw := <-setups
+		var raw string
+		select {
+		case raw = <-setups:
+		case <-time.After(testTimeout):
+			t.Fatalf("%s: timed out waiting for setup", model)
+		}
 		if err := json.Unmarshal([]byte(raw), &setup); err != nil {
 			t.Fatal(err)
 		}

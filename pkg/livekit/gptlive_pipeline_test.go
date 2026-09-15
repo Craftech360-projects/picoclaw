@@ -14,8 +14,13 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/livekit/media-sdk"
 	lkproto "github.com/livekit/protocol/livekit"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/sipeed/picoclaw/pkg/gptlive"
 )
+
+// testTimeout bounds blocking receives in tests below so a regression fails
+// fast instead of hanging to the 10-minute go test default.
+const testTimeout = 5 * time.Second
 
 func TestPCM16SampleToBytesIsLittleEndian(t *testing.T) {
 	got := pcm16ToBytes(media.PCM16Sample{1, -2})
@@ -1415,5 +1420,34 @@ func TestBurstEndIsImmediateWhenNothingIsQueued(t *testing.T) {
 	case <-p.burstClosed:
 	default:
 		t.Fatal("the burst should end on the tick that closed the segment when nothing is queued")
+	}
+}
+
+// A post-dial subscription must not block the LiveKit signal goroutine on a slow vendor
+// socket. handleLocalTrackSubscribed runs on that goroutine (room.go's callback dispatch),
+// and greet's AppendCommentary is a blocking send for Gemini/Grok (WriteJSON under writeMu).
+// Review finding room_session.go:596 with gptlive_pipeline.go:572: fixed by spawning
+// ListenerSubscribed in its own goroutine, which this test pins down by using a fake
+// session whose AppendCommentary blocks on an unbuffered channel nobody reads yet.
+func TestHandleLocalTrackSubscribedDoesNotBlockOnSlowVendor(t *testing.T) {
+	sess := &fakeRealtimeSession{commentary: make(chan string)} // unbuffered: AppendCommentary blocks until read
+	p := &gptLivePipeline{rs: &RoomSession{}, sess: sess}
+	rs := &RoomSession{gptlive: p}
+	pub := lksdk.NewLocalTrackPublication(lksdk.TrackKindAudio, nil, lksdk.TrackPublicationOptions{}, nil, nil)
+
+	done := make(chan struct{})
+	go func() {
+		rs.handleLocalTrackSubscribed(pub)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("handleLocalTrackSubscribed blocked on AppendCommentary instead of greeting off-goroutine")
+	}
+	select {
+	case <-sess.commentary: // let the spawned goroutine's send complete
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the greeting nudge from the spawned goroutine")
 	}
 }

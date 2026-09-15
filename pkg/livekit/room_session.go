@@ -601,7 +601,11 @@ func (rs *RoomSession) handleLocalTrackSubscribed(publication *lksdk.LocalTrackP
 	gptlivePipeline := rs.gptlive
 	rs.mu.Unlock()
 	if gptlivePipeline != nil {
-		gptlivePipeline.ListenerSubscribed()
+		// ListenerSubscribed can block on a slow vendor socket (AppendCommentary's
+		// WriteJSON under writeMu for Gemini/Grok). Run it off this goroutine, which
+		// is LiveKit's signal handler, so a slow vendor never stalls signalling.
+		// Safe because greet() only takes effect once (see greet's idempotency).
+		go gptlivePipeline.ListenerSubscribed()
 	}
 }
 
