@@ -174,6 +174,9 @@ func (s *Session) setup() map[string]any {
 		"contextWindowCompression": map[string]any{"slidingWindow": map[string]any{}},
 		"sessionResumption":        resumption,
 	}
+	if disableThinkingBudget(s.cfg.Model) {
+		setup["generationConfig"].(map[string]any)["thinkingConfig"] = map[string]any{"thinkingBudget": 0}
+	}
 	if tools := liveTools(s.cfg.Tools); len(tools) > 0 {
 		setup["tools"] = tools
 	}
@@ -222,10 +225,18 @@ func (s *Session) AppendInstructions(string) {
 	}
 }
 
+// isGemini31 reports a Gemini 3.1 Live model (the same substring check the LiveKit plugin uses).
+func isGemini31(model string) bool { return strings.Contains(model, "3.1") }
+
+// disableThinkingBudget reports a 2.5 model, whose setup turns thinking off with
+// generationConfig.thinkingConfig.thinkingBudget 0: thinking cost seconds before the first audio.
+// 3.1 takes thinkingLevel instead of thinkingBudget and already defaults to "minimal", so it is left alone.
+func disableThinkingBudget(model string) bool { return strings.Contains(model, "2.5") }
+
 // AppendCommentary makes the model say something now. 3.1 models take realtime text;
 // 2.5 models take a completed user turn.
 func (s *Session) AppendCommentary(text string) {
-	if strings.Contains(s.cfg.Model, "3.1") {
+	if isGemini31(s.cfg.Model) {
 		_ = s.Send(map[string]any{"realtimeInput": map[string]any{"text": text}})
 		return
 	}

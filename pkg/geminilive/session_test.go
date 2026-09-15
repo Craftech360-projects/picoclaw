@@ -305,3 +305,46 @@ func TestGeminiCommentaryPerModelFamily(t *testing.T) {
 		srv.Close()
 	}
 }
+
+func TestGeminiSetupDisablesThinkingOnlyFor25(t *testing.T) {
+	for model, want := range map[string]bool{
+		"gemini-2.5-flash-native-audio-preview-12-2025": true,
+		"gemini-3.1-flash-live-preview":                 false,
+	} {
+		setups := make(chan string, 1)
+		var up websocket.Upgrader
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c, err := up.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			_, msg, _ := c.ReadMessage()
+			setups <- string(msg)
+			_ = c.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+			_, _, _ = c.ReadMessage() // hold the socket open until the session closes
+		}))
+		s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http"), Model: model})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var setup struct {
+			Setup struct {
+				GenerationConfig map[string]json.RawMessage `json:"generationConfig"`
+			} `json:"setup"`
+		}
+		raw := <-setups
+		if err := json.Unmarshal([]byte(raw), &setup); err != nil {
+			t.Fatal(err)
+		}
+		tc, has := setup.Setup.GenerationConfig["thinkingConfig"]
+		if want && (!has || string(tc) != `{"thinkingBudget":0}`) {
+			t.Fatalf("%s: generationConfig.thinkingConfig = %s, want {\"thinkingBudget\":0}", model, tc)
+		}
+		if !want && (has || strings.Contains(raw, "thinking")) {
+			t.Fatalf("%s: setup must not carry a thinking config, got %s", model, tc)
+		}
+		_ = s.Close(context.Background())
+		srv.Close()
+	}
+}
