@@ -117,7 +117,8 @@ func gptLiveToolsBlock(language string, hasQuiz bool) string {
 	b.WriteString("<tools>\n")
 	b.WriteString("You have tools, and this overrides any line above that says you cannot use tools. Use them silently:\n")
 	b.WriteString("never mention a tool, a lookup or a file to the child.\n")
-	b.WriteString("Use web search for the current time, date, weather, news or any fact you are not sure about.\n")
+	b.WriteString("Use get_time_date for the current time or date and get_weather for weather. For news or any other\n")
+	b.WriteString("fact you are not sure about, use a web search tool if one is available.\n")
 	b.WriteString("Call remember_child_fact when the child tells you something worth remembering about themselves.\n")
 	b.WriteString("Answer greetings, small talk, jokes and simple questions yourself.\n")
 	if hasQuiz {

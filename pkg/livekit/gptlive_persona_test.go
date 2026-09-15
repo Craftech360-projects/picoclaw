@@ -337,7 +337,7 @@ func TestBuildGPTLivePersonaSingleModelFoldsToolsIntoOnePrompt(t *testing.T) {
 		BankBlock: "## Quiz Questions\n1. (id=11) How many legs does a spider have? Answer: eight",
 	})
 	for _, want := range []string{"<tools>", "quiz_score_answer", "quiz_status", "remember_child_fact",
-		"Judge the meaning", "Speak Hindi", "(id=11)", "<memo_override>"} {
+		"Judge the meaning", "Speak Hindi", "(id=11)", "<memo_override>", "question_id", "revealed", "get_time_date"} {
 		if !strings.Contains(quiz.Voice, want) {
 			t.Errorf("single-model Voice lacks %q", want)
 		}
