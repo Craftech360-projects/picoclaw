@@ -45,6 +45,20 @@ type Session struct {
 	mu           sync.Mutex
 	instructions string
 	agentText    map[string]string
+	resp         *respState // in-flight response's tool calls; nil when none are owed a continuation
+}
+
+// respState tracks one response's tool calls: which ones it made
+// (response.function_call_arguments.done) and which have returned an output
+// (answer's conversation.item.create). maybeContinue sends the single
+// response.create that resumes the response once both response.done has
+// arrived and every call in calls has a matching entry in returned — never
+// per-call, and never before response.done, matching the pattern
+// gptlive/delegation.go uses for its own backend continuations.
+type respState struct {
+	done     bool
+	calls    map[string]bool
+	returned map[string]bool
 }
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
@@ -111,6 +125,21 @@ func (s *Session) AppendCommentary(text string) {
 	_ = s.Send(map[string]any{"type": "conversation.item.create", "item": map[string]any{
 		"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": text}},
 	}})
+	s.requestResponse()
+}
+
+// requestResponse sends response.create unless a tool-call continuation is still
+// owed one for the response in flight (s.resp != nil): the protocol rejects a
+// second response.create while one is already active, and maybeContinue will
+// send its own response.create — which picks up whatever AppendCommentary just
+// queued — as soon as that response is done and every call has returned.
+func (s *Session) requestResponse() {
+	s.mu.Lock()
+	owed := s.resp != nil
+	s.mu.Unlock()
+	if owed {
+		return
+	}
 	_ = s.Send(map[string]any{"type": "response.create"})
 }
 
@@ -166,6 +195,12 @@ func (s *Session) handle(raw []byte) {
 		s.Emit(gptlive.AgentTranscript{ID: ev.ItemID, Delta: ev.Delta, Text: text})
 	case "response.function_call_arguments.done":
 		call := gptlive.FunctionCall{CallID: ev.CallID, Name: ev.Name, Arguments: ev.Arguments}
+		s.mu.Lock()
+		if s.resp == nil {
+			s.resp = &respState{calls: map[string]bool{}, returned: map[string]bool{}}
+		}
+		s.resp.calls[ev.CallID] = true
+		s.mu.Unlock()
 		s.Emit(call)
 		s.Go(func() { s.answer(call) })
 	case "response.done":
@@ -174,6 +209,17 @@ func (s *Session) handle(raw []byte) {
 			s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.InputTokens, Output: u.OutputTokens, Total: u.TotalTokens})
 		}
 		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
+		s.mu.Lock()
+		// The response (and every item in it) is finished: clear the accumulated
+		// per-item transcript text now rather than letting it grow for the life
+		// of the session, and rather than letting a missing item_id accumulate
+		// every response's deltas under the same "" key.
+		s.agentText = map[string]string{}
+		if s.resp != nil {
+			s.resp.done = true
+		}
+		s.mu.Unlock()
+		s.maybeContinue()
 	case "error":
 		s.Emit(gptlive.Error{Err: fmt.Errorf("grokvoice: %s", ev.Error), Recoverable: true})
 	}
@@ -187,6 +233,38 @@ func (s *Session) answer(call gptlive.FunctionCall) {
 	_ = s.Send(map[string]any{"type": "conversation.item.create", "item": map[string]any{
 		"type": "function_call_output", "call_id": call.CallID, "output": output,
 	}})
+	s.mu.Lock()
+	if s.resp != nil {
+		s.resp.returned[call.CallID] = true
+	}
+	s.mu.Unlock()
+	s.maybeContinue()
+}
+
+// maybeContinue sends the single response.create that resumes a response after
+// its tool calls are answered, once response.done has arrived AND every call
+// response.function_call_arguments.done reported for it has returned an output.
+// Sending response.create as each tool finished (the previous behavior) could
+// fire while the response was still open — the protocol rejects a
+// response.create sent while one is already active — and fired once per call,
+// which is a duplicate whenever a response makes more than one call. Matches
+// the pattern gptlive/delegation.go's maybeContinue uses for the same problem
+// on the GPT-Live backend.
+func (s *Session) maybeContinue() {
+	s.mu.Lock()
+	r := s.resp
+	if r == nil || !r.done {
+		s.mu.Unlock()
+		return
+	}
+	for id := range r.calls {
+		if !r.returned[id] {
+			s.mu.Unlock()
+			return
+		}
+	}
+	s.resp = nil
+	s.mu.Unlock()
 	_ = s.Send(map[string]any{"type": "response.create"})
 }
 
