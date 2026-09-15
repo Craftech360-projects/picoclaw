@@ -53,6 +53,8 @@ type Conn struct {
 	audio   chan []byte
 	events  chan gptlive.Event
 	work    sync.WaitGroup
+	endMu   sync.RWMutex // guards ended; Run holds the write lock while flipping it and closing the channels
+	ended   bool
 	done    chan struct{}
 }
 
@@ -79,9 +81,16 @@ func (c *Conn) Send(v any) error {
 	return ws.WriteJSON(v)
 }
 
-// EmitAudio hands model PCM to the consumer without ever blocking the read loop.
+// EmitAudio hands model PCM to the consumer without ever blocking the read loop. A no-op once
+// Run has ended the session (channels closed) — a straggler goroutine (a timer, keepalive, or
+// pipeline-side helper not started via Go) must not panic on a closed channel.
 func (c *Conn) EmitAudio(pcm []byte) {
 	if len(pcm) == 0 {
+		return
+	}
+	c.endMu.RLock()
+	defer c.endMu.RUnlock()
+	if c.ended {
 		return
 	}
 	select {
@@ -91,8 +100,14 @@ func (c *Conn) EmitAudio(pcm []byte) {
 	}
 }
 
-// Emit hands an event to the consumer without ever blocking the read loop.
+// Emit hands an event to the consumer without ever blocking the read loop. A no-op once Run has
+// ended the session (channels closed); see EmitAudio.
 func (c *Conn) Emit(ev gptlive.Event) {
+	c.endMu.RLock()
+	defer c.endMu.RUnlock()
+	if c.ended {
+		return
+	}
 	select {
 	case c.events <- ev:
 	default:
@@ -101,8 +116,15 @@ func (c *Conn) Emit(ev gptlive.Event) {
 }
 
 // Go runs fn (a tool call) on its own goroutine; Run closes the channels only after it returns.
+// Once Run has ended the session, Go neither runs fn nor touches the WaitGroup.
 func (c *Conn) Go(fn func()) {
+	c.endMu.RLock()
+	if c.ended {
+		c.endMu.RUnlock()
+		return
+	}
 	c.work.Add(1)
+	c.endMu.RUnlock()
 	go func() {
 		defer c.work.Done()
 		fn()
@@ -125,23 +147,33 @@ func (c *Conn) Close() error {
 }
 
 // Run reads frames into handle until the socket ends. If redial is non-nil and Close was not
-// called, it swaps in redial's socket and keeps reading. At the end it waits for Go work,
-// calls onEnd (which may still Emit) with the last read error, then closes Audio, Events and Done.
+// called, it swaps in redial's socket and keeps reading — unless the socket being replaced
+// delivered no frames at all, which ends the session instead of redialing in a tight loop (a
+// vendor that accepts and instantly closes). The replaced/ended socket is always closed. At the
+// end it waits for Go work, calls onEnd (which may still Emit) with the last read error, then
+// closes Audio, Events and Done.
 func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), onEnd func(err error)) {
 	var last error
 	for {
 		c.mu.Lock()
 		ws := c.ws
 		c.mu.Unlock()
+		gotFrame := false
 		for {
 			_, data, err := ws.ReadMessage()
 			if err != nil {
 				last = err
 				break
 			}
+			gotFrame = true
 			handle(data)
 		}
+		_ = ws.Close() // release the replaced/ended socket; a redial uses a new one
 		if c.Closing() || redial == nil {
+			break
+		}
+		if !gotFrame {
+			logger.WarnCF("realtime", "vendor socket closed without delivering any frames; not redialing", nil)
 			break
 		}
 		next, err := redial()
@@ -163,8 +195,11 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 	if onEnd != nil {
 		onEnd(last)
 	}
+	c.endMu.Lock()
+	c.ended = true
 	close(c.audio)
 	close(c.events)
+	c.endMu.Unlock()
 	close(c.done)
 }
 

@@ -100,3 +100,80 @@ func TestRunTool(t *testing.T) {
 		t.Fatal("a nil executor must report an error output")
 	}
 }
+
+func TestEmitAudioEmitAndGoAfterRunEndedDoNotPanic(t *testing.T) {
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		c.Close() // accept then instantly close: Run ends with no redial configured
+	}))
+	defer srv.Close()
+
+	ws, err := Dial(context.Background(), wsURL(srv), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(ws)
+	runDone := make(chan struct{})
+	go func() {
+		c.Run(func([]byte) {}, nil, nil)
+		close(runDone)
+	}()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not end")
+	}
+	<-c.Done()
+
+	// None of these may panic (send on a closed channel) now that the session has ended.
+	c.EmitAudio([]byte("late"))
+	c.Emit(gptlive.Closed{Reason: "late"})
+
+	ran := make(chan struct{}, 1)
+	c.Go(func() { ran <- struct{}{} })
+	select {
+	case <-ran:
+		t.Fatal("Go ran fn after Run had already ended the session")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRunStopsRedialingASocketThatDeliveredNoFrames(t *testing.T) {
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		c.Close() // accepts, but never sends a frame before closing
+	}))
+	defer srv.Close()
+
+	ws, err := Dial(context.Background(), wsURL(srv), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(ws)
+	var redials atomic.Int32
+	runDone := make(chan struct{})
+	go func() {
+		c.Run(func([]byte) {}, func() (*websocket.Conn, error) {
+			redials.Add(1)
+			return Dial(context.Background(), wsURL(srv), nil, "")
+		}, nil)
+		close(runDone)
+	}()
+
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run kept redialing an empty socket instead of ending the session")
+	}
+	if n := redials.Load(); n != 0 {
+		t.Fatalf("redial called %d times, want 0: a socket with no frames must not be redialed", n)
+	}
+}
