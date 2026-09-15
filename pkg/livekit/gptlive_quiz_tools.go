@@ -156,7 +156,7 @@ func (t *QuizTracker) Score(questionID, result, transcript string) (string, erro
 		t.tries[q.ID]++
 		t.attempts[q.ID] = append(t.attempts[q.ID], QuizAttempt{Verdict: "wrong", Transcript: transcript})
 		if !t.ladderExhausted(q) {
-			directive, nextCB = t.nextDirectiveLocked(q)
+			directive, nextCB = t.nextDirectiveLocked(q, true)
 		} else {
 			directive, err, answerCB, nextCB = t.recordLocked(q, "revealed")
 		}
@@ -237,21 +237,47 @@ func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive s
 	if t.ladderExhausted(q) && t.tries[q.ID] > 0 {
 		terminal = doorDirectiveText(q, t.tries[q.ID]) // the "all tries used" wording
 	}
+	// Single-model vendors (Gemini) cannot take mid-session instruction
+	// updates, so this tool result is the only place they learn a question was
+	// closed: the prompt's static bank block keeps its stale STATUS forever.
+	// Name the closed question by id AND text so it is never re-asked.
+	scored := fmt.Sprintf("Previous question id=%s %q is already scored. Do NOT ask it again.", q.IDString, q.Text)
 	next := t.pendingLocked()
 	if next == nil {
-		return strings.TrimSpace(terminal + "\n\nAll of today's questions are done. Celebrate briefly and move on to free play."), nil, answerCB, nil
+		done, total := t.doneLocked()
+		return strings.TrimSpace(terminal + "\n\n" + scored + fmt.Sprintf(
+			"\nAll of today's questions are done (%d of %d). Celebrate briefly and move on to free play. Do NOT ask any quiz question again today.",
+			done, total)), nil, answerCB, nil
 	}
-	nextDirective, nextCB := t.nextDirectiveLocked(next)
-	return strings.TrimSpace(terminal + "\n\n" + nextDirective), nil, answerCB, nextCB
+	nextDirective, nextCB := t.nextDirectiveLocked(next, false)
+	return strings.TrimSpace(terminal + "\n\n" + scored + "\n\n" + nextDirective), nil, answerCB, nextCB
+}
+
+// doneLocked is today's done count, counted as recordLocked's MEMO `answered`
+// is. Caller holds t.mu.
+func (t *QuizTracker) doneLocked() (done, total int) {
+	return t.cfg.Batch.AnsweredToday + len(t.reported), t.cfg.Batch.AnsweredToday + len(t.cfg.Batch.Questions)
 }
 
 // nextDirectiveLocked returns the Door directive for q and, when OnDirective
 // was registered, a callback the caller must run once t.mu is released.
-func (t *QuizTracker) nextDirectiveLocked(q *QuizQuestion) (directive string, cb func()) {
+//
+// The Door wording (shared with the cascade) names the question by id only. A
+// single-model vendor never receives an instruction update, so the directive
+// is made self-sufficient here: the question's full text and today's done
+// count. stay marks a miss that keeps the session on the same question.
+func (t *QuizTracker) nextDirectiveLocked(q *QuizQuestion, stay bool) (directive string, cb func()) {
 	d := doorDirectiveText(q, t.tries[q.ID])
 	if d == "" {
 		d = fmt.Sprintf("## This Question\nAsk question %s plainly, in your own words. Do not offer choices and do not hint yet.", q.IDString)
 	}
+	if stay {
+		d += fmt.Sprintf("\nStay on this same question; it is NOT scored yet. The question (id=%s) is: %q", q.IDString, q.Text)
+	} else {
+		d += fmt.Sprintf("\nThe question (id=%s) is: %q", q.IDString, q.Text)
+	}
+	done, total := t.doneLocked()
+	d += fmt.Sprintf("\n%d of %d of today's questions are done. This count replaces any earlier STATUS line.", done, total)
 	if t.onDirective != nil {
 		onDirective := t.onDirective
 		cb = func() { onDirective(d) }

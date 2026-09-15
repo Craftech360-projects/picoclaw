@@ -342,6 +342,73 @@ func TestQuizStateTypesWrittenNamesTheMemoTypeOnceScored(t *testing.T) {
 	}
 }
 
+// TestQuizScoreResultIsSelfSufficientForSingleModelVendors covers a live Gemini
+// bug: a single-model vendor cannot take mid-session instruction updates, so the
+// quiz_score_answer tool result is the ONLY place it learns a question was
+// scored. The prompt's static bank block keeps saying "0 scored so far", and a
+// result that named only the next question's id let the model re-ask a question
+// the child had already answered. The result must therefore say which question
+// is closed, how many are done, and give the next question's full text.
+func TestQuizScoreResultIsSelfSufficientForSingleModelVendors(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	tool := findQuizTool(t, tr, "quiz_score_answer")
+
+	res := tool.Execute(context.Background(), map[string]any{"question_id": "11", "result": "correct", "transcript": "eight"})
+	if res == nil || res.IsError {
+		t.Fatalf("score 11 correct: %+v", res)
+	}
+	got := res.ForLLM
+	for _, want := range []string{
+		"## This Question",
+		"What colour is the sky on a clear day?", // the next question's text
+		"id=11",                                  // the closed question is named...
+		"How many legs does a spider have?",      // ...with its text
+		"already scored",
+		"3 of 4", // AnsweredToday 2 + this one, of 2 + 2
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("score result missing %q: %q", want, got)
+		}
+	}
+
+	res = tool.Execute(context.Background(), map[string]any{"question_id": "12", "result": "correct", "transcript": "blue"})
+	if res == nil || res.IsError {
+		t.Fatalf("score 12 correct: %+v", res)
+	}
+	got = res.ForLLM
+	for _, want := range []string{"All of today's questions are done", "4 of 4", "id=12", "NOT ask"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("final score result missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestQuizMissResultRepeatsTheSameQuestionText(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	d, err := tr.Score("11", "miss", "six")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"How many legs does a spider have?", "Stay on", "2 of 4"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("authored-ladder miss result missing %q: %q", want, d)
+		}
+	}
+	if strings.Contains(d, "What colour is the sky") {
+		t.Errorf("a miss stays on question 11 and must not name the next question: %q", d)
+	}
+
+	// Unauthored ladder (question 12 has no choices, no teach text).
+	tr.Score("11", "correct", "eight")
+	d, err = tr.Score("12", "miss", "green")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d, "What colour is the sky on a clear day?") || !strings.Contains(d, "Stay on") {
+		t.Errorf("unauthored-ladder miss result must restate the same question: %q", d)
+	}
+}
+
 func TestQuizToolsExposeTheThreeFunctions(t *testing.T) {
 	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz"})
 	var names []string
