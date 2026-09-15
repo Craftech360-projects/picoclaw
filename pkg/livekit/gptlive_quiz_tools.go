@@ -245,6 +245,11 @@ func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive s
 	next := t.pendingLocked()
 	if next == nil {
 		done, total := t.doneLocked()
+		// The shared terminal wording ends "move straight on to the next
+		// question", but there is none: keep the reveal/warm-line part and
+		// point it at the wrap-up instead. doorDirectiveText is left alone
+		// because the cascade shares it.
+		terminal = strings.ReplaceAll(terminal, "move straight on to the next question", "then wrap up the quiz")
 		return strings.TrimSpace(terminal + "\n\n" + scored + fmt.Sprintf(
 			"\nAll of today's questions are done (%d of %d). Celebrate briefly and move on to free play. Do NOT ask any quiz question again today.",
 			done, total)), nil, answerCB, nil

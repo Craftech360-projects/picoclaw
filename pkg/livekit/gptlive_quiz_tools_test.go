@@ -162,8 +162,15 @@ func TestQuizCorrectAtDoorThreeIsRevealed(t *testing.T) {
 	if strings.Contains(directive, "ask the question again") || strings.Contains(directive, "four legs each side") {
 		t.Errorf("a correct answer closes question 11; the directive must not re-ask or re-explain it: %q", directive)
 	}
+	// Question 11 is closed: it may be named only in the "already scored" line
+	// (by id=11 and text), never as a question to ask ("question 11").
 	if strings.Contains(directive, "question 11") {
-		t.Errorf("question 11 is closed and pending has moved on; the directive must not name it at all: %q", directive)
+		t.Errorf("question 11 is closed and pending has moved on; the directive must not name it as a question to ask: %q", directive)
+	}
+	for _, want := range []string{`id=11 "How many legs does a spider have?" is already scored`, "3 of 4"} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("guided-door downgrade result missing %q: %q", want, directive)
+		}
 	}
 	if !strings.Contains(directive, "Ask question 12 plainly") {
 		t.Errorf("the directive must move the session on to the next pending question: %q", directive)
@@ -190,8 +197,12 @@ func TestQuizCorrectAtUnauthoredDoorTwoDoesNotReaskTheClosedQuestion(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Named only in the "already scored" line, never as a question to ask.
 	if strings.Contains(directive, "question 21") {
-		t.Errorf("question 21 was just closed; the directive must not name it: %q", directive)
+		t.Errorf("question 21 was just closed; the directive must not name it as a question to ask: %q", directive)
+	}
+	if !strings.Contains(directive, "id=21") || !strings.Contains(directive, "already scored") || !strings.Contains(directive, "1 of 2") {
+		t.Errorf("guided-door downgrade result must name id=21 as already scored with the done count: %q", directive)
 	}
 	if !strings.Contains(directive, "Ask question 22 plainly") {
 		t.Errorf("the directive must move on to question 22: %q", directive)
@@ -215,6 +226,14 @@ func TestQuizExhaustedLadderStillCarriesTheTerminalWording(t *testing.T) {
 	if !strings.Contains(directive, "all three tries") {
 		t.Errorf("an exhausted authored ladder must still end with the terminal wording: %q", directive)
 	}
+	// Exhausted but not the last question: the closed one is named as scored and
+	// the next question's text and the done count follow.
+	for _, want := range []string{`id=11 "How many legs does a spider have?" is already scored`, "3 of 4",
+		"What colour is the sky on a clear day?"} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("exhausted-ladder result missing %q: %q", want, directive)
+		}
+	}
 
 	// Question 12 has no choices and no teach text: its ladder ends at two misses.
 	tr.Score("12", "miss", "purple")
@@ -224,6 +243,16 @@ func TestQuizExhaustedLadderStillCarriesTheTerminalWording(t *testing.T) {
 	}
 	if !strings.Contains(directive, "result=revealed") {
 		t.Errorf("an exhausted unauthored ladder must still carry the reveal instruction: %q", directive)
+	}
+	// Last question of the batch: there is no next question, so the result must
+	// not send the model to one directly above "all done, ask nothing more".
+	if strings.Contains(directive, "next question") {
+		t.Errorf("the last question closed via the ladder must not point at a next question: %q", directive)
+	}
+	for _, want := range []string{"All of today's questions are done (4 of 4)", `id=12 "What colour is the sky on a clear day?" is already scored`} {
+		if !strings.Contains(directive, want) {
+			t.Errorf("last-question exhausted-ladder result missing %q: %q", want, directive)
+		}
 	}
 }
 
