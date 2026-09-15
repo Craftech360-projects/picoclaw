@@ -292,7 +292,7 @@ func (s *Session) maybeContinue() {
 // (gptLivePipeline leaves the room on a non-recoverable Error).
 func (s *Session) onEnd(err error) {
 	if !s.Closing() {
-		s.Emit(gptlive.Error{Err: fmt.Errorf("grokvoice: connection lost: %v", err), Recoverable: false})
+		s.Emit(gptlive.Error{Err: errors.New("grokvoice: connection lost: " + s.Scrub(fmt.Sprint(err))), Recoverable: false})
 	}
 	s.Emit(gptlive.Closed{Reason: "socket closed", VoiceSeconds: time.Since(s.started).Seconds()})
 }

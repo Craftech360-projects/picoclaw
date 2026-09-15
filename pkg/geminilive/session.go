@@ -59,6 +59,7 @@ type Session struct {
 	resumableKnown bool
 	resumable      bool
 	logLimit       *realtimeconn.LogLimiter // unknown/unparsed frames
+	usageLimit     *realtimeconn.LogLimiter // the usage line: at most once a second, so every turn still logs
 	lastUsage      [6]int                   // the usage line is logged only when these counts change
 	// flushTimer is started by the current turn's first model output and flushes the user
 	// transcript userFlushDelay later if the turn has not ended by then; nil until that output
@@ -87,7 +88,8 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 	if cfg.Silence <= 0 {
 		cfg.Silence = defaultSilence
 	}
-	s := &Session{cfg: cfg, started: time.Now(), logLimit: realtimeconn.NewLogLimiter(30 * time.Second)}
+	s := &Session{cfg: cfg, started: time.Now(), logLimit: realtimeconn.NewLogLimiter(30 * time.Second),
+		usageLimit: realtimeconn.NewLogLimiter(time.Second)}
 	ws, err := s.connect(ctx)
 	if err != nil {
 		return nil, err
@@ -393,10 +395,14 @@ func (s *Session) handleMessage(raw []byte) {
 		s.lastUsage = counts
 		s.mu.Unlock()
 		if changed {
-			logger.InfoCF("realtime", "gemini live: usage", map[string]any{
-				"prompt_tokens": u.PromptTokenCount, "response_tokens": u.ResponseTokenCount, "thoughts_tokens": u.ThoughtsTokenCount,
-				"tool_use_prompt_tokens": u.ToolUsePromptTokenCount, "cached_tokens": u.CachedContentTokenCount, "total_tokens": u.TotalTokenCount,
-			})
+			// usage normally arrives once per turn; the limiter only bites if a vendor sends it per frame
+			if ok, held := s.usageLimit.Allow("usage"); ok {
+				logger.InfoCF("realtime", "gemini live: usage", map[string]any{
+					"prompt_tokens": u.PromptTokenCount, "response_tokens": u.ResponseTokenCount, "thoughts_tokens": u.ThoughtsTokenCount,
+					"tool_use_prompt_tokens": u.ToolUsePromptTokenCount, "cached_tokens": u.CachedContentTokenCount, "total_tokens": u.TotalTokenCount,
+					"suppressed": held,
+				})
+			}
 		}
 		s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.PromptTokenCount, Output: u.ResponseTokenCount, Total: u.TotalTokenCount})
 		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
@@ -502,7 +508,7 @@ func (s *Session) onEnd(err error) {
 	s.stopFlushTimer() // Run has stopped accepting Go work, so a timer that already fired is a no-op
 	s.flushUser()      // an utterance the model never answered is still part of the history
 	if !s.Closing() {
-		s.Emit(gptlive.Error{Err: fmt.Errorf("geminilive: connection lost: %v", err), Recoverable: false})
+		s.Emit(gptlive.Error{Err: errors.New("geminilive: connection lost: " + s.Scrub(fmt.Sprint(err))), Recoverable: false})
 	}
 	s.Emit(gptlive.Closed{Reason: "socket closed", VoiceSeconds: time.Since(s.started).Seconds()})
 }

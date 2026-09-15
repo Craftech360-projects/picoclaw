@@ -4,8 +4,10 @@ package grokvoice
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/sipeed/picoclaw/pkg/gptlive"
+	"github.com/sipeed/picoclaw/pkg/realtimeconn"
 )
 
 // testTimeout bounds every blocking receive in these tests so a regression
@@ -524,5 +527,20 @@ func TestGrokCommentaryAndInstructions(t *testing.T) {
 	session, _ := m["session"].(map[string]any)
 	if m["type"] != "session.update" || session["instructions"] != "base\n\nAsk question 2 next." {
 		t.Fatalf("instructions update = %v", m)
+	}
+}
+
+func TestGrokConnectionLostErrorScrubsKey(t *testing.T) {
+	const key = "a+b/c=d"
+	s := &Session{Conn: realtimeconn.New(nil)}
+	s.SetSecret(key)
+	s.onEnd(errors.New("websocket: close 1008: bad key " + key + " / " + url.QueryEscape(key)))
+	ev := <-s.Events()
+	e, ok := ev.(gptlive.Error)
+	if !ok {
+		t.Fatalf("first event = %T, want gptlive.Error", ev)
+	}
+	if msg := e.Err.Error(); strings.Contains(msg, key) || strings.Contains(msg, url.QueryEscape(key)) || !strings.Contains(msg, "***") {
+		t.Fatal("connection-lost error must carry the close text with the key masked")
 	}
 }

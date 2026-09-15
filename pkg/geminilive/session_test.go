@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/sipeed/picoclaw/pkg/gptlive"
+	"github.com/sipeed/picoclaw/pkg/realtimeconn"
 )
 
 type exec struct{}
@@ -346,5 +348,20 @@ func TestGeminiSetupDisablesThinkingOnlyFor25(t *testing.T) {
 		}
 		_ = s.Close(context.Background())
 		srv.Close()
+	}
+}
+
+func TestGeminiConnectionLostErrorScrubsKey(t *testing.T) {
+	const key = "a+b/c=d"
+	s := &Session{Conn: realtimeconn.New(nil)}
+	s.SetSecret(key)
+	s.onEnd(errors.New("websocket: close 1008: bad key " + key + " / " + url.QueryEscape(key)))
+	ev := <-s.Events()
+	e, ok := ev.(gptlive.Error)
+	if !ok {
+		t.Fatalf("first event = %T, want gptlive.Error", ev)
+	}
+	if msg := e.Err.Error(); strings.Contains(msg, key) || strings.Contains(msg, url.QueryEscape(key)) || !strings.Contains(msg, "***") {
+		t.Fatal("connection-lost error must carry the close text with the key masked")
 	}
 }

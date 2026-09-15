@@ -105,6 +105,10 @@ func (c *Conn) SetSecret(secret string) {
 	c.mu.Unlock()
 }
 
+// Scrub masks the SetSecret key (raw and URL-escaped) in s, for text a session puts into an
+// emitted error.
+func (c *Conn) Scrub(s string) string { return c.scrub(s) }
+
 func (c *Conn) scrub(s string) string {
 	c.mu.Lock()
 	secret := c.secret
