@@ -117,3 +117,12 @@ func buildGPTLiveSpec(in gptLiveSpecInput) (*livekit.GPTLiveSessionSpec, error) 
 		MaxSessionDuration: 55 * time.Minute,
 	}, nil
 }
+
+// gptLiveDeclaredToolCount is how many tools the session declares to the vendor (function
+// tools plus hosted web search), for the "gptlive: session spec selected" log line.
+func gptLiveDeclaredToolCount(spec *livekit.GPTLiveSessionSpec) int {
+	if spec == nil || spec.Tools == nil {
+		return 0
+	}
+	return len(livekit.GPTLiveToolDefs(spec.Tools, spec.WebSearch))
+}

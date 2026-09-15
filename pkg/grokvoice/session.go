@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/gptlive"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/realtimeconn"
 )
 
@@ -56,6 +57,8 @@ type Session struct {
 	active  bool            // a response is in flight: response.created, or a call within one, seen; response.done not yet seen
 	pending map[string]bool // call IDs from response.function_call_arguments.done not yet answered
 	owed    bool            // a tool output or AppendCommentary is waiting on a response.create
+
+	logLimit *realtimeconn.LogLimiter // unknown/unparsed events
 }
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
@@ -80,7 +83,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("grokvoice: %w", err)
 	}
 	s := &Session{Conn: realtimeconn.New(ws), cfg: cfg, started: time.Now(), instructions: cfg.Instructions,
-		agentText: map[string]string{}, pending: map[string]bool{}}
+		agentText: map[string]string{}, pending: map[string]bool{}, logLimit: realtimeconn.NewLogLimiter(30 * time.Second)}
 	if err := s.Send(s.sessionUpdate()); err != nil {
 		_ = s.Conn.Close()
 		return nil, fmt.Errorf("grokvoice: session.update: %w", err)
@@ -164,6 +167,9 @@ type serverEvent struct {
 func (s *Session) handle(raw []byte) {
 	var ev serverEvent
 	if json.Unmarshal(raw, &ev) != nil {
+		if ok, held := s.logLimit.Allow("unparsed"); ok {
+			logger.WarnCF("realtime", "grok voice: unparsed server event dropped", map[string]any{"bytes": len(raw), "suppressed": held})
+		}
 		return
 	}
 	switch ev.Type {
@@ -212,17 +218,45 @@ func (s *Session) handle(raw []byte) {
 		s.maybeContinue()
 	case "error":
 		s.Emit(gptlive.Error{Err: fmt.Errorf("grokvoice: %s", ev.Error), Recoverable: true})
+	default:
+		if ignoredEvents[ev.Type] {
+			return
+		}
+		typ := ev.Type
+		if len(typ) > 64 {
+			typ = typ[:64]
+		}
+		if ok, held := s.logLimit.Allow("type:" + typ); ok { // the type name only: payloads carry transcript text
+			logger.InfoCF("realtime", "grok voice: unhandled server event type", map[string]any{"type": typ, "bytes": len(raw), "suppressed": held})
+		}
 	}
+}
+
+// ignoredEvents are documented Voice Agent events handle deliberately does nothing with, so the
+// "unhandled server event type" line shows only what is actually unexpected.
+var ignoredEvents = map[string]bool{
+	"session.created": true, "session.updated": true, "conversation.created": true,
+	"conversation.item.added": true, "conversation.item.created": true,
+	"input_audio_buffer.speech_stopped": true, "input_audio_buffer.committed": true, "input_audio_buffer.cleared": true,
+	"response.output_item.added": true, "response.output_item.done": true,
+	"response.content_part.added": true, "response.content_part.done": true,
+	"response.output_audio.done": true, "response.audio.done": true, "response.output_audio_transcript.done": true,
+	"response.function_call_arguments.delta": true, "ping": true,
 }
 
 func (s *Session) answer(call gptlive.FunctionCall) {
 	var args map[string]any
 	_ = json.Unmarshal([]byte(call.Arguments), &args)
+	start := time.Now()
 	output, isErr := realtimeconn.RunTool(s.cfg.Executor, call.Name, args)
+	toolMs := time.Since(start).Milliseconds()
 	s.Emit(gptlive.FunctionResult{CallID: call.CallID, Name: call.Name, Output: output, IsError: isErr})
-	_ = s.Send(map[string]any{"type": "conversation.item.create", "item": map[string]any{
+	sendErr := s.Send(map[string]any{"type": "conversation.item.create", "item": map[string]any{
 		"type": "function_call_output", "call_id": call.CallID, "output": output,
 	}})
+	logger.InfoCF("realtime", "grok voice: tool result", map[string]any{
+		"name": call.Name, "is_error": isErr, "ms": toolMs, "output_bytes": len(output), "response_sent": sendErr == nil,
+	})
 	s.mu.Lock()
 	delete(s.pending, call.CallID)
 	s.owed = true

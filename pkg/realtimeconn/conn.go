@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -59,8 +60,9 @@ func Dial(ctx context.Context, url string, header http.Header, secret string) (*
 
 // Conn outlives any single websocket: Run can swap the socket and keep feeding the same channels.
 type Conn struct {
-	mu      sync.Mutex // guards ws and closed
+	mu      sync.Mutex // guards ws, sock and closed
 	ws      *websocket.Conn
+	sock    *socketStats // diagnostics for ws; swapped with it
 	closed  bool
 	writeMu sync.Mutex
 	audio   chan []byte
@@ -75,9 +77,19 @@ type Conn struct {
 	done  chan struct{}
 }
 
+// socketStats is per-socket diagnostics for the "vendor socket ended" log line.
+type socketStats struct {
+	seq       int
+	opened    time.Time
+	frames    int64     // Run's goroutine only
+	lastFrame time.Time // Run's goroutine only
+	sendFails atomic.Int64
+}
+
 func New(ws *websocket.Conn) *Conn {
 	return &Conn{
 		ws:     ws,
+		sock:   &socketStats{seq: 1, opened: time.Now()},
 		audio:  make(chan []byte, 1024),
 		events: make(chan gptlive.Event, 1024),
 		done:   make(chan struct{}),
@@ -91,11 +103,18 @@ func (c *Conn) Done() <-chan struct{}        { return c.done }
 // Send writes one JSON message on the current socket.
 func (c *Conn) Send(v any) error {
 	c.mu.Lock()
-	ws := c.ws
+	ws, sock := c.ws, c.sock
 	c.mu.Unlock()
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return ws.WriteJSON(v)
+	err := ws.WriteJSON(v)
+	if err != nil && sock.sendFails.Add(1) == 1 {
+		// once per socket: the mic pushes every 100ms, and the socket-end line carries the count
+		logger.WarnCF("realtime", "vendor socket send failed; later failures on this socket are only counted", map[string]any{
+			"socket_seq": sock.seq, "error": truncate(err.Error()),
+		})
+	}
+	return err
 }
 
 // EmitAudio hands model PCM to the consumer without ever blocking the read loop. A no-op once
@@ -176,7 +195,7 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 	var last error
 	for {
 		c.mu.Lock()
-		ws := c.ws
+		ws, sock := c.ws, c.sock
 		c.mu.Unlock()
 		gotFrame := false
 		for {
@@ -186,18 +205,26 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 				break
 			}
 			gotFrame = true
+			sock.frames++
+			sock.lastFrame = time.Now()
 			handle(data)
 		}
 		_ = ws.Close() // release the replaced/ended socket; a redial uses a new one
-		if c.Closing() || redial == nil {
+		closing := c.Closing()
+		logSocketEnd(sock, last, closing, !closing && redial != nil && gotFrame)
+		if closing || redial == nil {
 			break
 		}
 		if !gotFrame {
 			logger.WarnCF("realtime", "vendor socket closed without delivering any frames; not redialing", nil)
 			break
 		}
+		dialStart := time.Now()
 		next, err := redial()
 		if err != nil {
+			logger.WarnCF("realtime", "vendor socket redial failed", map[string]any{
+				"socket_seq": sock.seq + 1, "redial_ms": msSince(dialStart), "error": truncate(err.Error()),
+			})
 			last = err
 			break
 		}
@@ -208,8 +235,11 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 			break
 		}
 		c.ws = next
+		c.sock = &socketStats{seq: sock.seq + 1, opened: time.Now()}
 		c.mu.Unlock()
-		logger.InfoCF("realtime", "vendor socket resumed on a new connection", nil)
+		logger.InfoCF("realtime", "vendor socket resumed on a new connection", map[string]any{
+			"socket_seq": sock.seq + 1, "redial_ms": msSince(dialStart),
+		})
 	}
 	c.workMu.Lock()
 	c.endingWork = true
@@ -224,6 +254,29 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 	close(c.events)
 	c.endMu.Unlock()
 	close(c.done)
+}
+
+// logSocketEnd is the one line per socket end: why it ended (close code and reason when the
+// vendor sent a close frame) and what the socket did before, so a live run shows whether the
+// vendor closed on a deadline, a protocol error or a network reset.
+func logSocketEnd(sock *socketStats, err error, closing, willRedial bool) {
+	code, text := closeDetails(err)
+	fields := map[string]any{
+		"socket_seq":    sock.seq,
+		"close_code":    code,
+		"close_text":    text,
+		"socket_age_ms": msSince(sock.opened),
+		"frames":        sock.frames,
+		"idle_ms":       msSince(sock.lastFrame),
+		"send_failures": sock.sendFails.Load(),
+		"closing":       closing,
+		"will_redial":   willRedial,
+	}
+	if closing {
+		logger.InfoCF("realtime", "vendor socket ended", fields)
+		return
+	}
+	logger.WarnCF("realtime", "vendor socket ended", fields)
 }
 
 // RunTool executes one model tool call against the session's registry executor.

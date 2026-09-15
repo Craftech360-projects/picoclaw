@@ -53,6 +53,12 @@ type Session struct {
 	userText  string
 	agentText string
 	warnedDir bool
+	// diagnostics (logged, never sent): see the "gemini live:" log lines
+	stats          turnStats
+	socketOpened   time.Time // setupComplete on the current socket
+	resumableKnown bool
+	resumable      bool
+	logLimit       *realtimeconn.LogLimiter // unknown/unparsed frames
 	// flushTimer is started by the current turn's first model output and flushes the user
 	// transcript userFlushDelay later if the turn has not ended by then; nil until that output
 	flushTimer *time.Timer
@@ -80,7 +86,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 	if cfg.Silence <= 0 {
 		cfg.Silence = defaultSilence
 	}
-	s := &Session{cfg: cfg, started: time.Now()}
+	s := &Session{cfg: cfg, started: time.Now(), logLimit: realtimeconn.NewLogLimiter(30 * time.Second)}
 	ws, err := s.connect(ctx)
 	if err != nil {
 		return nil, err
@@ -94,6 +100,10 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 	// the key rides in the URL (Gemini's only API-key auth): never log this string
 	escaped := url.QueryEscape(s.cfg.APIKey)
+	dialStart := time.Now()
+	s.mu.Lock()
+	resumed := s.handle != ""
+	s.mu.Unlock()
 	ws, err := realtimeconn.Dial(ctx, s.cfg.BaseURL+"?key="+escaped, nil, s.cfg.APIKey)
 	if err != nil {
 		// Dial scrubs the raw key; the URL carries the escaped form, which differs for keys with + / = etc.
@@ -118,6 +128,14 @@ func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 		}
 	}
 	_ = ws.SetReadDeadline(time.Time{})
+	decls, search := toolCounts(s.cfg.Tools)
+	logger.InfoCF("realtime", "gemini live: setupComplete", map[string]any{
+		"setup_ms": msSince(dialStart), "resumed": resumed, "model": s.cfg.Model,
+		"instructions_bytes": len(s.cfg.Instructions), "function_decls": decls, "google_search": search,
+	})
+	s.mu.Lock()
+	s.socketOpened = time.Now()
+	s.mu.Unlock()
 	return ws, nil
 }
 
@@ -250,10 +268,16 @@ type serverMessage struct {
 			Args map[string]any `json:"args"`
 		} `json:"functionCalls"`
 	} `json:"toolCall"`
+	ToolCallCancellation *struct {
+		IDs []string `json:"ids"`
+	} `json:"toolCallCancellation"`
 	UsageMetadata *struct {
-		PromptTokenCount   int `json:"promptTokenCount"`
-		ResponseTokenCount int `json:"responseTokenCount"`
-		TotalTokenCount    int `json:"totalTokenCount"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		ResponseTokenCount      int `json:"responseTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+		ToolUsePromptTokenCount int `json:"toolUsePromptTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
 	} `json:"usageMetadata"`
 	SessionResumptionUpdate *struct {
 		NewHandle string `json:"newHandle"`
@@ -265,12 +289,17 @@ type serverMessage struct {
 func (s *Session) handleMessage(raw []byte) {
 	var m serverMessage
 	if json.Unmarshal(raw, &m) != nil {
+		if ok, held := s.logLimit.Allow("unparsed"); ok {
+			logger.WarnCF("realtime", "gemini live: unparsed server message dropped", map[string]any{"bytes": len(raw), "suppressed": held})
+		}
 		return
 	}
+	s.logUnknownKeys(raw)
 	if c := m.ServerContent; c != nil {
 		if c.InputTranscription != nil {
 			s.mu.Lock()
 			s.userText += c.InputTranscription.Text
+			s.stats.input(time.Now(), len(c.InputTranscription.Text))
 			s.mu.Unlock()
 		}
 		if c.ModelTurn != nil || c.OutputTranscription != nil {
@@ -289,6 +318,9 @@ func (s *Session) handleMessage(raw []byte) {
 					continue
 				}
 				if pcm, err := base64.StdEncoding.DecodeString(p.InlineData.Data); err == nil {
+					s.mu.Lock()
+					s.stats.audio(time.Now())
+					s.mu.Unlock()
 					s.EmitAudio(pcm)
 				}
 			}
@@ -303,6 +335,11 @@ func (s *Session) handleMessage(raw []byte) {
 		// One final user transcript per turn, flushed when the model turn ends or userFlushDelay after
 		// its first output, whichever comes first: input transcription often trails the model's first
 		// audio, and the pipeline persists the agent's text only when its audio burst closes.
+		if c.GenerationComplete {
+			s.mu.Lock()
+			s.stats.generationComplete = true
+			s.mu.Unlock()
+		}
 		if c.GenerationComplete || c.TurnComplete || c.Interrupted {
 			s.stopFlushTimer()
 			s.flushUser()
@@ -311,6 +348,10 @@ func (s *Session) handleMessage(raw []byte) {
 			s.Emit(gptlive.Interrupted{})
 		}
 		if c.Interrupted || c.TurnComplete {
+			s.mu.Lock()
+			fields := s.stats.end(s.turn, c.Interrupted)
+			s.mu.Unlock()
+			logger.InfoCF("realtime", "gemini live: turn", fields)
 			s.mu.Lock()
 			s.turn++
 			s.agentText = ""
@@ -327,17 +368,69 @@ func (s *Session) handleMessage(raw []byte) {
 			s.Go(func() { s.answer(call, fcArgs) })
 		}
 	}
+	if tc := m.ToolCallCancellation; tc != nil {
+		if ok, held := s.logLimit.Allow("toolCallCancellation"); ok {
+			logger.InfoCF("realtime", "gemini live: toolCallCancellation", map[string]any{"ids": len(tc.IDs), "suppressed": held})
+		}
+	}
 	if u := m.UsageMetadata; u != nil {
+		logger.InfoCF("realtime", "gemini live: usage", map[string]any{
+			"prompt_tokens": u.PromptTokenCount, "response_tokens": u.ResponseTokenCount, "thoughts_tokens": u.ThoughtsTokenCount,
+			"tool_use_prompt_tokens": u.ToolUsePromptTokenCount, "cached_tokens": u.CachedContentTokenCount, "total_tokens": u.TotalTokenCount,
+		})
 		s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.PromptTokenCount, Output: u.ResponseTokenCount, Total: u.TotalTokenCount})
 		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
 	}
-	if r := m.SessionResumptionUpdate; r != nil && r.Resumable && r.NewHandle != "" {
+	if r := m.SessionResumptionUpdate; r != nil {
 		s.mu.Lock()
-		s.handle = r.NewHandle
+		if r.Resumable && r.NewHandle != "" {
+			s.handle = r.NewHandle
+		}
+		changed := !s.resumableKnown || s.resumable != r.Resumable
+		s.resumableKnown, s.resumable = true, r.Resumable
+		hasHandle := s.handle != ""
 		s.mu.Unlock()
+		if changed { // never the handle itself
+			logger.InfoCF("realtime", "gemini live: session resumable changed", map[string]any{"resumable": r.Resumable, "has_handle": hasHandle})
+		}
 	}
 	if len(m.GoAway) > 0 {
-		logger.InfoCF("realtime", "gemini live: goAway, the session resumes on a new connection", map[string]any{"go_away": string(m.GoAway)})
+		var g struct {
+			TimeLeft string `json:"timeLeft"`
+		}
+		_ = json.Unmarshal(m.GoAway, &g)
+		s.mu.Lock()
+		opened := s.socketOpened
+		s.mu.Unlock()
+		logger.InfoCF("realtime", "gemini live: goAway, the session resumes on a new connection", map[string]any{
+			"time_left": g.TimeLeft, "socket_age_ms": msSince(opened),
+		})
+	}
+}
+
+// knownServerKeys are the top-level BidiGenerateContentServerMessage fields handleMessage reads.
+var knownServerKeys = map[string]bool{
+	"setupComplete": true, "serverContent": true, "toolCall": true, "toolCallCancellation": true,
+	"usageMetadata": true, "sessionResumptionUpdate": true, "goAway": true,
+}
+
+// logUnknownKeys logs top-level keys handleMessage does not read (a server error shape, a new
+// message type), rate-limited per key. Key names only: values can carry transcript text.
+func (s *Session) logUnknownKeys(raw []byte) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(raw, &top) != nil {
+		return
+	}
+	for k := range top {
+		if knownServerKeys[k] {
+			continue
+		}
+		if len(k) > 64 {
+			k = k[:64]
+		}
+		if ok, held := s.logLimit.Allow("key:" + k); ok {
+			logger.InfoCF("realtime", "gemini live: unhandled server message key", map[string]any{"key": k, "bytes": len(raw), "suppressed": held})
+		}
 	}
 }
 
@@ -369,15 +462,20 @@ func (s *Session) flushTurn(turn int) {
 }
 
 func (s *Session) answer(call gptlive.FunctionCall, args map[string]any) {
+	start := time.Now()
 	output, isErr := realtimeconn.RunTool(s.cfg.Executor, call.Name, args)
+	toolMs := msSince(start)
 	s.Emit(gptlive.FunctionResult{CallID: call.CallID, Name: call.Name, Output: output, IsError: isErr})
 	response := map[string]any{"output": output}
 	if isErr {
 		response = map[string]any{"error": output}
 	}
-	_ = s.Send(map[string]any{"toolResponse": map[string]any{"functionResponses": []map[string]any{
+	sendErr := s.Send(map[string]any{"toolResponse": map[string]any{"functionResponses": []map[string]any{
 		{"id": call.CallID, "name": call.Name, "response": response},
 	}}})
+	logger.InfoCF("realtime", "gemini live: tool result", map[string]any{
+		"name": call.Name, "is_error": isErr, "ms": toolMs, "output_bytes": len(output), "response_sent": sendErr == nil,
+	})
 }
 
 func (s *Session) onEnd(err error) {

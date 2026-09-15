@@ -1176,15 +1176,17 @@ func main() {
 				})
 			}
 			logger.InfoCF("livekit", "gptlive: session spec selected", map[string]any{
-				"room":               roomName,
-				"character":          characterName,
-				"sample_rate_hz":     spec.SampleRate,
-				"vendor":             spec.Vendor,
-				"model":              spec.Model,
-				"voice":              spec.Voice,
-				"in_rate_hz":         spec.InRate,
-				"has_quiz":           spec.Quiz != nil,
-				"tts_sample_rate_hz": sessionTTSSampleRate,
+				"room":                roomName,
+				"character":           characterName,
+				"sample_rate_hz":      spec.SampleRate,
+				"vendor":              spec.Vendor,
+				"model":               spec.Model,
+				"voice":               spec.Voice,
+				"in_rate_hz":          spec.InRate,
+				"has_quiz":            spec.Quiz != nil,
+				"tts_sample_rate_hz":  sessionTTSSampleRate,
+				"persona_voice_bytes": len(spec.Persona.Voice),
+				"tool_count":          gptLiveDeclaredToolCount(spec),
 			})
 		}
 

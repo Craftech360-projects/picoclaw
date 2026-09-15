@@ -191,12 +191,16 @@ type gptLivePipeline struct {
 	greeted bool
 	// pendingGreet records a Greet() that arrived before the session was dialed
 	// (see Greet and finishStart).
-	pendingGreet  bool
-	agentText     map[string]string // burst id -> latest full text
-	openAgentIDs  []string          // transcript ids seen since the burst opened
-	transcript    []PersistedChatMessage
-	voiceSeconds  float64
-	backendTokens int
+	pendingGreet bool
+	// diagnostics for the "gptlive: greeting sent" and "gptlive: first model audio" lines
+	startedAt        time.Time // Start was called (before the dial)
+	greetedAt        time.Time
+	firstAudioLogged bool
+	agentText        map[string]string // burst id -> latest full text
+	openAgentIDs     []string          // transcript ids seen since the burst opened
+	transcript       []PersistedChatMessage
+	voiceSeconds     float64
+	backendTokens    int
 	// backendInputTokens/backendOutputTokens are the Input/Output breakdown of
 	// every summed BackendUsage event (backendTokens is their Total, which the
 	// backend computes independently — see onEvent's BackendUsage case).
@@ -312,6 +316,9 @@ type localOutTrackWriter interface {
 // sufficient: if it's already closed, Close was already attempted (and
 // failed silently) and this call must finish the job itself.
 func (p *gptLivePipeline) Start(ctx context.Context) error {
+	p.mu.Lock()
+	p.startedAt = time.Now()
+	p.mu.Unlock()
 	if p.spec.SampleRate <= 0 {
 		// gptlive.Config.withDefaults fills in 24000 inside the dialed Session,
 		// but p.spec keeps whatever the caller passed — including zero — so
@@ -436,7 +443,7 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess realtimeSession)
 	go func() {
 		select {
 		case <-time.After(greetingFallbackDelay):
-			p.Greet()
+			p.greet("fallback_timer")
 		case <-pctx.Done():
 		}
 	}()
@@ -448,7 +455,7 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess realtimeSession)
 	pendingGreet := p.pendingGreet
 	p.mu.Unlock()
 	if pendingGreet {
-		p.Greet()
+		p.greet("ready_for_greeting_before_dial")
 	}
 	return nil
 }
@@ -540,7 +547,10 @@ func (p *gptLivePipeline) pumpMicIn(ctx context.Context) {
 // commentary — a channel the service caps per-append. A short, fixed nudge is
 // comfortably under that cap regardless of how long any character's greeting
 // guidance is.
-func (p *gptLivePipeline) Greet() {
+func (p *gptLivePipeline) Greet() { p.greet("ready_for_greeting") }
+
+// greet is Greet with the trigger named for the "gptlive: greeting sent" log line.
+func (p *gptLivePipeline) greet(source string) {
 	p.mu.Lock()
 	if p.greeted {
 		p.mu.Unlock()
@@ -552,8 +562,13 @@ func (p *gptLivePipeline) Greet() {
 		return
 	}
 	p.greeted = true
+	p.greetedAt = time.Now()
 	sess := p.sess
+	sinceStart := msSinceOrNeg(p.startedAt)
 	p.mu.Unlock()
+	logger.InfoCF("livekit", "gptlive: greeting sent", map[string]any{
+		"room": p.rs.roomName(), "vendor": p.spec.Vendor, "greet_source": source, "ms_since_start": sinceStart,
+	})
 	sess.AppendCommentary("Greet the child now, following your greeting guidance from the session instructions. Do not wait for them to speak first. After that, pause and listen.")
 }
 
@@ -1013,7 +1028,27 @@ func (p *gptLivePipeline) recordVoiceSeconds(secs float64) {
 	p.mu.Unlock()
 }
 
-func (p *gptLivePipeline) onBurstOpen() { p.setState("speaking") }
+func (p *gptLivePipeline) onBurstOpen() {
+	p.mu.Lock()
+	first := !p.firstAudioLogged
+	p.firstAudioLogged = true
+	sinceStart, sinceGreet := msSinceOrNeg(p.startedAt), msSinceOrNeg(p.greetedAt)
+	p.mu.Unlock()
+	if first {
+		logger.InfoCF("livekit", "gptlive: first model audio", map[string]any{
+			"room": p.rs.roomName(), "vendor": p.spec.Vendor, "ms_since_start": sinceStart, "ms_since_greet": sinceGreet,
+		})
+	}
+	p.setState("speaking")
+}
+
+// msSinceOrNeg is milliseconds since t, or -1 when t was never set.
+func msSinceOrNeg(t time.Time) int64 {
+	if t.IsZero() {
+		return -1
+	}
+	return time.Since(t).Milliseconds()
+}
 
 // onSegmentEnd is the Segmenter's close callback: the model stopped SENDING speech. The burst
 // only ends (onBurstClose) once driveSegmenter sees that speech finish PLAYING: Gemini streams
