@@ -20,6 +20,7 @@ type managerActiveProviders struct {
 	LLM       managerActiveLLMProvider `json:"llm"`
 	STT       managerActiveSTTProvider `json:"stt"`
 	TTS       managerActiveTTSProvider `json:"tts"`
+	Realtime  *managerRealtimeProvider `json:"realtime"`
 }
 
 type managerActiveLLMProvider struct {
@@ -106,52 +107,54 @@ func fetchManagerActiveProviders(
 	serviceKey string,
 ) (managerActiveProviders, error) {
 	var out managerActiveProviders
+	data, err := fetchManagerData(ctx, cfg, serviceKey, "/livekit/providers/active")
+	if err != nil || len(data) == 0 {
+		return out, err
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return out, fmt.Errorf("decode providers data: %w", err)
+	}
+	return out, nil
+}
+
+// fetchManagerData GETs a manager-api path and returns the {code, msg, data} envelope's data.
+func fetchManagerData(ctx context.Context, cfg config.LiveKitServiceManagerAPIConfig, serviceKey, path string) (json.RawMessage, error) {
 	baseURL := strings.TrimSpace(managerAPIBaseURL(cfg))
 	if baseURL == "" {
-		return out, fmt.Errorf("manager base URL is empty")
+		return nil, fmt.Errorf("manager base URL is empty")
 	}
-	endpoint := strings.TrimRight(baseURL, "/") + "/livekit/providers/active"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
 	if err != nil {
-		return out, err
+		return nil, err
 	}
 	if key := strings.TrimSpace(serviceKey); key != "" {
 		req.Header.Set("X-Service-Key", key)
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-
 	resp, err := (&http.Client{Timeout: 2500 * time.Millisecond}).Do(req)
 	if err != nil {
-		return out, err
+		return nil, err
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return out, err
+		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return out, fmt.Errorf("status=%d body=%s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("status=%d body=%s", resp.StatusCode, string(body))
 	}
-
 	var wrapper struct {
 		Code int             `json:"code"`
 		Msg  string          `json:"msg"`
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &wrapper); err != nil {
-		return out, fmt.Errorf("decode wrapper: %w", err)
+		return nil, fmt.Errorf("decode wrapper: %w", err)
 	}
 	if wrapper.Code != 0 {
-		return out, fmt.Errorf("api code=%d msg=%s", wrapper.Code, wrapper.Msg)
+		return nil, fmt.Errorf("api code=%d msg=%s", wrapper.Code, wrapper.Msg)
 	}
-	if len(wrapper.Data) == 0 {
-		return out, nil
-	}
-	if err := json.Unmarshal(wrapper.Data, &out); err != nil {
-		return out, fmt.Errorf("decode providers data: %w", err)
-	}
-	return out, nil
+	return wrapper.Data, nil
 }
 
 func applyManagerActiveProviders(cfg *config.Config, active managerActiveProviders) {

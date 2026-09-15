@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/livekit"
@@ -122,5 +123,25 @@ func TestGPTLiveMetadataAssignsQuizTrackerForQuizCharacters(t *testing.T) {
 	}
 	if spec.Quiz == nil {
 		t.Error("a quiz character with a non-nil QuizBatch must get a QuizTracker")
+	}
+}
+
+func TestBuildGPTLiveSpecForGeminiIsSingleModelAt16kIn(t *testing.T) {
+	bs, err := parseRoomMetadataBootstrap(`{"character":"Cheeko","gptlive":{"voice":"","accent":"indian"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := buildGPTLiveSpec(gptLiveSpecInput{
+		Metadata: bs.Metadata, Workspace: t.TempDir(), CharacterName: "Cheeko",
+		Realtime:        realtimeChoice{Vendor: "google", APIKey: "g", Model: "gemini-3.1-flash-live-preview", Voice: "Charon"},
+		CharacterVoices: map[string]string{"google": "Kore", "openai": "vesper"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Vendor != "google" || spec.APIKey != "g" || spec.Model != "gemini-3.1-flash-live-preview" || spec.InRate != 16000 ||
+		spec.SampleRate != 24000 || spec.Voice != "Kore" || spec.Persona.Backend != "" || !strings.Contains(spec.Persona.Voice, "<tools>") {
+		t.Errorf("vendor=%q model=%q in=%d out=%d voice=%v backend=%q tools=%v",
+			spec.Vendor, spec.Model, spec.InRate, spec.SampleRate, spec.Voice, spec.Persona.Backend, strings.Contains(spec.Persona.Voice, "<tools>"))
 	}
 }

@@ -237,6 +237,10 @@ type managerCharacterSession struct {
 	// always returned it (character-resolver.js); without this field encoding/json
 	// silently dropped it and every character spoke in the global voice.
 	ElevenLabsVoiceID string `json:"elevenlabsVoiceId"`
+	// per-vendor realtime voices (ai_agent_template gptlive_voice / xai_voice / gemini_voice)
+	GPTLiveVoice string `json:"gptliveVoice"`
+	XAIVoice     string `json:"xaiVoice"`
+	GeminiVoice  string `json:"geminiVoice"`
 }
 
 // fetchManagerCharacterSession PULLs a character's persona by id (ADR-0003).

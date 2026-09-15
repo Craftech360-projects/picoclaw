@@ -661,6 +661,7 @@ func main() {
 		personaSoul := ""
 		personaGreeting := ""
 		personaElevenLabsVoice := ""
+		personaRealtimeVoices := map[string]string{}
 		personaResolved := false
 		characterName := strings.TrimSpace(bootstrap.Metadata.CharacterName)
 		characterID := strings.TrimSpace(bootstrap.Metadata.CharacterID)
@@ -735,6 +736,11 @@ func main() {
 				personaSoul = strings.TrimSpace(session.Soul)
 				personaGreeting = strings.TrimSpace(session.GreetingPrompt)
 				personaElevenLabsVoice = strings.TrimSpace(session.ElevenLabsVoiceID)
+				personaRealtimeVoices = map[string]string{
+					livekit.VendorOpenAI: strings.TrimSpace(session.GPTLiveVoice),
+					livekit.VendorXAI:    strings.TrimSpace(session.XAIVoice),
+					livekit.VendorGoogle: strings.TrimSpace(session.GeminiVoice),
+				}
 				personaResolved = true
 				logger.InfoCF("livekit", "Persona pulled from manager DB", map[string]any{
 					"character":             session.CharacterName,
@@ -1099,16 +1105,33 @@ func main() {
 			} else if contentBankForSession != nil {
 				bankBlockForSession = livekit.RenderContentBank("{{JOKES}}", contentBankForSession)
 			}
+			requestedProvider := ""
+			if g := bootstrap.Metadata.GPTLive; g != nil {
+				requestedProvider = strings.TrimSpace(g.Provider)
+			}
+			var realtimeRows []managerRealtimeProvider
+			if requestedProvider != "" {
+				rowsCtx, rowsCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				rows, rowsErr := fetchManagerRealtimeProviders(rowsCtx, lkCfg.ManagerAPI, managerAPIServiceKey())
+				rowsCancel()
+				if rowsErr != nil {
+					logger.WarnCF("livekit", "gptlive: realtime provider list failed; using the active row", map[string]any{"error": rowsErr.Error()})
+				}
+				realtimeRows = rows
+			}
+			// API keys come only from the manager realtime_providers rows, never the environment.
+			realtime := chooseRealtime(cachedActiveRealtime(), realtimeRows, requestedProvider)
 			spec, err := buildGPTLiveSpec(gptLiveSpecInput{
-				APIKey:         os.Getenv("OPENAI_API_KEY"),
-				Metadata:       bootstrap.Metadata,
-				Workspace:      workspace,
-				CharacterName:  characterName,
-				GreetingPrompt: personaGreeting,
-				LanguageName:   sessionLanguagePolicy.DisplayName,
-				BaseTools:      agentInstance.Tools,
-				QuizBatch:      quizBatchForSession,
-				BankBlock:      bankBlockForSession,
+				Realtime:        realtime,
+				CharacterVoices: personaRealtimeVoices,
+				Metadata:        bootstrap.Metadata,
+				Workspace:       workspace,
+				CharacterName:   characterName,
+				GreetingPrompt:  personaGreeting,
+				LanguageName:    sessionLanguagePolicy.DisplayName,
+				BaseTools:       agentInstance.Tools,
+				QuizBatch:       quizBatchForSession,
+				BankBlock:       bankBlockForSession,
 				QuizReporters: livekit.QuizTrackerConfig{
 					AnswerReporter: livekit.NewQuizAnswerReporter(
 						lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC, quizBatchBank(quizBatchForSession),
@@ -1154,6 +1177,10 @@ func main() {
 				"room":               roomName,
 				"character":          characterName,
 				"sample_rate_hz":     spec.SampleRate,
+				"vendor":             spec.Vendor,
+				"model":              spec.Model,
+				"voice":              spec.Voice,
+				"in_rate_hz":         spec.InRate,
 				"has_quiz":           spec.Quiz != nil,
 				"tts_sample_rate_hz": sessionTTSSampleRate,
 			})

@@ -53,9 +53,10 @@ type roomMetadata struct {
 // (gptlive_spec.go) is what validates and falls back to safe defaults; this
 // struct only carries whatever was there.
 type roomMetadataGPTLive struct {
-	Voice  string `json:"voice"`
-	Accent string `json:"accent"`
-	Rate   int    `json:"rate"`
+	Voice    string `json:"voice"`
+	Accent   string `json:"accent"`
+	Rate     int    `json:"rate"`
+	Provider string `json:"provider"` // realtime provider_name for this session (admin dashboard)
 }
 
 type roomMetadataChildProfile struct {
@@ -177,9 +178,10 @@ func normalizeRoomMetadata(payload map[string]any) roomMetadata {
 	// degrade gracefully, not fail the session).
 	if raw := getMapFromValue(mustGetMapValue(payload, "gptlive")); raw != nil {
 		metadata.GPTLive = &roomMetadataGPTLive{
-			Voice:  normalizeString(mustGetMapValue(raw, "voice")),
-			Accent: normalizeString(mustGetMapValue(raw, "accent")),
-			Rate:   normalizeInt(mustGetMapValue(raw, "rate")),
+			Voice:    normalizeString(mustGetMapValue(raw, "voice")),
+			Accent:   normalizeString(mustGetMapValue(raw, "accent")),
+			Rate:     normalizeInt(mustGetMapValue(raw, "rate")),
+			Provider: normalizeString(mustGetMapValue(raw, "provider")),
 		}
 	}
 	metadata.PrimaryLanguage = normalizeString(mustGetMapValue(payload, "primary_language", "primaryLanguage"))

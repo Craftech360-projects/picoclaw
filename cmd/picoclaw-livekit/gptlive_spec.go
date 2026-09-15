@@ -10,21 +10,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
-// gptLiveVoices is the allow-list of voice names buildGPTLiveSpec will pass
-// through as-is. "aster" is deliberately absent: this OpenAI account's
-// realtime access refuses that voice outright, so accepting it here would
-// only trade a clean input-validation fallback for a live dial failure deep
-// inside gptlive.Dial. dispatch metadata is untrusted input (an unknown
-// voice is normal traffic, not an error), so anything not in this set simply
-// falls back to gptlive.DefaultVoice below instead of failing the session.
-var gptLiveVoices = map[string]bool{
-	"beacon": true,
-	"cinder": true,
-	"marin":  true,
-	"stone":  true,
-	"vesper": true,
-}
-
 // gptLiveMemoTypeFor maps a character's display name to the MEMO type its
 // QuizTracker writes (quiz_state.go's daily_quiz/daily_riddle/daily_math),
 // mirroring the cascade's own per-character memo routing (agent_bridge.go's
@@ -51,40 +36,50 @@ func gptLiveMemoTypeFor(character string) string {
 // greeting, language, tools, quiz batch/bank block) and the reporters the
 // quiz tracker forwards verdicts to.
 type gptLiveSpecInput struct {
-	APIKey         string
-	Metadata       roomMetadata
-	Workspace      string
-	CharacterName  string
-	GreetingPrompt string
-	LanguageName   string
-	BaseTools      *tools.ToolRegistry
-	QuizBatch      *livekit.QuizBatch        // nil when the persona has no quiz placeholder
-	QuizReporters  livekit.QuizTrackerConfig // AnswerReporter, AttemptReporter, WonderReporter only; Batch/Workspace/MemoType are filled in below
-	BankBlock      string
+	APIKey          string
+	Realtime        realtimeChoice    // vendor, key and model chosen for this session (chooseRealtime)
+	CharacterVoices map[string]string // vendor -> the character's voice for it
+	Metadata        roomMetadata
+	Workspace       string
+	CharacterName   string
+	GreetingPrompt  string
+	LanguageName    string
+	BaseTools       *tools.ToolRegistry
+	QuizBatch       *livekit.QuizBatch        // nil when the persona has no quiz placeholder
+	QuizReporters   livekit.QuizTrackerConfig // AnswerReporter, AttemptReporter, WonderReporter only; Batch/Workspace/MemoType are filled in below
+	BankBlock       string
 }
 
 // buildGPTLiveSpec validates the untrusted gptlive dispatch-metadata block
 // and composes the immutable per-session GPT-Live spec. Voice/accent/rate
 // fall back to safe defaults for anything unrecognised — an unknown voice, a
 // bogus rate, or a missing "gptlive" block entirely are all normal dispatch
-// traffic, not errors. Only a missing OPENAI_API_KEY fails the session
+// traffic, not errors. Only a missing API key (none in the manager realtime
+// provider row, see chooseRealtime) fails the session
 // outright: once the gptlive pipeline is selected there is no cascade
 // STT/TTS to fall back to.
 func buildGPTLiveSpec(in gptLiveSpecInput) (*livekit.GPTLiveSessionSpec, error) {
-	if strings.TrimSpace(in.APIKey) == "" {
-		return nil, errors.New("OPENAI_API_KEY is required for the gptlive pipeline")
+	choice := in.Realtime
+	if choice.Vendor == "" { // callers that predate vendor choice (tests) pass only APIKey
+		choice = realtimeChoice{Vendor: livekit.VendorOpenAI, APIKey: in.APIKey}
 	}
-	// Always 24kHz, like the livekit-agents GPT-Live plugin (SAMPLE_RATE = 24000): lkmedia
-	// resamples the room's mic in and Opus carries the output, so clients never see this rate.
-	voice, accent, rate := gptlive.DefaultVoice, "default", 24000
+	if strings.TrimSpace(choice.APIKey) == "" {
+		return nil, errors.New("no API key in the manager realtime provider row for the realtime pipeline")
+	}
+	metaVoice, accent := "", "default"
 	if g := in.Metadata.GPTLive; g != nil {
-		if v := strings.ToLower(strings.TrimSpace(g.Voice)); gptLiveVoices[v] {
-			voice = v
-		}
+		metaVoice = g.Voice
 		if strings.EqualFold(strings.TrimSpace(g.Accent), "indian") {
 			accent = "indian"
 		}
 	}
+	voice := chooseRealtimeVoice(choice.Vendor, metaVoice, in.CharacterVoices[choice.Vendor], choice.Voice)
+	// Output is always 24kHz (all three vendors); Gemini's Live API only takes 16kHz mic input.
+	rate, inRate := 24000, 24000
+	if choice.Vendor == livekit.VendorGoogle {
+		inRate = 16000
+	}
+	singleModel := choice.Vendor != livekit.VendorOpenAI
 	var quiz *livekit.QuizTracker
 	memoType := gptLiveMemoTypeFor(in.CharacterName)
 	if in.QuizBatch != nil && memoType != "" {
@@ -100,12 +95,21 @@ func buildGPTLiveSpec(in gptLiveSpecInput) (*livekit.GPTLiveSessionSpec, error) 
 		Accent:         accent,
 		BankBlock:      in.BankBlock,
 		HasQuiz:        quiz != nil,
+		SingleModel:    singleModel,
 	})
+	backendModel := choice.BackendModel
+	if backendModel == "" {
+		backendModel = gptlive.DefaultBackendModel
+	}
 	return &livekit.GPTLiveSessionSpec{
-		APIKey:             in.APIKey,
+		APIKey:             choice.APIKey,
+		Vendor:             choice.Vendor,
+		Model:              choice.Model,
+		BaseURL:            choice.BaseURL,
 		Voice:              voice,
 		SampleRate:         rate,
-		BackendModel:       gptlive.DefaultBackendModel,
+		InRate:             inRate,
+		BackendModel:       backendModel,
 		Persona:            persona,
 		Tools:              livekit.BuildGPTLiveTools(in.BaseTools, in.Workspace, quiz),
 		Quiz:               quiz,
