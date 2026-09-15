@@ -53,9 +53,13 @@ type Conn struct {
 	audio   chan []byte
 	events  chan gptlive.Event
 	work    sync.WaitGroup
-	endMu   sync.RWMutex // guards ended; Run holds the write lock while flipping it and closing the channels
-	ended   bool
-	done    chan struct{}
+
+	workMu     sync.Mutex // guards endingWork; makes Go's check-and-Add atomic with Run's shutdown
+	endingWork bool       // set before Run calls work.Wait(): no new Go work is accepted from here on
+
+	endMu sync.RWMutex // guards ended; Run holds the write lock while flipping it and closing the channels
+	ended bool
+	done  chan struct{}
 }
 
 func New(ws *websocket.Conn) *Conn {
@@ -115,16 +119,19 @@ func (c *Conn) Emit(ev gptlive.Event) {
 	}
 }
 
-// Go runs fn (a tool call) on its own goroutine; Run closes the channels only after it returns.
-// Once Run has ended the session, Go neither runs fn nor touches the WaitGroup.
+// Go runs fn (a tool call) on its own goroutine; Run waits for it (work.Wait) before it stops
+// accepting new work and, later, closes the channels. Once Run has begun shutting down — before
+// it calls work.Wait, so already-running Go work can still Emit — Go neither runs fn nor touches
+// the WaitGroup. The check and the Add share workMu, so there is no Add-after-Wait race no matter
+// when a caller not tracked by Run (a timer, keepalive, or pipeline-side helper) calls Go.
 func (c *Conn) Go(fn func()) {
-	c.endMu.RLock()
-	if c.ended {
-		c.endMu.RUnlock()
+	c.workMu.Lock()
+	if c.endingWork {
+		c.workMu.Unlock()
 		return
 	}
 	c.work.Add(1)
-	c.endMu.RUnlock()
+	c.workMu.Unlock()
 	go func() {
 		defer c.work.Done()
 		fn()
@@ -150,8 +157,8 @@ func (c *Conn) Close() error {
 // called, it swaps in redial's socket and keeps reading — unless the socket being replaced
 // delivered no frames at all, which ends the session instead of redialing in a tight loop (a
 // vendor that accepts and instantly closes). The replaced/ended socket is always closed. At the
-// end it waits for Go work, calls onEnd (which may still Emit) with the last read error, then
-// closes Audio, Events and Done.
+// end it stops accepting new Go work, waits for Go work already running (which may still Emit),
+// calls onEnd (which may still Emit) with the last read error, then closes Audio, Events and Done.
 func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), onEnd func(err error)) {
 	var last error
 	for {
@@ -191,6 +198,9 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 		c.mu.Unlock()
 		logger.InfoCF("realtime", "vendor socket resumed on a new connection", nil)
 	}
+	c.workMu.Lock()
+	c.endingWork = true
+	c.workMu.Unlock()
 	c.work.Wait()
 	if onEnd != nil {
 		onEnd(last)

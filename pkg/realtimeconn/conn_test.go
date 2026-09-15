@@ -177,3 +177,42 @@ func TestRunStopsRedialingASocketThatDeliveredNoFrames(t *testing.T) {
 		t.Fatalf("redial called %d times, want 0: a socket with no frames must not be redialed", n)
 	}
 }
+
+// TestGoRejectsWorkOnceRunBeginsShuttingDownButEmitStillWorks pins the exact ordering Run's
+// shutdown depends on: Go must stop accepting work (endingWork) strictly before Run calls
+// work.Wait, while Emit/EmitAudio must keep working until the channels actually close (ended) —
+// so already-running Go work and onEnd can still deliver their result. Driving endingWork
+// directly (this file is package realtimeconn) makes the ordering deterministic instead of
+// racing against Run's own goroutine scheduling.
+func TestGoRejectsWorkOnceRunBeginsShuttingDownButEmitStillWorks(t *testing.T) {
+	c := &Conn{
+		audio:  make(chan []byte, 1),
+		events: make(chan gptlive.Event, 1),
+		done:   make(chan struct{}),
+	}
+
+	// Simulate Run having reached the point right before work.Wait(): no new Go work from here.
+	c.workMu.Lock()
+	c.endingWork = true
+	c.workMu.Unlock()
+
+	ran := make(chan struct{}, 1)
+	c.Go(func() { ran <- struct{}{} })
+	select {
+	case <-ran:
+		t.Fatal("Go ran fn after Run began shutting down (endingWork)")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The session has not ended yet (ended is still false): Emit must still deliver, exactly as
+	// it must for a Go-tracked goroutine still running, or for onEnd, at this same point in Run.
+	c.Emit(gptlive.Closed{Reason: "still open"})
+	select {
+	case ev := <-c.events:
+		if ev != (gptlive.Closed{Reason: "still open"}) {
+			t.Fatalf("event = %#v", ev)
+		}
+	default:
+		t.Fatal("Emit was rejected before ended was set")
+	}
+}
