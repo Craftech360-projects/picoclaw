@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/livekit/media-sdk"
@@ -146,6 +147,12 @@ type gptLivePipeline struct {
 	spec GPTLiveSessionSpec
 	sess *gptlive.Session
 	seg  *gptlive.Segmenter
+
+	// mic-in flow counters for driveElastic's "audio flow" log (written by WriteSample)
+	micSamples, micLast, micMaxGap, micMaxPush atomic.Int64
+
+	micMu  sync.Mutex
+	micBuf []byte // room mic at spec.SampleRate, drained by pumpMicIn
 
 	// ready is closed once Start's call to gptlive.Dial has returned, whether
 	// it succeeded or failed; startErr holds the result (nil on success) and
@@ -409,6 +416,7 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session
 	p.eventsPumpStarted = true
 	p.mu.Unlock()
 	go p.pumpAudioOut(pctx)
+	go p.pumpMicIn(pctx)
 	go p.pumpEvents(pctx)
 	go p.pumpPublish(pctx)
 	go func() {
@@ -446,10 +454,55 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess *gptlive.Session
 // Start ever gets there (Greet/SayGoodbyeAndWait from a data message, the
 // quiz closure from a tool call — none of which wait on p.ready).
 func (p *gptLivePipeline) WriteSample(sample media.PCM16Sample) error {
-	if p.sess != nil {
-		p.sess.PushAudio(pcm16ToBytes(sample))
+	now := time.Now().UnixNano()
+	if last := p.micLast.Swap(now); last != 0 && now-last > p.micMaxGap.Load() {
+		p.micMaxGap.Store(now - last) // one writer goroutine, so load-then-store is fine
 	}
+	p.micSamples.Add(int64(len(sample)))
+	p.micMu.Lock()
+	p.micBuf = append(p.micBuf, pcm16ToBytes(sample)...)
+	// ponytail: 500ms cap so a stalled pump can't grow input latency; drops the oldest audio
+	if limit := p.spec.SampleRate; len(p.micBuf) > limit {
+		p.micBuf = append(p.micBuf[:0], p.micBuf[len(p.micBuf)-limit:]...)
+	}
+	p.micMu.Unlock()
 	return nil
+}
+
+// pumpMicIn sends the mic to GPT-Live the way the livekit-agents plugin does: fixed 100ms
+// chunks (AudioByteStream, SAMPLE_RATE // 10) on a steady clock. The model is clocked by its
+// input, so network-shaped mic delivery became network-shaped model output. Until 200ms is
+// buffered, and whenever the mic falls short, it sends silence to keep that clock steady.
+func (p *gptLivePipeline) pumpMicIn(ctx context.Context) {
+	chunk := p.spec.SampleRate / 10 * 2 // 100ms of PCM16 mono
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	primed := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		out := make([]byte, chunk)
+		p.micMu.Lock()
+		if !primed && len(p.micBuf) >= 2*chunk {
+			primed = true
+		}
+		if primed {
+			n := copy(out, p.micBuf)
+			p.micBuf = append(p.micBuf[:0], p.micBuf[n:]...)
+			if n < chunk {
+				primed = false // ran dry: rebuild the 100ms of slack before taking mic again
+			}
+		}
+		p.micMu.Unlock()
+		start := time.Now()
+		p.sess.PushAudio(out)
+		if d := time.Since(start).Nanoseconds(); d > p.micMaxPush.Load() {
+			p.micMaxPush.Store(d) // PushAudio can block up to 1s on a full send queue
+		}
+	}
 }
 
 // Greet asks the voice model to speak the character's greeting immediately.
@@ -563,6 +616,12 @@ func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte,
 	var level, underrun time.Duration // level mirrors the track's queue: +write, -wall time
 	var levelAt time.Time
 	underruns, writeErrs := 0, 0
+	starved := false
+
+	// ponytail: diagnostic window for the jitter hunt; delete with the env switch
+	const flowEvery = 5 * time.Second
+	windowStart, lastArrival := time.Now(), time.Time{}
+	var outArrived, outMaxGap time.Duration
 
 	drain := func(now time.Time) {
 		if !levelAt.IsZero() {
@@ -572,25 +631,40 @@ func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte,
 		if level < 0 {
 			if p.seg.Open() {
 				underrun -= level
-				underruns++
+				if !starved {
+					underruns++
+				}
 			}
+			starved = true
 			level = 0
 		}
 	}
-	logBurst := func(wasOpen bool) {
-		if !wasOpen || p.seg.Open() {
+	logFlow := func(now time.Time) {
+		elapsed := now.Sub(windowStart)
+		if elapsed < flowEvery {
 			return
 		}
-		logger.InfoCF("livekit", "gptlive: elastic playout burst", map[string]any{
-			"room": p.rs.roomName(), "underruns": underruns, "underrun_ms": underrun.Milliseconds(), "level_ms": level.Milliseconds(),
+		micSamples := p.micSamples.Swap(0)
+		logger.InfoCF("livekit", "gptlive: audio flow", map[string]any{
+			"room":           p.rs.roomName(),
+			"in_ratio":       float64(micSamples) / (float64(p.spec.SampleRate) * elapsed.Seconds()),
+			"in_max_gap_ms":  time.Duration(p.micMaxGap.Swap(0)).Milliseconds(),
+			"push_max_ms":    time.Duration(p.micMaxPush.Swap(0)).Milliseconds(),
+			"out_ratio":      outArrived.Seconds() / elapsed.Seconds(),
+			"out_max_gap_ms": outMaxGap.Milliseconds(),
+			"underruns":      underruns,
+			"underrun_ms":    underrun.Milliseconds(),
+			"level_ms":       level.Milliseconds(),
+			"speaking":       p.seg.Open(),
 		})
-		underruns, underrun = 0, 0
+		windowStart, outArrived, outMaxGap, underruns, underrun = now, 0, 0, 0, 0
 	}
 	write := func(pcm []byte) {
 		if len(pcm) == 0 || track == nil {
 			return
 		}
 		level += frameDur(len(pcm))
+		starved = false
 		if err := track.WriteSample(bytesToPCM16(pcm)); err != nil {
 			if writeErrs++; writeErrs == 1 {
 				logger.WarnCF("livekit", "gptlive: write to local track", map[string]any{"error": err.Error()})
@@ -605,10 +679,14 @@ func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte,
 				write(carry)
 				return
 			}
-			drain(time.Now())
-			wasOpen := p.seg.Open()
+			now := time.Now()
+			drain(now)
+			if !lastArrival.IsZero() && now.Sub(lastArrival) > outMaxGap {
+				outMaxGap = now.Sub(lastArrival)
+			}
+			lastArrival = now
+			outArrived += frameDur(len(pcm))
 			p.seg.Feed(pcm, frameDur(len(pcm)))
-			logBurst(wasOpen)
 			carry = append(carry, pcm...)
 			n := len(carry) / frameBytes * frameBytes
 			if n == 0 {
@@ -628,9 +706,8 @@ func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte,
 			carry = append(carry[:0], carry[n:]...)
 		case now := <-ticks:
 			drain(now)
-			wasOpen := p.seg.Open()
 			p.seg.Tick(now)
-			logBurst(wasOpen)
+			logFlow(now)
 		case <-ctx.Done():
 			return
 		}

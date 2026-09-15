@@ -74,16 +74,15 @@ func buildGPTLiveSpec(in gptLiveSpecInput) (*livekit.GPTLiveSessionSpec, error) 
 	if strings.TrimSpace(in.APIKey) == "" {
 		return nil, errors.New("OPENAI_API_KEY is required for the gptlive pipeline")
 	}
-	voice, accent, rate := gptlive.DefaultVoice, "default", 16000
+	// Always 24kHz, like the livekit-agents GPT-Live plugin (SAMPLE_RATE = 24000): lkmedia
+	// resamples the room's mic in and Opus carries the output, so clients never see this rate.
+	voice, accent, rate := gptlive.DefaultVoice, "default", 24000
 	if g := in.Metadata.GPTLive; g != nil {
 		if v := strings.ToLower(strings.TrimSpace(g.Voice)); gptLiveVoices[v] {
 			voice = v
 		}
 		if strings.EqualFold(strings.TrimSpace(g.Accent), "indian") {
 			accent = "indian"
-		}
-		if g.Rate == 24000 {
-			rate = 24000
 		}
 	}
 	var quiz *livekit.QuizTracker

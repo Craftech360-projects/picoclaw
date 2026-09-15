@@ -27,7 +27,7 @@ func TestGPTLiveMetadataDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Voice != "vesper" || spec.SampleRate != 16000 || spec.BackendModel == "" || spec.Quiz != nil {
+	if spec.Voice != "vesper" || spec.SampleRate != 24000 || spec.BackendModel == "" || spec.Quiz != nil {
 		// Print only the fields being asserted, never the whole spec (Task 13
 		// review: its first field is APIKey, and this is one os.Getenv away from
 		// printing a real key into CI output).
@@ -56,7 +56,7 @@ func TestGPTLiveMetadataAbsentBlockIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Voice != "marin" || spec.SampleRate != 16000 {
+	if spec.Voice != "marin" || spec.SampleRate != 24000 {
 		// Print only the fields being asserted, never the whole spec (Task 13
 		// review: its first field is APIKey, and this is one os.Getenv away from
 		// printing a real key into CI output).
@@ -83,8 +83,8 @@ func TestGPTLiveMetadataRejectsUnknownVoiceAndBogusRate(t *testing.T) {
 	if spec.Voice != "marin" {
 		t.Errorf("unrecognised voice should fall back to the default, got %v", spec.Voice)
 	}
-	if spec.SampleRate != 16000 {
-		t.Errorf("an unsupported rate should fall back to 16000, got %d", spec.SampleRate)
+	if spec.SampleRate != 24000 {
+		t.Errorf("the model rate is always 24000, got %d", spec.SampleRate)
 	}
 }
 
