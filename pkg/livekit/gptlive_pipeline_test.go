@@ -1254,7 +1254,101 @@ func TestStartDialsTheSpecVendor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close(context.Background())
-	if msg := <-gotUpdate; !strings.Contains(msg, `"type":"session.update"`) || !strings.Contains(msg, `"voice":"eve"`) || !strings.Contains(msg, `"single prompt"`) {
+	var msg string
+	select {
+	case msg = <-gotUpdate:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fake Grok endpoint never received a message")
+	}
+	if !strings.Contains(msg, `"type":"session.update"`) || !strings.Contains(msg, `"voice":"eve"`) || !strings.Contains(msg, `"single prompt"`) {
 		t.Fatalf("first message = %s", msg)
+	}
+}
+
+func TestInRateDefaultsToGeminiInputRate(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{Vendor: VendorGoogle, SampleRate: 24000}}
+	if got := p.inRate(); got != 16000 {
+		t.Fatalf("inRate = %d, want 16000 for Gemini with no InRate", got)
+	}
+}
+
+type fakeRealtimeSession struct{ commentary chan string }
+
+func (f *fakeRealtimeSession) PushAudio([]byte)             {}
+func (f *fakeRealtimeSession) Audio() <-chan []byte         { return nil }
+func (f *fakeRealtimeSession) Events() <-chan gptlive.Event { return nil }
+func (f *fakeRealtimeSession) AppendInstructions(string)    {}
+func (f *fakeRealtimeSession) AppendCommentary(text string) { f.commentary <- text }
+func (f *fakeRealtimeSession) Close(context.Context) error  { return nil }
+
+// Audio delivered far faster than real time (Gemini) is still queued in the track when the
+// segment closes: the burst, and so SayGoodbyeAndWait and the listening state, wait for it to play.
+func TestBurstEndWaitsForQueuedPlayout(t *testing.T) {
+	sess := &fakeRealtimeSession{commentary: make(chan string, 1)}
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}, burstClosed: make(chan struct{}, 1), sess: sess}
+	p.seg = gptlive.NewSegmenter(p.onBurstOpen, p.onSegmentEnd)
+	h := newDriveSegmenterHarness(t, p)
+
+	returned := make(chan struct{})
+	go func() {
+		p.SayGoodbyeAndWait(context.Background(), "bye", 10*time.Second)
+		close(returned)
+	}()
+	<-sess.commentary // SayGoodbyeAndWait has drained stale signals and is waiting
+
+	start := time.Now()
+	for i := 0; i < 50; i++ { // 1s of speech in a burst
+		h.send(pcmChunk(30000, testFrame))
+	}
+	for i := 0; i < 50; i++ { // 1s of silence: the segment closes on arrival
+		h.send(pcmChunk(0, testFrame))
+	}
+	h.barrier()
+	if p.seg.Open() {
+		t.Fatal("the segment should have closed on the silence")
+	}
+	select {
+	case <-returned:
+		t.Fatal("SayGoodbyeAndWait returned while the goodbye was still queued for playout")
+	default:
+	}
+	p.mu.Lock()
+	state := p.state
+	p.mu.Unlock()
+	if state != "speaking" {
+		t.Fatalf("state = %q while speech is still queued, want speaking", state)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for done := false; !done; {
+		select {
+		case <-returned:
+			done = true
+		case <-deadline:
+			t.Fatal("the burst never ended after the queue drained")
+		case <-time.After(10 * time.Millisecond):
+			h.tick(time.Now())
+		}
+	}
+	if elapsed := time.Since(start); elapsed < time.Second {
+		t.Fatalf("burst ended %v after the audio arrived, before its 1s of speech could play", elapsed)
+	}
+}
+
+// With nothing queued (a real-time source that has played out, as GPT-Live is), the burst
+// ends on the same tick that closes the segment, exactly as before.
+func TestBurstEndIsImmediateWhenNothingIsQueued(t *testing.T) {
+	p := &gptLivePipeline{spec: GPTLiveSessionSpec{SampleRate: 8000}, burstClosed: make(chan struct{}, 1)}
+	p.seg = gptlive.NewSegmenter(p.onBurstOpen, p.onSegmentEnd)
+	h := newDriveSegmenterHarness(t, p)
+
+	h.send(pcmChunk(30000, testFrame)) // 20ms of speech
+	base := time.Now()
+	h.tick(base.Add(900 * time.Millisecond)) // played out and idle past the segmenter's 800ms
+	h.tick(base.Add(time.Second))            // barrier
+	select {
+	case <-p.burstClosed:
+	default:
+		t.Fatal("the burst should end on the tick that closed the segment when nothing is queued")
 	}
 }

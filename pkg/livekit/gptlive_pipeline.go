@@ -65,6 +65,9 @@ func (p *gptLivePipeline) inRate() int {
 	if p.spec.InRate > 0 {
 		return p.spec.InRate
 	}
+	if p.spec.Vendor == VendorGoogle {
+		return geminilive.InputSampleRate // the Live API only accepts 16 kHz input
+	}
 	return p.spec.SampleRate
 }
 
@@ -121,6 +124,10 @@ type gptLivePipeline struct {
 	// interrupts carries a vendor's barge-in from pumpEvents to driveSegmenter (buffered 1).
 	interrupts chan struct{}
 	seg        *gptlive.Segmenter
+	// segmentEnded is set by the Segmenter's close callback (onSegmentEnd) and consumed by
+	// driveSegmenter, which delays onBurstClose until the burst's queued playout has drained.
+	// Only touched from the driveSegmenter goroutine (Feed/Tick run there).
+	segmentEnded bool
 
 	// mic-in flow counters for driveSegmenter's "audio flow" log (written by WriteSample)
 	micSamples, micLast, micMaxGap, micMaxPush atomic.Int64
@@ -216,7 +223,7 @@ func newGPTLivePipeline(rs *RoomSession, spec GPTLiveSessionSpec) *gptLivePipeli
 		ready: make(chan struct{}), publish: make(chan func(), 64), burstClosed: make(chan struct{}, 1),
 		eventsDone: make(chan struct{}), interrupts: make(chan struct{}, 1),
 	}
-	p.seg = gptlive.NewSegmenter(p.onBurstOpen, p.onBurstClose)
+	p.seg = gptlive.NewSegmenter(p.onBurstOpen, p.onSegmentEnd)
 	if spec.Quiz != nil {
 		// Score (agent_bridge-style contract documented on QuizTrackerConfig) calls
 		// this synchronously, in-process, after releasing its own lock — never
@@ -689,12 +696,37 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			}
 		}
 	}
+	// burstEnd is when the last closed burst's queued audio finishes playing out (zero: none
+	// pending). level at the segment close is exactly that audio: the chunk that closed it has
+	// not been written yet. A real-time source (GPT-Live) leaves at most the ~200ms elastic lead
+	// queued, a faster one (Gemini) seconds.
+	var burstEnd time.Time
+	settleBurst := func(now time.Time) {
+		if p.segmentEnded {
+			p.segmentEnded = false
+			burstEnd = now.Add(level)
+		}
+		if p.seg.Open() {
+			burstEnd = time.Time{} // speech resumed before playout drained: still one burst
+		}
+		if !burstEnd.IsZero() && !now.Before(burstEnd) {
+			burstEnd = time.Time{}
+			p.onBurstClose()
+		}
+	}
+	flushBurst := func() { // teardown: never lose the pending burst's transcript
+		if !burstEnd.IsZero() || p.segmentEnded {
+			burstEnd, p.segmentEnded = time.Time{}, false
+			p.onBurstClose()
+		}
+	}
 
 	for {
 		select {
 		case pcm, ok := <-audio:
 			if !ok {
 				write(carry)
+				flushBurst()
 				return
 			}
 			now := time.Now()
@@ -705,6 +737,7 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			lastArrival = now
 			outArrived += frameDur(len(pcm))
 			p.seg.Feed(pcm, frameDur(len(pcm)))
+			settleBurst(now)
 			carry = append(carry, pcm...)
 			n := len(carry) / frameBytes * frameBytes
 			if n == 0 {
@@ -727,12 +760,18 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 				c.ClearQueue()
 			}
 			carry, level, starved = carry[:0], 0, true
+			if !burstEnd.IsZero() {
+				burstEnd = time.Now() // the queued audio is gone: end the burst now
+			}
+			settleBurst(time.Now())
 		case now := <-ticks:
 			drain(now)
 			p.seg.Tick(now)
+			settleBurst(now)
 			logFlow(now)
 		case <-ctx.Done():
 			write(carry) // the last partial frame, so teardown never abandons audio
+			flushBurst()
 			return
 		}
 	}
@@ -975,6 +1014,11 @@ func (p *gptLivePipeline) recordVoiceSeconds(secs float64) {
 }
 
 func (p *gptLivePipeline) onBurstOpen() { p.setState("speaking") }
+
+// onSegmentEnd is the Segmenter's close callback: the model stopped SENDING speech. The burst
+// only ends (onBurstClose) once driveSegmenter sees that speech finish PLAYING: Gemini streams
+// a turn faster than real time, so seconds can still be queued in the local track.
+func (p *gptLivePipeline) onSegmentEnd() { p.segmentEnded = true }
 
 // onBurstClose finalises the agent turn: publish the final transcript, record
 // it, and wake anyone waiting on burstClosed (handleGPTLiveEndPrompt).
