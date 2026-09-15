@@ -189,9 +189,12 @@ type gptLivePipeline struct {
 	closing bool
 	state   string
 	greeted bool
-	// pendingGreet records a Greet() that arrived before the session was dialed
-	// (see Greet and finishStart).
-	pendingGreet bool
+	// greetSource names the trigger that sent the greeting (for tests and the log line).
+	greetSource string
+	// pendingGreetSource records the first greeting trigger (Greet or
+	// ListenerSubscribed) that arrived before the session was dialed; "" if none
+	// (see greet and replayPendingGreet).
+	pendingGreetSource string
 	// diagnostics for the "gptlive: greeting sent" and "gptlive: first model audio" lines
 	startedAt        time.Time // Start was called (before the dial)
 	greetedAt        time.Time
@@ -447,17 +450,26 @@ func (p *gptLivePipeline) finishStart(ctx context.Context, sess realtimeSession)
 		case <-pctx.Done():
 		}
 	}()
-	// A "ready_for_greeting" that landed while Dial was still in flight was
-	// recorded rather than acted on (see Greet); honour it now, so the child
-	// does not wait out the fallback timer above for a greeting the gateway
-	// already asked for. Greet is idempotent, so this racing the timer is fine.
-	p.mu.Lock()
-	pendingGreet := p.pendingGreet
-	p.mu.Unlock()
-	if pendingGreet {
-		p.greet("ready_for_greeting_before_dial")
-	}
+	p.replayPendingGreet()
 	return nil
+}
+
+// replayPendingGreet honours a greeting trigger (a "ready_for_greeting", or a
+// listener subscribing to our audio track) that landed while Dial was still in
+// flight and was recorded rather than acted on (see greet), so the child does
+// not wait out the fallback timer for a greeting someone can already hear.
+// greet is idempotent, so this racing the timer is fine.
+func (p *gptLivePipeline) replayPendingGreet() {
+	p.mu.Lock()
+	source := p.pendingGreetSource
+	p.mu.Unlock()
+	switch source {
+	case "":
+	case "ready_for_greeting":
+		p.greet("ready_for_greeting_before_dial")
+	default:
+		p.greet(source)
+	}
 }
 
 // WriteSample is the PCMRemoteTrack writer for room mic audio: it goes
@@ -527,8 +539,9 @@ func (p *gptLivePipeline) pumpMicIn(ctx context.Context) {
 }
 
 // Greet asks the voice model to speak the character's greeting immediately.
-// Idempotent: only the first caller (the "ready_for_greeting" data message or
-// the fallback timer, whichever comes first) has any effect.
+// Idempotent: only the first caller (the "ready_for_greeting" data message, a
+// listener subscribing to our track, or the fallback timer, whichever comes
+// first) has any effect.
 //
 // A call that lands before the session is dialed is REMEMBERED, not dropped.
 // Join connects the room and publishes the local track before it calls Start,
@@ -549,6 +562,12 @@ func (p *gptLivePipeline) pumpMicIn(ctx context.Context) {
 // guidance is.
 func (p *gptLivePipeline) Greet() { p.greet("ready_for_greeting") }
 
+// ListenerSubscribed greets as soon as a remote participant is actually
+// receiving our published audio track (LiveKit's OnLocalTrackSubscribed), so
+// the greeting does not wait for a "ready_for_greeting" that some clients (the
+// admin dashboard) never send. Same once-only and before-dial rules as Greet.
+func (p *gptLivePipeline) ListenerSubscribed() { p.greet("track_subscribed") }
+
 // greet is Greet with the trigger named for the "gptlive: greeting sent" log line.
 func (p *gptLivePipeline) greet(source string) {
 	p.mu.Lock()
@@ -557,11 +576,14 @@ func (p *gptLivePipeline) greet(source string) {
 		return
 	}
 	if p.sess == nil {
-		p.pendingGreet = true
+		if p.pendingGreetSource == "" {
+			p.pendingGreetSource = source
+		}
 		p.mu.Unlock()
 		return
 	}
 	p.greeted = true
+	p.greetSource = source
 	p.greetedAt = time.Now()
 	sess := p.sess
 	sinceStart := msSinceOrNeg(p.startedAt)

@@ -214,6 +214,9 @@ func (rs *RoomSession) Join(ctx context.Context) error {
 	cb.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 		rs.handleTrackSubscribed(track, rp)
 	}
+	cb.OnLocalTrackSubscribed = func(publication *lksdk.LocalTrackPublication, _ *lksdk.LocalParticipant) {
+		rs.handleLocalTrackSubscribed(publication)
+	}
 	cb.OnDisconnected = func() {
 		logger.InfoCF("livekit", "Room disconnected callback triggered", map[string]any{
 			"room": rs.roomInfo.Name,
@@ -583,6 +586,23 @@ func cancelPTTTurn(stream stt.TranscriptionStream) {
 		return
 	}
 	resetPTTBuffer(stream)
+}
+
+// handleLocalTrackSubscribed runs when a remote participant first subscribes
+// to a track we published (the server notifies the publisher once per track).
+// For a realtime-voice session our only audio track is the model's voice, so a
+// subscription means someone can hear us: greet now instead of waiting for
+// "ready_for_greeting" or the fallback timer.
+func (rs *RoomSession) handleLocalTrackSubscribed(publication *lksdk.LocalTrackPublication) {
+	if publication == nil || publication.Kind() != lksdk.TrackKindAudio {
+		return
+	}
+	rs.mu.Lock()
+	gptlivePipeline := rs.gptlive
+	rs.mu.Unlock()
+	if gptlivePipeline != nil {
+		gptlivePipeline.ListenerSubscribed()
+	}
 }
 
 // handleDataMessage processes data channel messages from the MQTT gateway.

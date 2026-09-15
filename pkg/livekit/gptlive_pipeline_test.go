@@ -967,7 +967,7 @@ func TestGreetBeforeDialIsReplayedByFinishStart(t *testing.T) {
 	p := newGPTLivePipeline(&RoomSession{}, GPTLiveSessionSpec{SampleRate: 24000, Persona: GPTLivePersona{Greeting: "hi"}})
 	p.Greet() // the ready_for_greeting that arrives mid-dial
 	p.mu.Lock()
-	pending, greeted := p.pendingGreet, p.greeted
+	pending, greeted := p.pendingGreetSource != "", p.greeted
 	p.mu.Unlock()
 	if !pending || greeted {
 		t.Fatalf("a Greet before the dial must be remembered, not performed or dropped: pendingGreet=%v greeted=%v", pending, greeted)
@@ -1269,6 +1269,71 @@ func TestInRateDefaultsToGeminiInputRate(t *testing.T) {
 	p := &gptLivePipeline{spec: GPTLiveSessionSpec{Vendor: VendorGoogle, SampleRate: 24000}}
 	if got := p.inRate(); got != 16000 {
 		t.Fatalf("inRate = %d, want 16000 for Gemini with no InRate", got)
+	}
+}
+
+// greetTriggerPipeline is a pipeline with no dialed session yet; dial() stands in
+// for finishStart publishing the session (sess) and replaying a pending greeting.
+func greetTriggerPipeline() (*gptLivePipeline, *fakeRealtimeSession, func()) {
+	sess := &fakeRealtimeSession{commentary: make(chan string, 4)}
+	p := &gptLivePipeline{rs: &RoomSession{}}
+	return p, sess, func() {
+		p.mu.Lock()
+		p.sess = sess
+		p.mu.Unlock()
+		p.replayPendingGreet()
+	}
+}
+
+func greetState(p *gptLivePipeline) (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.greeted, p.greetSource
+}
+
+func TestGreetTriggerFirstWinsAndNeverDoubleGreets(t *testing.T) {
+	p, sess, dial := greetTriggerPipeline()
+	dial()
+	p.ListenerSubscribed()
+	p.Greet()
+	p.greet("fallback_timer")
+	p.ListenerSubscribed()
+	if greeted, source := greetState(p); !greeted || source != "track_subscribed" {
+		t.Fatalf("greeted=%v source=%q, want the first trigger (track_subscribed) to win", greeted, source)
+	}
+	if n := len(sess.commentary); n != 1 {
+		t.Fatalf("greeting nudges sent = %d, want exactly 1", n)
+	}
+}
+
+func TestGreetTriggerReadyForGreetingBeforeSubscriptionWins(t *testing.T) {
+	p, sess, dial := greetTriggerPipeline()
+	dial()
+	p.Greet()
+	p.ListenerSubscribed()
+	if _, source := greetState(p); source != "ready_for_greeting" {
+		t.Fatalf("source = %q, want ready_for_greeting", source)
+	}
+	if n := len(sess.commentary); n != 1 {
+		t.Fatalf("greeting nudges sent = %d, want exactly 1", n)
+	}
+}
+
+func TestGreetTriggerSubscriptionBeforeReadyGreetsOnReady(t *testing.T) {
+	p, sess, dial := greetTriggerPipeline()
+	p.ListenerSubscribed() // the device subscribed while the vendor was still dialing
+	p.Greet()              // a later ready_for_greeting must not replace the first trigger
+	if greeted, _ := greetState(p); greeted || len(sess.commentary) != 0 {
+		t.Fatal("no greeting may be sent before the vendor session is ready")
+	}
+	dial()
+	if greeted, source := greetState(p); !greeted || source != "track_subscribed" {
+		t.Fatalf("greeted=%v source=%q, want greeting on readiness with source track_subscribed", greeted, source)
+	}
+	p.greet("fallback_timer")
+	p.replayPendingGreet()
+	if n := len(sess.commentary); n != 1 {
+		t.Fatalf("greeting nudges sent = %d, want exactly 1", n)
 	}
 }
 
