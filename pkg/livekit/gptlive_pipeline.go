@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -537,7 +538,103 @@ func (p *gptLivePipeline) pumpAudioOut(ctx context.Context) {
 	if p.localTrack != nil {
 		track = p.localTrack
 	}
+	// ponytail: env switch for the A/B test; drop it and driveSegmenter's lead buffer once elastic wins
+	if strings.EqualFold(os.Getenv("PICOCLAW_GPTLIVE_PLAYOUT"), "elastic") {
+		p.driveElastic(ctx, p.sess.Audio(), ticker.C, track)
+		return
+	}
 	p.driveSegmenter(ctx, p.sess.Audio(), ticker.C, track)
+}
+
+// elasticPlayoutTarget is the lead driveElastic holds in the local track. GPT-Live
+// delivers at real time (0.96-1.02 measured), so a lead only refills if we add it:
+// silence frames are stretched when the lead is short and dropped when it is long,
+// and speech is never held or dropped. livekit-agents' room output uses 200ms too.
+const elasticPlayoutTarget = 200 * time.Millisecond
+
+// driveElastic is driveSegmenter with the priming lead replaced by an elastic one,
+// and every write cut to whole 20ms frames so PCMLocalTrack never zero-pads a
+// partial frame mid-speech. Feed happens at arrival: the gate must classify a
+// chunk before we decide whether it is silence we may stretch or drop.
+func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte, ticks <-chan time.Time, track localOutTrackWriter) {
+	frameDur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(p.spec.SampleRate) }
+	frameBytes := p.spec.SampleRate / 50 * 2
+	var carry []byte
+	var level, underrun time.Duration // level mirrors the track's queue: +write, -wall time
+	var levelAt time.Time
+	underruns, writeErrs := 0, 0
+
+	drain := func(now time.Time) {
+		if !levelAt.IsZero() {
+			level -= now.Sub(levelAt)
+		}
+		levelAt = now
+		if level < 0 {
+			if p.seg.Open() {
+				underrun -= level
+				underruns++
+			}
+			level = 0
+		}
+	}
+	logBurst := func(wasOpen bool) {
+		if !wasOpen || p.seg.Open() {
+			return
+		}
+		logger.InfoCF("livekit", "gptlive: elastic playout burst", map[string]any{
+			"room": p.rs.roomName(), "underruns": underruns, "underrun_ms": underrun.Milliseconds(), "level_ms": level.Milliseconds(),
+		})
+		underruns, underrun = 0, 0
+	}
+	write := func(pcm []byte) {
+		if len(pcm) == 0 || track == nil {
+			return
+		}
+		level += frameDur(len(pcm))
+		if err := track.WriteSample(bytesToPCM16(pcm)); err != nil {
+			if writeErrs++; writeErrs == 1 {
+				logger.WarnCF("livekit", "gptlive: write to local track", map[string]any{"error": err.Error()})
+			}
+		}
+	}
+
+	for {
+		select {
+		case pcm, ok := <-audio:
+			if !ok {
+				write(carry)
+				return
+			}
+			drain(time.Now())
+			wasOpen := p.seg.Open()
+			p.seg.Feed(pcm, frameDur(len(pcm)))
+			logBurst(wasOpen)
+			carry = append(carry, pcm...)
+			n := len(carry) / frameBytes * frameBytes
+			if n == 0 {
+				continue
+			}
+			out := carry[:n]
+			if !p.seg.Open() {
+				switch {
+				case level > 2*elasticPlayoutTarget:
+					out = nil
+				case level < elasticPlayoutTarget:
+					pad := int((elasticPlayoutTarget-level)/(20*time.Millisecond)) * frameBytes
+					out = append(make([]byte, pad, pad+n), out...)
+				}
+			}
+			write(out) // bytesToPCM16 copies, so reusing carry below is safe
+			carry = append(carry[:0], carry[n:]...)
+		case now := <-ticks:
+			drain(now)
+			wasOpen := p.seg.Open()
+			p.seg.Tick(now)
+			logBurst(wasOpen)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // driveSegmenter is the single loop that both drains audio and drives the
