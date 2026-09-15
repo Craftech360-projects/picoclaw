@@ -2,6 +2,8 @@ package realtimeconn
 
 import (
 	"errors"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,17 +58,29 @@ func (l *LogLimiter) Allow(key string) (bool, int) {
 }
 
 // closeDetails extracts the websocket close code and reason from a read error. Without a
-// close frame (a reset, EOF) the code is 0 and the text is the error's own. ReadMessage
-// errors carry socket addresses at most, never the dial URL, so nothing secret is in them.
-func closeDetails(err error) (int, string) {
+// close frame (a reset, EOF) the code is 0 and the text is the error's own. The text is
+// scrubbed of secret (raw and URL-escaped) before it is cut, in case a vendor echoes it.
+func closeDetails(secret string, err error) (int, string) {
 	if err == nil {
 		return 0, ""
 	}
 	var ce *websocket.CloseError
 	if errors.As(err, &ce) {
-		return ce.Code, truncate(ce.Text)
+		return ce.Code, truncate(scrubSecret(ce.Text, secret))
 	}
-	return 0, truncate(err.Error())
+	return 0, truncate(scrubSecret(err.Error(), secret))
+}
+
+// scrubSecret masks secret in s, in both its raw and URL-escaped forms (Gemini's key rides in the URL).
+func scrubSecret(s, secret string) string {
+	if secret == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, secret, "***")
+	if escaped := url.QueryEscape(secret); escaped != secret {
+		s = strings.ReplaceAll(s, escaped, "***")
+	}
+	return s
 }
 
 func truncate(s string) string {

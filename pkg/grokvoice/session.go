@@ -84,6 +84,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 	}
 	s := &Session{Conn: realtimeconn.New(ws), cfg: cfg, started: time.Now(), instructions: cfg.Instructions,
 		agentText: map[string]string{}, pending: map[string]bool{}, logLimit: realtimeconn.NewLogLimiter(30 * time.Second)}
+	s.SetSecret(cfg.APIKey)
 	if err := s.Send(s.sessionUpdate()); err != nil {
 		_ = s.Conn.Close()
 		return nil, fmt.Errorf("grokvoice: session.update: %w", err)

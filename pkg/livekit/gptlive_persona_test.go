@@ -378,15 +378,22 @@ func TestBuildGPTLivePersonaSingleModelEndsWithRealtimeOverrides(t *testing.T) {
 	if !strings.HasSuffix(p.Voice, "</realtime_overrides>") {
 		t.Fatalf("single-model Voice must end with the override block, ends %q", p.Voice[max(0, len(p.Voice)-200):])
 	}
+	if !strings.Contains(p.Voice, "</greeting_guidance>") || !strings.Contains(p.Voice, "do NOT have access to any tools") {
+		t.Fatal("fixture sections missing from Voice")
+	}
 	start := strings.LastIndex(p.Voice, "<realtime_overrides>")
 	if start < strings.Index(p.Voice, "</greeting_guidance>") || start < strings.Index(p.Voice, "do NOT have access to any tools") {
 		t.Error("the override block must come after every other section")
 	}
 	block := p.Voice[start:]
-	for _, want := range []string{"override", "quiz_score_answer", "question_id", "transcript", "MEMO", "<tools>"} {
+	for _, want := range []string{"override", "quiz_score_answer", "question_id", "transcript", "MEMO", "<tools>",
+		"even when a tool result mentions a MEMO", "synonym", "before you tell the child"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("override block lacks %q: %q", want, block)
 		}
+	}
+	if strings.Contains(block, "judge or record answers yourself") {
+		t.Error("the override must not cancel the judge-by-meaning rule in <tools>")
 	}
 	if strings.Contains(p.Voice, "MEMO:") {
 		t.Error("Voice must never contain the literal MEMO: shape")

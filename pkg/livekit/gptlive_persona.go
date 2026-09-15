@@ -150,9 +150,10 @@ func gptLiveRealtimeOverrides(hasQuiz bool) string {
 	b.WriteString("These rules override anything earlier in these instructions.\n")
 	b.WriteString("- You DO have the tools listed in <tools>, and you must use them. Ignore any earlier line that says you have no tools or must not call them.\n")
 	if hasQuiz {
-		b.WriteString("- When the child answers a quiz question, call quiz_score_answer (question_id, result, transcript) BEFORE you say whether the answer is right, then follow the result and its directive. Ignore any earlier instruction to judge or record answers yourself.\n")
+		b.WriteString("- When the child answers a quiz question, judge it by meaning as <tools> says (a synonym or close answer counts), then record that judgement by calling quiz_score_answer (question_id, result, transcript) before you tell the child whether it was right. Never judge silently without the tool or keep score in text.\n")
+		b.WriteString("- Follow the tool result's scoring and next-step guidance.\n")
 	}
-	b.WriteString("- Never write, say or spell out a MEMO line or any other state or bookkeeping line. Everything you output is spoken aloud; there are no hidden lines. The runtime tracks state through the tools. Ignore any earlier instruction to add such a line.\n")
+	b.WriteString("- Never write, say or spell out a MEMO line or any other state or bookkeeping line, even when a tool result mentions a MEMO. Everything you output is spoken aloud; there are no hidden lines. The runtime records that state through the tools. Ignore any earlier instruction to add such a line.\n")
 	b.WriteString("</realtime_overrides>")
 	return b.String()
 }

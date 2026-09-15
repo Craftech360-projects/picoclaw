@@ -60,9 +60,10 @@ func Dial(ctx context.Context, url string, header http.Header, secret string) (*
 
 // Conn outlives any single websocket: Run can swap the socket and keep feeding the same channels.
 type Conn struct {
-	mu      sync.Mutex // guards ws, sock and closed
+	mu      sync.Mutex // guards ws, sock, secret and closed
 	ws      *websocket.Conn
 	sock    *socketStats // diagnostics for ws; swapped with it
+	secret  string       // scrubbed from every logged error (SetSecret)
 	closed  bool
 	writeMu sync.Mutex
 	audio   chan []byte
@@ -96,6 +97,21 @@ func New(ws *websocket.Conn) *Conn {
 	}
 }
 
+// SetSecret names the API key to scrub (raw and URL-escaped) from the errors and close
+// reasons Conn logs. Call it right after New.
+func (c *Conn) SetSecret(secret string) {
+	c.mu.Lock()
+	c.secret = secret
+	c.mu.Unlock()
+}
+
+func (c *Conn) scrub(s string) string {
+	c.mu.Lock()
+	secret := c.secret
+	c.mu.Unlock()
+	return scrubSecret(s, secret)
+}
+
 func (c *Conn) Audio() <-chan []byte         { return c.audio }
 func (c *Conn) Events() <-chan gptlive.Event { return c.events }
 func (c *Conn) Done() <-chan struct{}        { return c.done }
@@ -111,7 +127,7 @@ func (c *Conn) Send(v any) error {
 	if err != nil && sock.sendFails.Add(1) == 1 {
 		// once per socket: the mic pushes every 100ms, and the socket-end line carries the count
 		logger.WarnCF("realtime", "vendor socket send failed; later failures on this socket are only counted", map[string]any{
-			"socket_seq": sock.seq, "error": truncate(err.Error()),
+			"socket_seq": sock.seq, "error": truncate(c.scrub(err.Error())),
 		})
 	}
 	return err
@@ -211,7 +227,7 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 		}
 		_ = ws.Close() // release the replaced/ended socket; a redial uses a new one
 		closing := c.Closing()
-		logSocketEnd(sock, last, closing, !closing && redial != nil && gotFrame)
+		c.logSocketEnd(sock, last, closing, !closing && redial != nil && gotFrame)
 		if closing || redial == nil {
 			break
 		}
@@ -223,7 +239,7 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 		next, err := redial()
 		if err != nil {
 			logger.WarnCF("realtime", "vendor socket redial failed", map[string]any{
-				"socket_seq": sock.seq + 1, "redial_ms": msSince(dialStart), "error": truncate(err.Error()),
+				"socket_seq": sock.seq + 1, "redial_ms": msSince(dialStart), "error": truncate(c.scrub(err.Error())),
 			})
 			last = err
 			break
@@ -259,8 +275,11 @@ func (c *Conn) Run(handle func([]byte), redial func() (*websocket.Conn, error), 
 // logSocketEnd is the one line per socket end: why it ended (close code and reason when the
 // vendor sent a close frame) and what the socket did before, so a live run shows whether the
 // vendor closed on a deadline, a protocol error or a network reset.
-func logSocketEnd(sock *socketStats, err error, closing, willRedial bool) {
-	code, text := closeDetails(err)
+func (c *Conn) logSocketEnd(sock *socketStats, err error, closing, willRedial bool) {
+	c.mu.Lock()
+	secret := c.secret
+	c.mu.Unlock()
+	code, text := closeDetails(secret, err)
 	fields := map[string]any{
 		"socket_seq":    sock.seq,
 		"close_code":    code,

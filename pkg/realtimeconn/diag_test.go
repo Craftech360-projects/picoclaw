@@ -53,19 +53,35 @@ func TestLogLimiterNilAllowsEverythingAndKeysAreBounded(t *testing.T) {
 }
 
 func TestCloseDetails(t *testing.T) {
-	code, text := closeDetails(fmt.Errorf("wrapped: %w", &websocket.CloseError{Code: 1011, Text: "Deadline expired"}))
+	code, text := closeDetails("", fmt.Errorf("wrapped: %w", &websocket.CloseError{Code: 1011, Text: "Deadline expired"}))
 	if code != 1011 || text != "Deadline expired" {
 		t.Errorf("close frame: code=%d text=%q", code, text)
 	}
-	code, text = closeDetails(errors.New("read tcp 10.0.0.1:1->10.0.0.2:443: wsarecv: connection reset"))
+	code, text = closeDetails("", errors.New("read tcp 10.0.0.1:1->10.0.0.2:443: wsarecv: connection reset"))
 	if code != 0 || !strings.Contains(text, "connection reset") {
 		t.Errorf("no close frame: code=%d text=%q", code, text)
 	}
-	if code, text = closeDetails(nil); code != 0 || text != "" {
+	if code, text = closeDetails("", nil); code != 0 || text != "" {
 		t.Errorf("nil: code=%d text=%q", code, text)
 	}
-	_, text = closeDetails(errors.New(strings.Repeat("x", 1000)))
+	_, text = closeDetails("", errors.New(strings.Repeat("x", 1000)))
 	if len(text) > maxLogText+3 {
 		t.Errorf("text not bounded: %d bytes", len(text))
+	}
+}
+
+func TestScrubSecretRemovesRawAndURLEscapedForms(t *testing.T) {
+	secret := "AIza+k/y="
+	_, text := closeDetails(secret, &websocket.CloseError{Code: 1008, Text: "bad key AIza+k/y= in ?key=AIza%2Bk%2Fy%3D"})
+	if strings.Contains(text, secret) || strings.Contains(text, "AIza%2Bk%2Fy%3D") || !strings.Contains(text, "bad key ***") {
+		t.Errorf("close text not scrubbed: %q", text)
+	}
+	c := New(nil)
+	c.SetSecret(secret)
+	if got := c.scrub("write to ?key=AIza%2Bk%2Fy%3D failed: AIza+k/y="); strings.Contains(got, "AIza") {
+		t.Errorf("Conn.scrub left the secret: %q", got)
+	}
+	if got := New(nil).scrub("no secret set"); got != "no secret set" {
+		t.Errorf("scrub without a secret changed the text: %q", got)
 	}
 }

@@ -4,6 +4,8 @@ import "time"
 
 // turnStats times one model turn for the "gemini live: turn" log line. Guarded by Session.mu.
 type turnStats struct {
+	prevEnd            time.Time // the previous turn's turnComplete/interrupted; kept across end
+	firstInput         time.Time // first input transcription chunk before the first model audio
 	lastInput          time.Time // latest input transcription chunk before the first model audio
 	firstAudio         time.Time
 	latencyMs          int64 // lastInput -> firstAudio; valid once firstAudio is set
@@ -18,6 +20,9 @@ type turnStats struct {
 func (t *turnStats) input(now time.Time, chars int) {
 	t.inputChars += chars
 	if t.firstAudio.IsZero() {
+		if t.firstInput.IsZero() {
+			t.firstInput = now
+		}
 		t.lastInput = now
 	} else {
 		t.inputAfterAudio = true // transcription often trails the model's first audio
@@ -36,22 +41,32 @@ func (t *turnStats) audio(now time.Time) {
 	}
 }
 
-// end returns the turn's log fields (counts and timings only, never text) and resets the stats.
-func (t *turnStats) end(turn int, interrupted bool) map[string]any {
-	latency := int64(-1)
+// end returns the turn's log fields (counts and timings only, never text), resets the stats
+// and remembers now as the previous turn's end. Gemini's input transcription usually trails
+// the first model audio, so the input anchors are often -1; the previous turn end is not.
+func (t *turnStats) end(now time.Time, turn int, interrupted bool) map[string]any {
+	latency, fromFirstInput, fromPrevEnd := int64(-1), int64(-1), int64(-1)
 	if !t.firstAudio.IsZero() {
 		latency = t.latencyMs
+		if !t.firstInput.IsZero() {
+			fromFirstInput = t.firstAudio.Sub(t.firstInput).Milliseconds()
+		}
+		if !t.prevEnd.IsZero() {
+			fromPrevEnd = t.firstAudio.Sub(t.prevEnd).Milliseconds()
+		}
 	}
 	f := map[string]any{
-		"turn":                         turn,
-		"ms_last_input_to_first_audio": latency,
-		"audio_chunks":                 t.audioChunks,
-		"input_transcript_chars":       t.inputChars,
-		"input_after_first_audio":      t.inputAfterAudio,
-		"generation_complete":          t.generationComplete,
-		"interrupted":                  interrupted,
+		"turn":                            turn,
+		"ms_last_input_to_first_audio":    latency,
+		"ms_first_input_to_first_audio":   fromFirstInput,
+		"ms_prev_turn_end_to_first_audio": fromPrevEnd,
+		"audio_chunks":                    t.audioChunks,
+		"input_transcript_chars":          t.inputChars,
+		"input_after_first_audio":         t.inputAfterAudio,
+		"generation_complete":             t.generationComplete,
+		"interrupted":                     interrupted,
 	}
-	*t = turnStats{}
+	*t = turnStats{prevEnd: now}
 	return f
 }
 

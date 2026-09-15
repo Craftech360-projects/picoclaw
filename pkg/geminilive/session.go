@@ -59,6 +59,7 @@ type Session struct {
 	resumableKnown bool
 	resumable      bool
 	logLimit       *realtimeconn.LogLimiter // unknown/unparsed frames
+	lastUsage      [6]int                   // the usage line is logged only when these counts change
 	// flushTimer is started by the current turn's first model output and flushes the user
 	// transcript userFlushDelay later if the turn has not ended by then; nil until that output
 	flushTimer *time.Timer
@@ -92,6 +93,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	s.Conn = realtimeconn.New(ws)
+	s.SetSecret(cfg.APIKey)
 	go s.Run(s.handleMessage, s.redial, s.onEnd)
 	return s, nil
 }
@@ -349,7 +351,7 @@ func (s *Session) handleMessage(raw []byte) {
 		}
 		if c.Interrupted || c.TurnComplete {
 			s.mu.Lock()
-			fields := s.stats.end(s.turn, c.Interrupted)
+			fields := s.stats.end(time.Now(), s.turn, c.Interrupted)
 			s.mu.Unlock()
 			logger.InfoCF("realtime", "gemini live: turn", fields)
 			s.mu.Lock()
@@ -374,10 +376,17 @@ func (s *Session) handleMessage(raw []byte) {
 		}
 	}
 	if u := m.UsageMetadata; u != nil {
-		logger.InfoCF("realtime", "gemini live: usage", map[string]any{
-			"prompt_tokens": u.PromptTokenCount, "response_tokens": u.ResponseTokenCount, "thoughts_tokens": u.ThoughtsTokenCount,
-			"tool_use_prompt_tokens": u.ToolUsePromptTokenCount, "cached_tokens": u.CachedContentTokenCount, "total_tokens": u.TotalTokenCount,
-		})
+		counts := [6]int{u.PromptTokenCount, u.ResponseTokenCount, u.ThoughtsTokenCount, u.ToolUsePromptTokenCount, u.CachedContentTokenCount, u.TotalTokenCount}
+		s.mu.Lock()
+		changed := counts != s.lastUsage
+		s.lastUsage = counts
+		s.mu.Unlock()
+		if changed {
+			logger.InfoCF("realtime", "gemini live: usage", map[string]any{
+				"prompt_tokens": u.PromptTokenCount, "response_tokens": u.ResponseTokenCount, "thoughts_tokens": u.ThoughtsTokenCount,
+				"tool_use_prompt_tokens": u.ToolUsePromptTokenCount, "cached_tokens": u.CachedContentTokenCount, "total_tokens": u.TotalTokenCount,
+			})
+		}
 		s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.PromptTokenCount, Output: u.ResponseTokenCount, Total: u.TotalTokenCount})
 		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
 	}
