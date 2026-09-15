@@ -80,10 +80,15 @@ type Error struct {
 }
 type VoiceUsage struct{ Seconds float64 }
 
+// Interrupted: the user started talking over the model. Emitted by vendors with server-side
+// barge-in (Grok Voice, Gemini Live); GPT-Live owns turn-taking itself and never emits it.
+type Interrupted struct{}
+
 func (SessionStarted) isEvent() {}
 func (Closed) isEvent()         {}
 func (Error) isEvent()          {}
 func (VoiceUsage) isEvent()     {}
+func (Interrupted) isEvent()    {}
 
 const sessionCloseTimeout = 5 * time.Second
 
