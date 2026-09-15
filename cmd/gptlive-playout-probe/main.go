@@ -1,11 +1,14 @@
-// Command gptlive-playout-probe checks GPT-Live output playout in isolation. It joins
-// one room, talks through the same pkg/gptlive session the agent uses (no tools,
-// persona or persistence), plays the model through the same elastic playout as the
-// agent, and logs level, underruns and arrival rate every 5s.
-// See docs/gptlive-audio-jitter.md.
+// Command gptlive-playout-probe is the minimal Go realtime voice agent: it joins one LiveKit
+// room and talks through OpenAI GPT-Live, xAI Grok Voice or Google Gemini Live (no tools,
+// persona or persistence). The mic goes to the model as steady 100ms chunks and the model is
+// played through the same elastic playout as picoclaw-livekit, with level, underruns and
+// arrival rate logged every 5s. See docs/gptlive-audio-jitter.md.
 //
-//	LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY must be set.
-//	gptlive-playout-probe -room probe-1 -duration 90s
+//	LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET must be set, plus the vendor key:
+//	OPENAI_API_KEY (openai), XAI_API_KEY (xai) or GOOGLE_API_KEY (google).
+//	gptlive-playout-probe -vendor openai -room probe-1 -duration 90s
+//	gptlive-playout-probe -vendor xai -voice eve
+//	gptlive-playout-probe -vendor google -voice Kore -model gemini-3.1-flash-live-preview
 package main
 
 import (
@@ -38,11 +41,24 @@ const (
 var yes = true
 
 func main() {
+	vendor := flag.String("vendor", "openai", "realtime vendor: openai | xai | google")
 	room := flag.String("room", "gptlive-probe", "LiveKit room to join")
-	rate := flag.Int("rate", 24000, "model sample rate (the agent always uses 24000)")
+	voice := flag.String("voice", "", "vendor voice (default: the vendor's default)")
+	model := flag.String("model", "", "vendor model (default: the vendor's default)")
+	silence := flag.Duration("silence", 700*time.Millisecond, "end-of-turn silence for server VAD (xai, google); children pause mid-sentence")
 	target := flag.Duration("target", 200*time.Millisecond, "playout lead to hold")
 	runFor := flag.Duration("duration", 0, "exit after this long (0: run until Ctrl+C)")
 	flag.Parse()
+	spec, ok := vendors[*vendor]
+	if !ok {
+		log.Fatalf("-vendor must be openai, xai or google, got %q", *vendor)
+	}
+	if *voice == "" {
+		*voice = spec.defaultVoice
+	}
+	if *model == "" {
+		*model = spec.defaultModel
+	}
 	env := func(k string) string {
 		v := os.Getenv(k)
 		if v == "" {
@@ -50,7 +66,7 @@ func main() {
 		}
 		return v
 	}
-	url, key, secret, openaiKey := env("LIVEKIT_URL"), env("LIVEKIT_API_KEY"), env("LIVEKIT_API_SECRET"), env("OPENAI_API_KEY")
+	url, key, secret := env("LIVEKIT_URL"), env("LIVEKIT_API_KEY"), env("LIVEKIT_API_SECRET")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -60,50 +76,22 @@ func main() {
 		defer cancel()
 	}
 
-	sess, err := gptlive.Dial(ctx, gptlive.Config{
-		APIKey: openaiKey, SampleRate: *rate,
-		Instructions: "You are a warm storyteller. Speak English. When asked for a story, tell it for about a minute without pausing for the listener.",
+	sess, err := dialVendor(ctx, *vendor, dialOptions{
+		key: env(spec.envKey), model: *model, voice: *voice, silence: *silence,
+		instructions: "You are a warm storyteller. Speak English. When asked for a story, tell it for about a minute without pausing for the listener.",
 	})
 	if err != nil {
-		log.Fatalf("gptlive dial: %v", err)
+		log.Fatalf("dial %s: %v", *vendor, err)
 	}
-	defer func() {
-		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = sess.Close(c)
-		cancel()
-	}()
-	go func() {
-		for ev := range sess.Events() {
-			if e, ok := ev.(gptlive.Error); ok {
-				log.Printf("gptlive error (recoverable=%v): %v", e.Recoverable, e.Err)
-			}
-		}
-	}()
+	defer sess.Close()
 
-	track, err := lkmedia.NewPCMLocalTrack(*rate, 1, protoLogger.GetLogger())
+	track, err := lkmedia.NewPCMLocalTrack(outRate, 1, protoLogger.GetLogger())
 	if err != nil {
 		log.Fatalf("local track: %v", err)
 	}
 
-	// GPT-Live is clocked by input audio: with no mic frames it neither injects
-	// context nor speaks. Feed real-time silence until a real mic takes over.
-	micWired := make(chan struct{})
-	var micOnce sync.Once
-	go func() {
-		t := time.NewTicker(trackFrame)
-		defer t.Stop()
-		silence := make([]byte, *rate/50*2)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-micWired:
-				return
-			case <-t.C:
-				sess.PushAudio(silence)
-			}
-		}
-	}()
+	mic := &micBuffer{limit: spec.inRate} // 500ms of PCM16 mono
+	go mic.pump(ctx, sess, spec.inRate)
 
 	listening := make(chan struct{})
 	var once sync.Once
@@ -112,12 +100,11 @@ func main() {
 		if t.Kind() != webrtc.RTPCodecTypeAudio {
 			return
 		}
-		if _, err := lkmedia.NewPCMRemoteTrack(t, micWriter{sess}, lkmedia.WithTargetSampleRate(*rate), lkmedia.WithTargetChannels(1)); err != nil {
+		if _, err := lkmedia.NewPCMRemoteTrack(t, mic, lkmedia.WithTargetSampleRate(spec.inRate), lkmedia.WithTargetChannels(1)); err != nil {
 			log.Printf("remote track: %v", err)
 			return
 		}
 		log.Printf("mic from %s wired to the model", rp.Identity())
-		micOnce.Do(func() { close(micWired) })
 		once.Do(func() { close(listening) })
 	}
 	cb.OnParticipantConnected = func(rp *lksdk.RemoteParticipant) { // headless listeners (lk room join) have no mic
@@ -144,7 +131,8 @@ func main() {
 	if _, err := lkRoom.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{Name: "gptlive-probe"}); err != nil {
 		log.Fatalf("publish: %v", err)
 	}
-	log.Printf("joined %s, rate=%d target=%s; waiting for a listener", *room, *rate, *target)
+	log.Printf("joined %s, vendor=%s model=%s voice=%s in=%dHz target=%s; waiting for a listener",
+		*room, *vendor, *model, *voice, spec.inRate, *target)
 	lt := auth.NewAccessToken(key, secret)
 	lt.SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: *room, CanPublish: &yes, CanSubscribe: &yes})
 	lt.SetIdentity("listener")
@@ -157,24 +145,61 @@ func main() {
 	go func() {
 		select {
 		case <-listening:
-			sess.AppendCommentary("Greet the listener in one sentence, then tell a story about a brave little robot for about a minute without stopping.")
+			sess.Greet("Greet the listener in one sentence, then tell a story about a brave little robot for about a minute without stopping.")
 		case <-ctx.Done():
 		}
 	}()
-	play(ctx, sess.Audio(), track, *rate, *target)
+	play(ctx, sess.Audio(), sess.Interrupted(), track, *target)
 }
 
-type micWriter struct{ sess *gptlive.Session }
+// micBuffer collects room mic audio (lkmedia.PCMRemoteTrackWriter) for pump.
+type micBuffer struct {
+	mu    sync.Mutex
+	buf   []byte
+	limit int // bytes; the oldest audio is dropped past it so a stall can't grow input latency
+}
 
-func (w micWriter) WriteSample(s media.PCM16Sample) error {
-	b := make([]byte, len(s)*2)
-	for i, v := range s {
-		binary.LittleEndian.PutUint16(b[2*i:], uint16(v))
+func (m *micBuffer) WriteSample(s media.PCM16Sample) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, v := range s {
+		m.buf = binary.LittleEndian.AppendUint16(m.buf, uint16(v))
 	}
-	w.sess.PushAudio(b)
+	if len(m.buf) > m.limit {
+		m.buf = append(m.buf[:0], m.buf[len(m.buf)-m.limit:]...)
+	}
 	return nil
 }
-func (w micWriter) Close() error { return nil }
+func (m *micBuffer) Close() error { return nil }
+
+// pump sends the mic as 100ms chunks on a steady clock, silence when the mic falls short
+// (browsers send nothing during silence). Same shape as picoclaw-livekit's pumpMicIn: it
+// waits for 200ms of mic before taking it, and rebuilds that slack whenever it runs dry.
+func (m *micBuffer) pump(ctx context.Context, sess voiceSession, rate int) {
+	chunk := rate / 10 * 2
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	primed := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		out := make([]byte, chunk)
+		m.mu.Lock()
+		if !primed && len(m.buf) >= 2*chunk {
+			primed = true
+		}
+		if primed {
+			n := copy(out, m.buf)
+			m.buf = append(m.buf[:0], m.buf[n:]...)
+			primed = n == chunk
+		}
+		m.mu.Unlock()
+		sess.PushAudio(out)
+	}
+}
 
 func toPCM16(b []byte) media.PCM16Sample {
 	out := make(media.PCM16Sample, len(b)/2)
@@ -185,17 +210,18 @@ func toPCM16(b []byte) media.PCM16Sample {
 }
 
 // play drains model audio into the track with elastic playout. level mirrors
-// PCMLocalTrack's queue (grows on every write, shrinks by wall time), and speech
-// that hits an empty queue is what reaches the listener as a gap or click.
-func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack, rate int, target time.Duration) {
-	dur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(rate) }
-	frameBytes := rate / 50 * 2
+// PCMLocalTrack's queue (grows on every write, shrinks by wall time), and speech that
+// hits an empty queue is what reaches the listener as a gap or click. A barge-in drops
+// everything queued so the model stops talking over the listener.
+func play(ctx context.Context, audio <-chan []byte, interrupted <-chan struct{}, track *lkmedia.PCMLocalTrack, target time.Duration) {
+	dur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(outRate) }
+	frameBytes := outRate / 50 * 2
 	seg := gptlive.NewSegmenter(func() {}, func() {})
 
 	var level time.Duration
 	var levelAt time.Time
 	starved := true
-	var underruns int
+	var underruns, bargeIns int
 	var underrunDur, maxTickGap, arrived, padded, dropped time.Duration
 	windowStart := time.Now()
 
@@ -239,6 +265,10 @@ func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack
 		select {
 		case <-ctx.Done():
 			return
+		case <-interrupted:
+			track.ClearQueue()
+			carry, level, starved = carry[:0], 0, true
+			bargeIns++
 		case pcm, ok := <-audio:
 			if !ok {
 				log.Printf("model audio closed")
@@ -274,10 +304,10 @@ func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack
 			lastTick20 = now
 			drain(now)
 			if elapsed := now.Sub(windowStart); elapsed >= statsEvery {
-				log.Printf("level=%dms underruns=%d underrun=%dms arrival_ratio=%.3f max_tick_gap=%dms padded=%dms dropped=%dms",
+				log.Printf("level=%dms underruns=%d underrun=%dms arrival_ratio=%.3f max_tick_gap=%dms padded=%dms dropped=%dms barge_ins=%d",
 					level.Milliseconds(), underruns, underrunDur.Milliseconds(), arrived.Seconds()/elapsed.Seconds(),
-					maxTickGap.Milliseconds(), padded.Milliseconds(), dropped.Milliseconds())
-				underruns, underrunDur, maxTickGap, arrived, padded, dropped = 0, 0, 0, 0, 0, 0
+					maxTickGap.Milliseconds(), padded.Milliseconds(), dropped.Milliseconds(), bargeIns)
+				underruns, bargeIns, underrunDur, maxTickGap, arrived, padded, dropped = 0, 0, 0, 0, 0, 0, 0
 				windowStart = now
 			}
 		case now := <-tick100.C:
