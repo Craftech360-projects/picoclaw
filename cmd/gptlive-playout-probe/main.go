@@ -1,12 +1,11 @@
-// Command gptlive-playout-probe A/B-tests how GPT-Live output audio is paced into a
-// LiveKit track. It joins one room, talks through the same pkg/gptlive session the
-// agent uses (no tools, persona or persistence), and logs underruns every 5s so
-// -playout=old (the agent's current 100ms priming lead) and -playout=elastic can be
-// compared under the same network.
+// Command gptlive-playout-probe checks GPT-Live output playout in isolation. It joins
+// one room, talks through the same pkg/gptlive session the agent uses (no tools,
+// persona or persistence), plays the model through the same elastic playout as the
+// agent, and logs level, underruns and arrival rate every 5s.
+// See docs/gptlive-audio-jitter.md.
 //
 //	LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY must be set.
-//	gptlive-playout-probe -room probe-1 -playout old
-//	gptlive-playout-probe -room probe-1 -playout elastic
+//	gptlive-playout-probe -room probe-1 -duration 90s
 package main
 
 import (
@@ -32,8 +31,7 @@ import (
 )
 
 const (
-	trackFrame = 20 * time.Millisecond  // PCMLocalTrack takes one frame per tick, zero-padding when short
-	oldLead    = 100 * time.Millisecond // audioLeadBuffer on feat/gpt-live-go
+	trackFrame = 20 * time.Millisecond // PCMLocalTrack takes one frame per tick, zero-padding when short
 	statsEvery = 5 * time.Second
 )
 
@@ -41,14 +39,10 @@ var yes = true
 
 func main() {
 	room := flag.String("room", "gptlive-probe", "LiveKit room to join")
-	mode := flag.String("playout", "elastic", "old | elastic")
-	rate := flag.Int("rate", 16000, "session sample rate: 16000 (device) or 24000")
-	target := flag.Duration("target", 200*time.Millisecond, "elastic: playout lead to hold")
+	rate := flag.Int("rate", 24000, "model sample rate (the agent always uses 24000)")
+	target := flag.Duration("target", 200*time.Millisecond, "playout lead to hold")
 	runFor := flag.Duration("duration", 0, "exit after this long (0: run until Ctrl+C)")
 	flag.Parse()
-	if *mode != "old" && *mode != "elastic" {
-		log.Fatalf("-playout must be old or elastic, got %q", *mode)
-	}
 	env := func(k string) string {
 		v := os.Getenv(k)
 		if v == "" {
@@ -150,7 +144,7 @@ func main() {
 	if _, err := lkRoom.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{Name: "gptlive-probe"}); err != nil {
 		log.Fatalf("publish: %v", err)
 	}
-	log.Printf("joined %s, playout=%s rate=%d target=%s; waiting for a listener", *room, *mode, *rate, *target)
+	log.Printf("joined %s, rate=%d target=%s; waiting for a listener", *room, *rate, *target)
 	lt := auth.NewAccessToken(key, secret)
 	lt.SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: *room, CanPublish: &yes, CanSubscribe: &yes})
 	lt.SetIdentity("listener")
@@ -167,7 +161,7 @@ func main() {
 		case <-ctx.Done():
 		}
 	}()
-	play(ctx, sess.Audio(), track, *rate, *mode, *target)
+	play(ctx, sess.Audio(), track, *rate, *target)
 }
 
 type micWriter struct{ sess *gptlive.Session }
@@ -190,11 +184,10 @@ func toPCM16(b []byte) media.PCM16Sample {
 	return out
 }
 
-// play drains model audio into the track with the chosen strategy. The underrun
-// accounting is identical for both modes: level mirrors PCMLocalTrack's queue
-// (grows on every write, shrinks by wall time), and speech that hits an empty
-// queue is what reaches the listener as a gap or click.
-func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack, rate int, mode string, target time.Duration) {
+// play drains model audio into the track with elastic playout. level mirrors
+// PCMLocalTrack's queue (grows on every write, shrinks by wall time), and speech
+// that hits an empty queue is what reaches the listener as a gap or click.
+func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack, rate int, target time.Duration) {
 	dur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(rate) }
 	frameBytes := rate / 50 * 2
 	seg := gptlive.NewSegmenter(func() {}, func() {})
@@ -234,15 +227,6 @@ func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack
 		}
 	}
 
-	// old: port of driveSegmenter on feat/gpt-live-go
-	var leadQueue [][]byte
-	leadBytes := 0
-	priming := true
-	var bufferAhead time.Duration
-	var lastOldTick time.Time
-	oldWrite := func(pcm []byte) { bufferAhead += dur(len(pcm)); write(pcm) }
-
-	// elastic
 	var carry []byte
 
 	tick20 := time.NewTicker(trackFrame)
@@ -264,22 +248,6 @@ func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack
 			drain(now)
 			arrived += dur(len(pcm))
 			seg.Feed(pcm, dur(len(pcm)))
-			if mode == "old" {
-				if priming {
-					leadQueue = append(leadQueue, pcm)
-					leadBytes += len(pcm)
-					if dur(leadBytes) >= oldLead {
-						priming = false
-						for _, q := range leadQueue {
-							oldWrite(q)
-						}
-						leadQueue, leadBytes = nil, 0
-					}
-				} else {
-					oldWrite(pcm)
-				}
-				continue
-			}
 			carry = append(carry, pcm...)
 			n := len(carry) / frameBytes * frameBytes
 			if n == 0 {
@@ -306,27 +274,14 @@ func play(ctx context.Context, audio <-chan []byte, track *lkmedia.PCMLocalTrack
 			lastTick20 = now
 			drain(now)
 			if elapsed := now.Sub(windowStart); elapsed >= statsEvery {
-				log.Printf("playout=%s level=%dms underruns=%d underrun=%dms arrival_ratio=%.3f max_tick_gap=%dms padded=%dms dropped=%dms",
-					mode, level.Milliseconds(), underruns, underrunDur.Milliseconds(), arrived.Seconds()/elapsed.Seconds(),
+				log.Printf("level=%dms underruns=%d underrun=%dms arrival_ratio=%.3f max_tick_gap=%dms padded=%dms dropped=%dms",
+					level.Milliseconds(), underruns, underrunDur.Milliseconds(), arrived.Seconds()/elapsed.Seconds(),
 					maxTickGap.Milliseconds(), padded.Milliseconds(), dropped.Milliseconds())
 				underruns, underrunDur, maxTickGap, arrived, padded, dropped = 0, 0, 0, 0, 0, 0
 				windowStart = now
 			}
 		case now := <-tick100.C:
 			seg.Tick(now)
-			if mode != "old" {
-				continue
-			}
-			if !lastOldTick.IsZero() {
-				bufferAhead -= now.Sub(lastOldTick)
-				if bufferAhead < 0 {
-					bufferAhead = 0
-				}
-			}
-			lastOldTick = now
-			if bufferAhead == 0 && !priming {
-				priming = true
-			}
 		}
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,64 +54,6 @@ const greetingFallbackDelay = 3 * time.Second
 // the model to finish speaking its goodbye before leaving anyway.
 const farewellBurstCloseTimeout = 6 * time.Second
 
-// audioLeadBuffer is the playout lead driveSegmenter holds ahead of the local
-// track before it ever calls WriteSample, and again after any mid-utterance
-// starvation (see driveSegmenter's own doc comment for the full mechanism).
-//
-// Root cause this exists for: driveSegmenter used to hand every PCM chunk
-// straight from the GPT-Live websocket to lkmedia.PCMLocalTrack the instant
-// it arrived. That track paces playout on its own fixed ticker
-// (server-sdk-go's pcmlocaltrack.go, processSamples/getFrameFromChunkBuffer)
-// and emits a frame of pure silence whenever its buffer is empty at a tick —
-// and the MQTT gateway downstream drops silent frames before they ever reach
-// the device. So any burstiness in OpenAI's own delivery (confirmed present:
-// see the DEBUG arrival-vs-realtime log below) became silence in the track,
-// got dropped by the gateway, and starved the device even though not one
-// packet was lost end to end. The Python livekit-agents framework, observed
-// fine on the same gateway, buffers about a second ahead of playout; we
-// buffered nothing.
-//
-// 500ms was deliberately less than that second, but it was not free: every
-// reply reached the child roughly that much later than it would with zero
-// lead. That added latency was the accepted trade for smooth, un-dropped
-// playout — a stuttering greeting is worse than a marginally slower one — for
-// as long as the burstiness it was covering for was believed to be real and
-// upstream.
-//
-// It was not, or at least not entirely. GPT-Live audio jitter was root-caused
-// (see pkg/gptlive/session.go's EventOutputAudioDelta comment) to the read
-// goroutine there blocking on a slow downstream consumer, which throttled the
-// websocket read itself via TCP backpressure — what this pipeline measured as
-// OpenAI's own arrival rate was largely our own consumption rate. A
-// standalone probe against OpenAI's real delivery (dev box, 4 configs at
-// 16kHz/24kHz, with/without delegation, short/20KB instructions, ~44s of
-// continuous speech each) measured an arrival ratio of 0.988-1.001 with ZERO
-// gaps over 200ms in every config, against 0.66 measured on this worker at
-// the same time under the same load. OpenAI delivers, for all practical
-// purposes, in real time with nothing bursty to absorb.
-//
-// Now that pkg/gptlive's read goroutine can never be blocked by a slow
-// consumer (it hands audio to an internal queue that never blocks, drained
-// into Audio() by a separate goroutine — see audioQueue in session.go), the
-// jitter this buffer was actually covering for is gone at the source. What is
-// left to absorb is purely local: goroutine-scheduling gaps between that
-// feeder, this loop, and the local track's own playout ticker — on the order
-// of a scheduling quantum, not hundreds of milliseconds. So the lead is CUT,
-// not removed outright, to exactly one driveSegmenter tick: enough slack to
-// smooth a missed scheduling window (the same reasoning the 100ms ticker
-// period below already rests on) without paying for jitter that the probe
-// shows does not exist upstream anymore. This recovers 400 of the previous
-// 500ms of reply latency.
-const audioLeadBuffer = 100 * time.Millisecond
-
-// audioLeadQueueCap bounds how much audio driveSegmenter will hold in its
-// pre-lead queue, so a source that never lets audioLeadBuffer's duration
-// check trip (an unexpectedly tiny or zero-length chunk stream, or any other
-// bug in that arithmetic) cannot grow the queue's memory without limit. A few
-// seconds is far more than audioLeadBuffer itself ever needs, so this is a
-// backstop, not a tuning knob.
-const audioLeadQueueCap = 3 * time.Second
-
 // gptLiveDirectiveSupersedes prefixes every Door directive pushed into the
 // voice model's live instructions.
 //
@@ -148,7 +89,7 @@ type gptLivePipeline struct {
 	sess *gptlive.Session
 	seg  *gptlive.Segmenter
 
-	// mic-in flow counters for driveElastic's "audio flow" log (written by WriteSample)
+	// mic-in flow counters for driveSegmenter's "audio flow" log (written by WriteSample)
 	micSamples, micLast, micMaxGap, micMaxPush atomic.Int64
 
 	micMu  sync.Mutex
@@ -591,25 +532,27 @@ func (p *gptLivePipeline) pumpAudioOut(ctx context.Context) {
 	if p.localTrack != nil {
 		track = p.localTrack
 	}
-	// ponytail: env switch for the A/B test; drop it and driveSegmenter's lead buffer once elastic wins
-	if strings.EqualFold(os.Getenv("PICOCLAW_GPTLIVE_PLAYOUT"), "elastic") {
-		p.driveElastic(ctx, p.sess.Audio(), ticker.C, track)
-		return
-	}
 	p.driveSegmenter(ctx, p.sess.Audio(), ticker.C, track)
 }
 
-// elasticPlayoutTarget is the lead driveElastic holds in the local track. GPT-Live
+// elasticPlayoutTarget is the lead driveSegmenter holds in the local track. GPT-Live
 // delivers at real time (0.96-1.02 measured), so a lead only refills if we add it:
 // silence frames are stretched when the lead is short and dropped when it is long,
 // and speech is never held or dropped. livekit-agents' room output uses 200ms too.
+// docs/gptlive-audio-jitter.md has the measurements.
 const elasticPlayoutTarget = 200 * time.Millisecond
 
-// driveElastic is driveSegmenter with the priming lead replaced by an elastic one,
-// and every write cut to whole 20ms frames so PCMLocalTrack never zero-pads a
-// partial frame mid-speech. Feed happens at arrival: the gate must classify a
-// chunk before we decide whether it is silence we may stretch or drop.
-func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte, ticks <-chan time.Time, track localOutTrackWriter) {
+// driveSegmenter is the single loop that drains model audio into the local track
+// and drives the Segmenter. segment.go requires Feed and Tick to be serialized;
+// reading the audio channel and the ticker in one select makes that structural.
+// The channels and track are parameters so tests can drive it without a dialed
+// session or a real *lkmedia.PCMLocalTrack.
+//
+// Playout is elastic (see elasticPlayoutTarget), and every write is cut to whole
+// 20ms frames so PCMLocalTrack never zero-pads a partial frame mid-speech. Feed
+// happens at arrival: the gate must classify a chunk before we decide whether it
+// is silence we may stretch or drop.
+func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byte, ticks <-chan time.Time, track localOutTrackWriter) {
 	frameDur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(p.spec.SampleRate) }
 	frameBytes := p.spec.SampleRate / 50 * 2
 	var carry []byte
@@ -617,8 +560,17 @@ func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte,
 	var levelAt time.Time
 	underruns, writeErrs := 0, 0
 	starved := false
+	// leave() closes the local track before this loop stops, so every frame still
+	// queued fails to write: log the first, count the rest, report once on exit.
+	defer func() {
+		if writeErrs > 1 {
+			logger.WarnCF("livekit", "gptlive: further writes to the local track failed", map[string]any{
+				"room":       p.rs.roomName(),
+				"suppressed": writeErrs - 1,
+			})
+		}
+	}()
 
-	// ponytail: diagnostic window for the jitter hunt; delete with the env switch
 	const flowEvery = 5 * time.Second
 	windowStart, lastArrival := time.Now(), time.Time{}
 	var outArrived, outMaxGap time.Duration
@@ -709,201 +661,7 @@ func (p *gptLivePipeline) driveElastic(ctx context.Context, audio <-chan []byte,
 			p.seg.Tick(now)
 			logFlow(now)
 		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// driveSegmenter is the single loop that both drains audio and drives the
-// Segmenter: segment.go documents, verbatim, that Feed and Tick "must be
-// serialized... not safe for concurrent use". Task 12 review found them
-// running on two separate goroutines (pumpAudioOut and a since-removed
-// tickSegmenter), which could run Feed and Tick concurrently and let a burst
-// get closed twice — silently dropping the second pass's transcript. Reading
-// both the audio channel and the ticker in one select serializes every call
-// into a single goroutine, structurally: Feed and Tick can never execute
-// concurrently because nothing but this loop ever calls either one. Taking
-// the channels as parameters (rather than reading p.sess.Audio() and a ticker
-// it owns) is what lets TestDriveSegmenterSerializesFeedAndTick exercise this
-// under concurrent producers without a real dialed session. The same is true
-// of the track parameter added below: it lets the lead-buffer tests substitute
-// a fake in place of a real *lkmedia.PCMLocalTrack.
-//
-// Lead buffer (see audioLeadBuffer's own doc comment for the starvation chain
-// this fixes): every chunk arriving off audio is held in leadQueue, unwritten,
-// until leadQueue holds audioLeadBuffer's worth of audio — "priming" below —
-// at which point the whole queue is flushed to the track in one go and every
-// further chunk is written the moment it arrives, keeping the track's own
-// buffer topped up rather than fed just-in-time. bufferAhead tracks, in wall-
-// clock terms, how far ahead of real time those writes have put the track: it
-// grows by a chunk's own duration on every write and decays by real elapsed
-// time on every tick. If it ever reaches zero while a burst is still open, the
-// track's buffer is presumed to have run dry despite everything this loop
-// already did — a real gap in GPT-Live's own delivery — so priming is
-// re-armed for whatever arrives next rather than writing a single fresh chunk
-// into an already-starving track: one chunk followed by another gap is
-// exactly the short-lived padding the gateway's isSilent check drops, so a
-// single dribbled write buys nothing and is worse than waiting to refill.
-//
-// p.seg.Feed is called here, at write time, deliberately not at arrival time:
-// the ADR makes the Segmenter the one boundary for agent-state transitions,
-// and those must track what the device will actually receive, not what
-// merely arrived from the websocket up to audioLeadBuffer earlier.
-func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byte, ticks <-chan time.Time, track localOutTrackWriter) {
-	frameDur := func(n int) time.Duration { return time.Duration(n/2) * time.Second / time.Duration(p.spec.SampleRate) }
-	// leave() closes the local track before Close's cancel() has stopped this
-	// loop, so every audio frame still queued at that moment fails to write —
-	// a burst of identical warnings on EVERY teardown, one per frame. Log the
-	// first and count the rest, then report the total once on the way out.
-	writeErrs := 0
-	defer func() {
-		if writeErrs > 1 {
-			logger.WarnCF("livekit", "gptlive: further writes to the local track failed", map[string]any{
-				"room":       p.rs.roomName(),
-				"suppressed": writeErrs - 1,
-			})
-		}
-	}()
-
-	// maxLeadQueueBytes backs audioLeadQueueCap: computed from byte length
-	// rather than trusting frameDur's own duration arithmetic, so a bug there
-	// (or a degenerate zero-length chunk stream) cannot defeat the very bound
-	// meant to catch it.
-	maxLeadQueueBytes := int(audioLeadQueueCap.Seconds() * float64(p.spec.SampleRate) * 2)
-
-	var leadQueue [][]byte
-	leadQueuedBytes := 0
-	priming := true // session start is itself the first "after a starvation" case
-
-	var bufferAhead time.Duration
-	var lastTick time.Time
-
-	// Arrival-vs-realtime accounting for the DEBUG log below (bytes actually
-	// received off the websocket, against wall-clock time, independent of
-	// however long this loop then held them before writing): reset whenever a
-	// fresh run of arrivals begins, logged once per Segmenter burst so the
-	// next dev-box test yields direct evidence of whether OpenAI delivers
-	// faster or slower than real time.
-	//
-	// The window this measures is first-arrival to last-arrival, deliberately
-	// NOT "first arrival to now": logArrivalRatio runs when the Segmenter
-	// closes the burst, which is segmentIdle (800ms, segment.go) after the
-	// last Feed, and Feed itself now happens at write time, up to
-	// audioLeadBuffer (~500ms) after the chunk it feeds actually arrived.
-	// Neither of those delays has anything to do with how fast audio arrived
-	// off the websocket, so counting them into elapsed drags a true ratio near
-	// 1.0 down to something that looks like OpenAI delivering below realtime
-	// when it isn't. lastArrivalAt is stamped on every arrival (not on Feed),
-	// so lastArrivalAt.Sub(arrivalStart) covers only the arrivals themselves.
-	var arrivalStart time.Time
-	var lastArrivalAt time.Time
-	arrivalBytes := 0
-	logArrivalRatio := func() {
-		if arrivalStart.IsZero() || p.spec.SampleRate <= 0 {
-			return
-		}
-		arrivalSpan := lastArrivalAt.Sub(arrivalStart)
-		burstWall := time.Since(arrivalStart)
-		bytesSeen := arrivalBytes
-		arrivalStart = time.Time{}
-		lastArrivalAt = time.Time{}
-		arrivalBytes = 0
-		if arrivalSpan <= 0 {
-			// A single-chunk run (or clock oddity) has zero arrival span: no
-			// meaningful rate to report, and dividing by it would be either a
-			// crash or a nonsense ratio.
-			return
-		}
-		expectedBytesPerSec := float64(p.spec.SampleRate) * 2 // PCM16 mono: 2 bytes/sample
-		actualBytesPerSec := float64(bytesSeen) / arrivalSpan.Seconds()
-		logger.DebugCF("livekit", "gptlive: audio arrival rate vs realtime", map[string]any{
-			"room":            p.rs.roomName(),
-			"ratio":           actualBytesPerSec / expectedBytesPerSec,
-			"bytes_received":  bytesSeen,
-			"elapsed_ms":      arrivalSpan.Milliseconds(),
-			"arrival_span_ms": arrivalSpan.Milliseconds(),
-			"burst_wall_ms":   burstWall.Milliseconds(),
-			"sample_rate":     p.spec.SampleRate,
-		})
-	}
-
-	// write pushes one chunk to the track (if any) and to the segmenter, in
-	// that order specified by requirement 4 above (Feed at write time), and
-	// reports a Segmenter burst that closes as a result so the caller can log
-	// the arrival-rate ratio for it.
-	write := func(pcm []byte) {
-		wasOpen := p.seg.Open()
-		p.seg.Feed(pcm, frameDur(len(pcm)))
-		if wasOpen && !p.seg.Open() {
-			logArrivalRatio()
-		}
-		bufferAhead += frameDur(len(pcm))
-		if track != nil {
-			if err := track.WriteSample(bytesToPCM16(pcm)); err != nil {
-				writeErrs++
-				if writeErrs == 1 {
-					logger.WarnCF("livekit", "gptlive: write to local track", map[string]any{"error": err.Error()})
-				}
-			}
-		}
-	}
-	flushQueue := func() {
-		for _, pcm := range leadQueue {
-			write(pcm)
-		}
-		leadQueue = nil
-		leadQueuedBytes = 0
-	}
-
-	for {
-		select {
-		case pcm, ok := <-audio:
-			if !ok {
-				// Channel close: flush whatever is queued regardless of the
-				// lead, so the tail of the last utterance is never abandoned
-				// waiting for a lead that will now never arrive.
-				flushQueue()
-				return
-			}
-			if arrivalStart.IsZero() {
-				arrivalStart = time.Now()
-			}
-			lastArrivalAt = time.Now()
-			arrivalBytes += len(pcm)
-			if priming {
-				leadQueue = append(leadQueue, pcm)
-				leadQueuedBytes += len(pcm)
-				if frameDur(leadQueuedBytes) >= audioLeadBuffer || leadQueuedBytes >= maxLeadQueueBytes {
-					priming = false
-					flushQueue()
-				}
-			} else {
-				write(pcm)
-			}
-		case now := <-ticks:
-			if !lastTick.IsZero() {
-				bufferAhead -= now.Sub(lastTick)
-				if bufferAhead < 0 {
-					bufferAhead = 0
-				}
-			}
-			lastTick = now
-			if bufferAhead == 0 && !priming {
-				// The lead this loop built up has been fully spent against
-				// wall-clock time: re-arm rather than let the next arriving
-				// chunk dribble straight through into a track that is, per
-				// this same accounting, already starving.
-				priming = true
-			}
-			wasOpen := p.seg.Open()
-			p.seg.Tick(now)
-			if wasOpen && !p.seg.Open() {
-				logArrivalRatio()
-			}
-		case <-ctx.Done():
-			// Drain fully so teardown does not hang and no queued audio is
-			// abandoned, matching the channel-close path above.
-			flushQueue()
+			write(carry) // the last partial frame, so teardown never abandons audio
 			return
 		}
 	}

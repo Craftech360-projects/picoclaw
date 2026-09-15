@@ -146,8 +146,8 @@ type Session struct {
 // audioHandoffCapSeconds bounds how much undelivered model audio audioQueue
 // will hold when Audio()'s consumer falls behind, so a stalled consumer leaks
 // a few seconds of PCM, never an unbounded amount. A few seconds is already
-// generous slack — driveSegmenter's own lead buffer (pkg/livekit) only ever
-// needs a few hundred milliseconds of it — and is chosen in SECONDS, not
+// generous slack — driveSegmenter's elastic playout (pkg/livekit) holds at most
+// a few hundred milliseconds — and is chosen in SECONDS, not
 // bytes or chunk count, so the actual memory bound (computed in Dial, once
 // the session's sample rate is known) means the same thing at 16kHz and
 // 24kHz.

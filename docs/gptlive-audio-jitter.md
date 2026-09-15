@@ -1,7 +1,9 @@
 # GPT-Live response audio jitter — investigation and fix
 
 Status: fixed on `feat/gptlive-elastic-playout` (commits `be80bacc`, `1dee308d`), verified smooth in a
-local admin-dashboard session on 2026-09-15. Device (ESP32 → mqtt-gateway) test still pending.
+local admin-dashboard session on 2026-09-15. Elastic playout has since become the only playout path
+(the old priming lead and the `PICOCLAW_GPTLIVE_PLAYOUT` switch are gone). Device (ESP32 →
+mqtt-gateway) test still pending.
 
 ## TL;DR
 
@@ -28,7 +30,7 @@ browser / ESP32 mic
    ▼
 LiveKit room ──► agent: PCMRemoteTrack ──► WriteSample ──► gptlive.Session.PushAudio ──► OpenAI GPT-Live (websocket)
                                                                                                    │
-LiveKit room ◄── agent: PCMLocalTrack ◄── driveSegmenter / driveElastic ◄── Session.Audio() ◄──────┘
+LiveKit room ◄── agent: PCMLocalTrack ◄── driveSegmenter (elastic)  ◄── Session.Audio() ◄──────┘
    │
    ▼
 browser speaker / mqtt-gateway (drops all-silent frames) ──► ESP32
@@ -57,8 +59,9 @@ Two facts about the pieces matter:
 ### 1. Playout, in isolation (probe)
 
 `cmd/gptlive-playout-probe` joins a room and talks through the real `pkg/gptlive` session with no
-tools, persona or persistence. It runs either the old playout (`-playout old`, a port of
-`driveSegmenter`) or the new one (`-playout elastic`) and logs every 5 s: queued level, underruns,
+tools, persona or persistence. At the time it ran either the old playout (`-playout old`, a port of
+the old `driveSegmenter`) or the new one (`-playout elastic`; the old mode has since been removed) and
+logs every 5 s: queued level, underruns,
 arrival ratio, ticker gaps. A headless `lk room join --auto-subscribe` listener is enough; the probe
 feeds steady silence as its input so the model has a clock.
 
@@ -118,15 +121,15 @@ packets during silence. That is the irregular clock the model was following befo
 
 ## The fix
 
-### Elastic playout — `pkg/livekit/gptlive_pipeline.go` `driveElastic` (`be80bacc`)
+### Elastic playout — `pkg/livekit/gptlive_pipeline.go` `driveSegmenter` (`be80bacc`)
 
 - Track a `level` that mirrors `PCMLocalTrack`'s queue: plus every write, minus wall time.
 - Hold a 200 ms lead (`elasticPlayoutTarget`, the same as livekit-agents' room output queue).
 - Correct it **only while the noise gate says the model is silent**: pad silence when `level` is under
   the target, drop silence when it is over twice the target. Speech is never held or dropped.
 - Write whole 20 ms frames only, carrying the remainder, so the track never zero-pads mid-speech.
-- Enabled with `PICOCLAW_GPTLIVE_PLAYOUT=elastic`; the old `driveSegmenter` path is the default until
-  the device test passes.
+- Originally behind `PICOCLAW_GPTLIVE_PLAYOUT=elastic`; now the only playout. The old priming lead
+  (`audioLeadBuffer`, `audioLeadQueueCap`) and its tests were deleted.
 
 ### Python-style input — `pumpMicIn` + `gptlive_spec.go` (`1dee308d`)
 
@@ -153,7 +156,7 @@ one 169 ms spike). Audibly smooth.
 
 ## Reading the diagnostics
 
-### Agent — `gptlive: audio flow` (elastic playout only)
+### Agent — `gptlive: audio flow`
 
 | field | meaning | healthy |
 |---|---|---|
@@ -190,18 +193,16 @@ Realtime provider row or the dev box `.env`):
 ```powershell
 $env:OPENAI_API_KEY = "<gpt-live key>"
 $env:PICOCLAW_LIVEKIT_PIPELINE = "gptlive"
-$env:PICOCLAW_GPTLIVE_PLAYOUT = "elastic"     # "old" for the before comparison
 .\bin\picoclaw-livekit-gptlive.exe -agent-name cheeko-gptlive-go -config .\config.json -log-level info
 ```
 
 Then admin dashboard → GPT-Live tab → Agent `cheeko-gptlive-go` → ask for a long story.
 
-Probe A/B without the dashboard:
+Playout smoke test without the dashboard:
 
 ```powershell
 $env:LIVEKIT_URL = "ws://127.0.0.1:7880"; $env:LIVEKIT_API_KEY = "<key>"; $env:LIVEKIT_API_SECRET = "<secret>"
-.\bin\gptlive-playout-probe.exe -room probe-1 -playout old -duration 90s
-.\bin\gptlive-playout-probe.exe -room probe-1 -playout elastic -duration 90s
+.\bin\gptlive-playout-probe.exe -room probe-1 -duration 90s
 ```
 
 Join with the printed `listen:` link, or headless:
@@ -227,8 +228,6 @@ Join with the printed `listen:` link, or headless:
 
 1. Test through the real ESP32 → mqtt-gateway path on the dev box. The gateway drops all-zero frames;
    check whether elastic's silence padding interacts badly with device playback.
-2. Once that passes, make elastic playout the default and delete `driveSegmenter`'s lead buffer,
-   `audioLeadBuffer`/`audioLeadQueueCap` and the `PICOCLAW_GPTLIVE_PLAYOUT` switch.
-3. Decide whether the `gptlive: audio flow` log stays (info) or drops to debug.
-4. Consider a unit test for `pumpMicIn`; it currently talks to the concrete `*gptlive.Session`, so it
+2. Decide whether the `gptlive: audio flow` log stays (info) or drops to debug.
+3. Consider a unit test for `pumpMicIn`; it currently talks to the concrete `*gptlive.Session`, so it
    needs a small push seam first.
