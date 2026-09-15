@@ -21,6 +21,7 @@ type GPTLivePersonaInput struct {
 	Accent         string // "indian" | "default" (anything else behaves like "default")
 	BankBlock      string // RenderQuizQuestions / RenderContentBank output, may be empty
 	HasQuiz        bool
+	SingleModel    bool // Grok Voice / Gemini Live: one model speaks and calls the tools itself
 }
 
 // GPTLivePersona is everything that is immutable once the session starts.
@@ -101,6 +102,40 @@ func gptLiveDelegationBlock(language string, hasQuiz bool) string {
 	return b.String()
 }
 
+// gptLiveQuizJudging is the answer-judging rule for single-model vendors (Grok Voice,
+// Gemini Live): with no backend model to compare the child's words against the bank
+// answer, this is the guidance the one model itself uses to judge whether an answer counts.
+const gptLiveQuizJudging = "Judge the meaning, not the exact words: a young child's synonym, a close paraphrase, or an answer " +
+	"a kind teacher would accept (\"rain\" for water falling from the sky) is correct."
+
+// gptLiveToolsBlock replaces gptLiveDelegationBlock for vendors whose one model calls the tools itself.
+func gptLiveToolsBlock(language string, hasQuiz bool) string {
+	if strings.TrimSpace(language) == "" {
+		language = "English"
+	}
+	var b strings.Builder
+	b.WriteString("<tools>\n")
+	b.WriteString("You have tools, and this overrides any line above that says you cannot use tools. Use them silently:\n")
+	b.WriteString("never mention a tool, a lookup or a file to the child.\n")
+	b.WriteString("Use web search for the current time, date, weather, news or any fact you are not sure about.\n")
+	b.WriteString("Call remember_child_fact when the child tells you something worth remembering about themselves.\n")
+	b.WriteString("Answer greetings, small talk, jokes and simple questions yourself.\n")
+	if hasQuiz {
+		b.WriteString("Every time the child answers a quiz question, call quiz_score_answer with question_id (the id\n")
+		b.WriteString("shown in parentheses next to the question in the bank below, e.g. \"11\" for \"(id=11)\"),\n")
+		b.WriteString("result=correct, miss or revealed (revealed = the child asked for the answer), and the child's\n")
+		b.WriteString("words as transcript, then do exactly what the result tells you to do next: ask plainly,\n")
+		b.WriteString("offer the two choices, explain then re-ask, or reveal and move on. Never decide on your own whether an\n")
+		b.WriteString("answer was right without calling it. " + gptLiveQuizJudging + "\n")
+		b.WriteString("A short reply right after a question, even \"I don't know\", is an answer attempt: score it.\n")
+		b.WriteString("Call quiz_status if you are unsure which question is pending.\n")
+	}
+	fmt.Fprintf(&b, "Speak %s with the child unless they clearly switch language.\n", language)
+	b.WriteString("</tools>\n\n")
+	b.WriteString(gptLiveMemoOverride)
+	return b.String()
+}
+
 // gptLiveGreetingGuidance renders, for the Voice channel, what the model should say the
 // first time it is asked to greet the child. Session-start instructions (Voice) carry no
 // length cap, unlike a session.commentary.append (capped at 500 tokens by the service —
@@ -152,7 +187,11 @@ func stripGPTLiveMachineLines(s string) string {
 // produces changes for the rest of the session.
 func BuildGPTLivePersona(in GPTLivePersonaInput) GPTLivePersona {
 	base := stripGPTLiveMachineLines(agent.NewContextBuilder(in.Workspace).BuildSystemPrompt())
-	parts := []string{base, gptLiveDelegationBlock(in.LanguageName, in.HasQuiz)}
+	rules := gptLiveDelegationBlock(in.LanguageName, in.HasQuiz)
+	if in.SingleModel {
+		rules = gptLiveToolsBlock(in.LanguageName, in.HasQuiz)
+	}
+	parts := []string{base, rules}
 	if trimmedBank := strings.TrimSpace(in.BankBlock); trimmedBank != "" {
 		if voiceBank := strings.TrimSpace(stripGPTLiveMachineLines(in.BankBlock)); voiceBank != "" {
 			parts = append(parts, voiceBank)
@@ -162,15 +201,18 @@ func BuildGPTLivePersona(in GPTLivePersonaInput) GPTLivePersona {
 		parts = append(parts, strings.TrimSpace(gptLiveAccentIndian))
 	}
 	parts = append(parts, gptLiveGreetingGuidance(in.CharacterName, in.GreetingPrompt))
-	backend := "You handle the work a voice model delegates while it talks to a child aged 3 to 16. " +
-		"Use tools when current information is required or when the child says something worth remembering. " +
-		"Reply with one or two short, friendly, child-safe sentences the voice model can read out."
-	if in.HasQuiz {
-		backend += " For quiz answers, compare the child's words with the bank answer and accepted answers, " +
-			"then call quiz_score_answer with result=correct or result=miss; call quiz_status if unsure which question is pending."
-	}
-	if strings.TrimSpace(in.BankBlock) != "" {
-		backend += "\n\n" + in.BankBlock
+	backend := ""
+	if !in.SingleModel {
+		backend = "You handle the work a voice model delegates while it talks to a child aged 3 to 16. " +
+			"Use tools when current information is required or when the child says something worth remembering. " +
+			"Reply with one or two short, friendly, child-safe sentences the voice model can read out."
+		if in.HasQuiz {
+			backend += " For quiz answers, compare the child's words with the bank answer and accepted answers, " +
+				"then call quiz_score_answer with result=correct or result=miss; call quiz_status if unsure which question is pending."
+		}
+		if strings.TrimSpace(in.BankBlock) != "" {
+			backend += "\n\n" + in.BankBlock
+		}
 	}
 	return GPTLivePersona{
 		Voice:    strings.Join(parts, "\n\n---\n\n"),

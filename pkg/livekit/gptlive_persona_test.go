@@ -329,3 +329,33 @@ func TestBuildGPTLivePersonaEmptyGreetingPrompt(t *testing.T) {
 		t.Errorf("empty greeting prompt:\n got %q\nwant %q", p.Greeting, want)
 	}
 }
+
+func TestBuildGPTLivePersonaSingleModelFoldsToolsIntoOnePrompt(t *testing.T) {
+	ws := t.TempDir()
+	quiz := BuildGPTLivePersona(GPTLivePersonaInput{
+		Workspace: ws, CharacterName: "Quizzy", LanguageName: "Hindi", HasQuiz: true, SingleModel: true,
+		BankBlock: "## Quiz Questions\n1. (id=11) How many legs does a spider have? Answer: eight",
+	})
+	for _, want := range []string{"<tools>", "quiz_score_answer", "quiz_status", "remember_child_fact",
+		"Judge the meaning", "Speak Hindi", "(id=11)", "<memo_override>"} {
+		if !strings.Contains(quiz.Voice, want) {
+			t.Errorf("single-model Voice lacks %q", want)
+		}
+	}
+	if strings.Contains(quiz.Voice, "<delegation>") || strings.Contains(quiz.Voice, "delegate so the answer gets scored") {
+		t.Error("single-model Voice must not tell the model to delegate")
+	}
+	if quiz.Backend != "" {
+		t.Errorf("single-model Backend = %q, want empty", quiz.Backend)
+	}
+
+	plain := BuildGPTLivePersona(GPTLivePersonaInput{Workspace: ws, CharacterName: "Cheeko", SingleModel: true})
+	if strings.Contains(plain.Voice, "quiz_score_answer") || !strings.Contains(plain.Voice, "remember_child_fact") {
+		t.Error("a character without a quiz gets the tool rules but no quiz rules")
+	}
+
+	delegate := BuildGPTLivePersona(GPTLivePersonaInput{Workspace: ws, CharacterName: "Cheeko"})
+	if !strings.Contains(delegate.Voice, "<delegation>") || strings.Contains(delegate.Voice, "<tools>") || delegate.Backend == "" {
+		t.Error("GPT-Live (SingleModel=false) keeps delegation and backend instructions")
+	}
+}
