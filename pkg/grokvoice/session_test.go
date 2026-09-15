@@ -295,6 +295,147 @@ func TestGrokTwoToolCallsYieldOneResponseCreateAfterDone(t *testing.T) {
 	}
 }
 
+// interruptExec blocks a named call on release, so a test can control exactly
+// when a "slow" tool finishes relative to other server-sent events, while any
+// other call answers immediately.
+type interruptExec struct {
+	slowName string
+	release  chan struct{}
+}
+
+func (e interruptExec) Execute(_ context.Context, name string, _ map[string]any) (string, bool) {
+	if name == e.slowName {
+		<-e.release
+	}
+	return "ran " + name, false
+}
+
+// TestGrokSlowToolAnsweredDuringInterruptingResponseDefersCreate covers the
+// round-2 review finding: response A calls a slow tool (c1); A's response.done
+// arrives before the tool returns; the child interrupts and the server starts
+// response B while c1 is still running. c1's output must still reach the
+// server, but the response.create that resumes the conversation must wait for
+// B's own response.done — sending (and having it rejected) while B is active,
+// or losing track of c1 once B's own bookkeeping overwrote it, was the bug a
+// single shared, unkeyed continuation state produced.
+//
+// The test is deterministic (no reliance on wall-clock timing to order the
+// slow tool's completion against the network): before releasing c1, it first
+// waits to receive the tool output for a second, fast call (c-sync) that is
+// only registered after response B's response.created. Because a single
+// reader goroutine processes frames on one connection strictly in the order
+// they were written, seeing c-sync's output proves the client has already
+// processed response.created for B — and so has already latched "a response
+// is active" — before c1 is ever released.
+func TestGrokSlowToolAnsweredDuringInterruptingResponseDefersCreate(t *testing.T) {
+	fromClient := make(chan map[string]any, 16)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		go func() {
+			defer close(fromClient)
+			for {
+				var m map[string]any
+				if c.ReadJSON(&m) != nil {
+					return
+				}
+				fromClient <- m
+			}
+		}()
+		recv := func() map[string]any {
+			select {
+			case m, ok := <-fromClient:
+				if !ok {
+					t.Errorf("server: client connection closed early")
+				}
+				return m
+			case <-time.After(testTimeout):
+				t.Errorf("server: timed out waiting for a client message")
+				return nil
+			}
+		}
+		expectNone := func(d time.Duration) {
+			select {
+			case m, ok := <-fromClient:
+				if ok {
+					t.Errorf("unexpected client message: %v", m)
+				}
+			case <-time.After(d):
+			}
+		}
+		toolOutputCallID := func(m map[string]any) (string, bool) {
+			if m == nil || m["type"] != "conversation.item.create" {
+				return "", false
+			}
+			item, _ := m["item"].(map[string]any)
+			id, _ := item["call_id"].(string)
+			return id, id != ""
+		}
+
+		if recv() == nil { // session.update
+			return
+		}
+
+		_ = c.WriteJSON(map[string]any{"type": "response.created"}) // response A starts
+		_ = c.WriteJSON(map[string]any{"type": "response.function_call_arguments.done", "call_id": "c1", "name": "slow_tool", "arguments": "{}"})
+		_ = c.WriteJSON(map[string]any{"type": "response.done"}) // A finishes; c1 (slow_tool) is still outstanding
+
+		_ = c.WriteJSON(map[string]any{"type": "response.created"}) // the child interrupts; response B starts
+		_ = c.WriteJSON(map[string]any{"type": "response.function_call_arguments.done", "call_id": "c-sync", "name": "fast_tool", "arguments": "{}"})
+
+		if id, ok := toolOutputCallID(recv()); !ok || id != "c-sync" {
+			t.Errorf("expected c-sync's tool output first (proves response.created for B was already processed), got call_id=%q ok=%v", id, ok)
+			return
+		}
+
+		close(release) // only now is it safe to let the slow tool (c1) finish
+
+		if id, ok := toolOutputCallID(recv()); !ok || id != "c1" {
+			t.Errorf("expected c1's tool output, got call_id=%q ok=%v", id, ok)
+			return
+		}
+
+		// response.create must be withheld here: B is still active. The old
+		// shared, unkeyed state would have sent one right now and had it
+		// rejected by the protocol.
+		expectNone(150 * time.Millisecond)
+
+		_ = c.WriteJSON(map[string]any{"type": "response.done"}) // B finishes
+
+		m := recv() // the single, deferred response.create
+		if m == nil {
+			return
+		}
+		if m["type"] != "response.create" {
+			t.Errorf("expected response.create, got %v", m)
+		}
+		expectNone(150 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	s, err := Dial(context.Background(), Config{
+		APIKey: "k", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Executor: interruptExec{slowName: "slow_tool", release: release},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the fake server to finish")
+	}
+}
+
 // TestGrokAgentTextResetsAcrossResponses covers code-review finding 2: agentText
 // must not accumulate across responses, including when item_id is absent and every
 // delta would otherwise land under the same "" key for the life of the session.
