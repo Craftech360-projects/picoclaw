@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // managerRealtimeProvider is a realtime_providers row. /livekit/providers/active names it
@@ -71,15 +72,7 @@ func realtimeChoiceFromRow(r managerRealtimeProvider) realtimeChoice {
 // no key falls back to GPT-Live on an openai row that has one (the active row first); with none,
 // the choice carries an empty key and buildGPTLiveSpec fails the session.
 func chooseRealtime(active *managerRealtimeProvider, rows []managerRealtimeProvider, requested string) realtimeChoice {
-	row := active
-	if requested = strings.TrimSpace(requested); requested != "" {
-		for i := range rows {
-			if rows[i].ProviderName == requested {
-				row = &rows[i]
-				break
-			}
-		}
-	}
+	row, _ := pickRealtimeRow(active, rows, requested)
 	var r managerRealtimeProvider
 	if row != nil {
 		r = *row
@@ -99,6 +92,60 @@ func chooseRealtime(active *managerRealtimeProvider, rows []managerRealtimeProvi
 		}
 	}
 	return realtimeChoice{Vendor: "openai"}
+}
+
+// pickRealtimeRow returns the row whose provider_name matches requested (trimmed, case-insensitive),
+// else active. found reports whether a non-blank requested name matched a row.
+func pickRealtimeRow(active *managerRealtimeProvider, rows []managerRealtimeProvider, requested string) (row *managerRealtimeProvider, found bool) {
+	if requested = strings.TrimSpace(requested); requested != "" {
+		for i := range rows {
+			if strings.EqualFold(strings.TrimSpace(rows[i].ProviderName), requested) {
+				return &rows[i], true
+			}
+		}
+	}
+	return active, false
+}
+
+// logRealtimeFallback logs, with provider names and vendors only (never keys, URLs or rows), when
+// the requested provider was not found or a keyless Grok/Gemini row was replaced by GPT-Live.
+func logRealtimeFallback(active *managerRealtimeProvider, rows []managerRealtimeProvider, requested string, choice realtimeChoice) {
+	row, found := pickRealtimeRow(active, rows, requested)
+	activeName := ""
+	if active != nil {
+		activeName = active.Provider
+	}
+	if strings.TrimSpace(requested) != "" && !found {
+		logger.WarnCF("livekit", "gptlive: requested realtime provider not found; using the active row", map[string]any{
+			"requested_provider": strings.TrimSpace(requested),
+			"active_provider":    activeName,
+		})
+	}
+	if row == nil {
+		return
+	}
+	if vendor := realtimeRowVendor(*row); vendor != "openai" && choice.Vendor == "openai" {
+		name := row.ProviderName
+		if name == "" {
+			name = row.Provider
+		}
+		logger.WarnCF("livekit", "gptlive: realtime provider has no API key; falling back to GPT-Live", map[string]any{
+			"provider":        name,
+			"vendor":          vendor,
+			"fallback_vendor": choice.Vendor,
+			"has_key":         choice.APIKey != "",
+		})
+	}
+}
+
+// realtimeRowsNeeded reports whether chooseRealtime needs the full provider list: the dashboard
+// named a provider, or the active row is a Grok/Gemini row with no key (GPT-Live fallback lives
+// on an inactive openai row).
+func realtimeRowsNeeded(active *managerRealtimeProvider, requested string) bool {
+	if strings.TrimSpace(requested) != "" {
+		return true
+	}
+	return active != nil && realtimeRowVendor(*active) != "openai" && strings.TrimSpace(active.APIKey) == ""
 }
 
 // chooseRealtimeVoice returns the first candidate that is one of the vendor's voices, in the

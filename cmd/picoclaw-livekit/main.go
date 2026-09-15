@@ -1109,8 +1109,9 @@ func main() {
 			if g := bootstrap.Metadata.GPTLive; g != nil {
 				requestedProvider = strings.TrimSpace(g.Provider)
 			}
+			activeRealtime := cachedActiveRealtime()
 			var realtimeRows []managerRealtimeProvider
-			if requestedProvider != "" {
+			if realtimeRowsNeeded(activeRealtime, requestedProvider) {
 				rowsCtx, rowsCancel := context.WithTimeout(context.Background(), 3*time.Second)
 				rows, rowsErr := fetchManagerRealtimeProviders(rowsCtx, lkCfg.ManagerAPI, managerAPIServiceKey())
 				rowsCancel()
@@ -1120,7 +1121,8 @@ func main() {
 				realtimeRows = rows
 			}
 			// API keys come only from the manager realtime_providers rows, never the environment.
-			realtime := chooseRealtime(cachedActiveRealtime(), realtimeRows, requestedProvider)
+			realtime := chooseRealtime(activeRealtime, realtimeRows, requestedProvider)
+			logRealtimeFallback(activeRealtime, realtimeRows, requestedProvider, realtime)
 			spec, err := buildGPTLiveSpec(gptLiveSpecInput{
 				Realtime:        realtime,
 				CharacterVoices: personaRealtimeVoices,

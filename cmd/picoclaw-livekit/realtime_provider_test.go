@@ -48,6 +48,13 @@ func TestChooseRealtime(t *testing.T) {
 		{"unknown requested name uses the active row", active, rows, "nope",
 			realtimeChoice{Vendor: "openai", APIKey: "sk-row", Model: "gpt-live-1", BackendModel: "gpt-5.6-luna", Voice: "marin"}},
 		{"no manager at all", nil, nil, "", realtimeChoice{Vendor: "openai"}},
+		{"keyless active xai row falls back to an inactive openai row with a key",
+			&managerRealtimeProvider{Provider: "xai-grok-voice", Vendor: "xai", Voice: "eve"}, rows, "",
+			realtimeChoice{Vendor: "openai", APIKey: "sk-row2", Model: "gpt-live-1", BackendModel: "gpt-5.6-luna", BaseURL: "wss://example.test/v1/realtime", Voice: "cinder"}},
+		{"keyless active xai row with no rows has no key", &managerRealtimeProvider{Provider: "xai-grok-voice", Vendor: "xai"}, nil, "",
+			realtimeChoice{Vendor: "openai"}},
+		{"requested name matches case-insensitively after trimming", active, rows, "  Google-Gemini-Live ",
+			realtimeChoice{Vendor: "google", APIKey: "g-row", Model: "gemini-3.1-flash-live-preview", Voice: "Kore"}},
 		{"non-websocket api_base is ignored", active, rows, "xai-http-base",
 			realtimeChoice{Vendor: "xai", APIKey: "x-row", Voice: "ara"}},
 		{"websocket api_base is used, case-insensitive", active, rows, "xai-ws-base",
@@ -57,6 +64,28 @@ func TestChooseRealtime(t *testing.T) {
 		if got := chooseRealtime(c.active, c.rows, c.requested); got != c.want {
 			// fake keys only; safe to print
 			t.Errorf("%s: got %+v, want %+v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestRealtimeRowsNeeded(t *testing.T) {
+	cases := []struct {
+		name      string
+		active    *managerRealtimeProvider
+		requested string
+		want      bool
+	}{
+		{"nothing requested, keyed openai active", &managerRealtimeProvider{Vendor: "openai", APIKey: "sk"}, "", false},
+		{"nothing requested, keyless openai active", &managerRealtimeProvider{Vendor: "openai"}, "", false},
+		{"no manager", nil, "", false},
+		{"provider requested", &managerRealtimeProvider{Vendor: "openai", APIKey: "sk"}, "xai-grok-voice", true},
+		{"keyless active xai", &managerRealtimeProvider{Vendor: "xai"}, "", true},
+		{"keyless active google", &managerRealtimeProvider{Vendor: "google", APIKey: "  "}, "", true},
+		{"keyed active google", &managerRealtimeProvider{Vendor: "google", APIKey: "g"}, "", false},
+	}
+	for _, c := range cases {
+		if got := realtimeRowsNeeded(c.active, c.requested); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 	}
 }
