@@ -73,11 +73,15 @@ func realtimeChoiceFromRow(r managerRealtimeProvider) realtimeChoice {
 // the choice carries an empty key and buildGPTLiveSpec fails the session.
 func chooseRealtime(active *managerRealtimeProvider, rows []managerRealtimeProvider, requested string) realtimeChoice {
 	row, _ := pickRealtimeRow(active, rows, requested)
-	var r managerRealtimeProvider
-	if row != nil {
-		r = *row
+	if row == nil {
+		// No row at all: no active row, and nothing requested matched one. Without
+		// this every session on the box fails, even though keyed openai rows are
+		// sitting in the list — one deactivated row, or a manager payload that omits
+		// realtime, takes the whole box dark. Fall back the same way a keyless
+		// Grok/Gemini row does, to a GPT-Live row that has a key.
+		return firstKeyedOpenAIRow(rows)
 	}
-	choice := realtimeChoiceFromRow(r)
+	choice := realtimeChoiceFromRow(*row)
 	if choice.APIKey != "" || choice.Vendor == "openai" {
 		return choice
 	}
@@ -86,6 +90,13 @@ func chooseRealtime(active *managerRealtimeProvider, rows []managerRealtimeProvi
 			return c
 		}
 	}
+	return firstKeyedOpenAIRow(rows)
+}
+
+// firstKeyedOpenAIRow is the GPT-Live fallback: the first openai row in the list that
+// carries a key. With none, the choice carries an empty key and buildGPTLiveSpec fails
+// the session, which is the DB-only rule (no key, no session).
+func firstKeyedOpenAIRow(rows []managerRealtimeProvider) realtimeChoice {
 	for i := range rows {
 		if c := realtimeChoiceFromRow(rows[i]); c.Vendor == "openai" && c.APIKey != "" {
 			return c
@@ -139,13 +150,19 @@ func logRealtimeFallback(active *managerRealtimeProvider, rows []managerRealtime
 }
 
 // realtimeRowsNeeded reports whether chooseRealtime needs the full provider list: the dashboard
-// named a provider, or the active row is a Grok/Gemini row with no key (GPT-Live fallback lives
-// on an inactive openai row).
+// named a provider, there is no active row to run from, or the active row is a Grok/Gemini row
+// with no key (the GPT-Live fallback lives on an inactive openai row).
 func realtimeRowsNeeded(active *managerRealtimeProvider, requested string) bool {
 	if strings.TrimSpace(requested) != "" {
 		return true
 	}
-	return active != nil && realtimeRowVendor(*active) != "openai" && strings.TrimSpace(active.APIKey) == ""
+	if active == nil {
+		// Without the list there is nothing for chooseRealtime to pick, so every
+		// session on the box fails the moment no row is active (or the manager's
+		// active payload omits realtime) even though keyed openai rows exist.
+		return true
+	}
+	return realtimeRowVendor(*active) != "openai" && strings.TrimSpace(active.APIKey) == ""
 }
 
 // chooseRealtimeVoice returns the first candidate that is one of the vendor's voices, in the

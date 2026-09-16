@@ -48,6 +48,8 @@ func TestChooseRealtime(t *testing.T) {
 		{"unknown requested name uses the active row", active, rows, "nope",
 			realtimeChoice{Vendor: "openai", APIKey: "sk-row", Model: "gpt-live-1", BackendModel: "gpt-5.6-luna", Voice: "marin"}},
 		{"no manager at all", nil, nil, "", realtimeChoice{Vendor: "openai"}},
+		{"no active row still uses a keyed openai row from the list", nil, rows, "",
+			realtimeChoice{Vendor: "openai", APIKey: "sk-row2", Model: "gpt-live-1", BackendModel: "gpt-5.6-luna", BaseURL: "wss://example.test/v1/realtime", Voice: "cinder"}},
 		{"keyless active xai row falls back to an inactive openai row with a key",
 			&managerRealtimeProvider{Provider: "xai-grok-voice", Vendor: "xai", Voice: "eve"}, rows, "",
 			realtimeChoice{Vendor: "openai", APIKey: "sk-row2", Model: "gpt-live-1", BackendModel: "gpt-5.6-luna", BaseURL: "wss://example.test/v1/realtime", Voice: "cinder"}},
@@ -77,7 +79,9 @@ func TestRealtimeRowsNeeded(t *testing.T) {
 	}{
 		{"nothing requested, keyed openai active", &managerRealtimeProvider{Vendor: "openai", APIKey: "sk"}, "", false},
 		{"nothing requested, keyless openai active", &managerRealtimeProvider{Vendor: "openai"}, "", false},
-		{"no manager", nil, "", false},
+		// With no active row the list is the only thing chooseRealtime can pick from;
+		// without it every session on the box fails (M5).
+		{"no active row", nil, "", true},
 		{"provider requested", &managerRealtimeProvider{Vendor: "openai", APIKey: "sk"}, "xai-grok-voice", true},
 		{"keyless active xai", &managerRealtimeProvider{Vendor: "xai"}, "", true},
 		{"keyless active google", &managerRealtimeProvider{Vendor: "google", APIKey: "  "}, "", true},
