@@ -1204,6 +1204,57 @@ func TestGrokErrorEventScrubsTheKeyAndClassifiesFatals(t *testing.T) {
 	}
 }
 
+// TestGrokSessionRejectionIsFatalOnlyBeforeTheSessionHasSpoken pins N1. The session-scoped
+// invalid_request_error rule was written for the setup session.update, whose rejection
+// really does leave a session that can never speak — but AppendInstructions re-sends the
+// whole session.update on every scored quiz answer, so the same frame also arrives
+// mid-call. Ending a child's call at the ninth question of a quiz because one directive
+// was refused is far worse than losing the directive, so once the session has produced
+// audio the refusal must stay recoverable (logged as a warning by the pipeline) and only
+// a refusal before any audio may tear the call down.
+func TestGrokSessionRejectionIsFatalOnlyBeforeTheSessionHasSpoken(t *testing.T) {
+	const refusal = `{"type":"error","error":{"type":"invalid_request_error","code":"string_above_max_length","param":"session.instructions","message":"too long"}}`
+	audio := `{"type":"response.output_audio.delta","delta":"` +
+		base64.StdEncoding.EncodeToString([]byte{1, 0, 2, 0}) + `"}`
+
+	// Setup-time: the configuration never worked, so the call is over.
+	setup := &Session{Conn: realtimeconn.New(nil)}
+	setup.handle([]byte(refusal))
+	ev, ok := (<-setup.Events()).(gptlive.Error)
+	if !ok {
+		t.Fatalf("setup-time refusal: want gptlive.Error")
+	}
+	if ev.Recoverable {
+		t.Error("a session.update refused before any audio must be fatal: the session can never speak")
+	}
+
+	// Mid-call: the same frame, after the model has spoken. The call must survive.
+	live := &Session{Conn: realtimeconn.New(nil)}
+	live.handle([]byte(audio))
+	if pcm := <-live.Audio(); len(pcm) == 0 {
+		t.Fatal("no audio emitted")
+	}
+	live.handle([]byte(refusal))
+	ev, ok = (<-live.Events()).(gptlive.Error)
+	if !ok {
+		t.Fatalf("mid-call refusal: want gptlive.Error")
+	}
+	if !ev.Recoverable {
+		t.Error("a session.update refused after the session has spoken ended the call; it must only be logged")
+	}
+
+	// Auth/quota stay fatal whether or not the session has spoken: every later frame
+	// fails the same way, so the "has spoken" narrowing must not reach them.
+	live.handle([]byte(`{"type":"error","error":{"type":"authentication_error","code":"invalid_api_key","message":"bad key"}}`))
+	ev, ok = (<-live.Events()).(gptlive.Error)
+	if !ok {
+		t.Fatalf("auth error after audio: want gptlive.Error")
+	}
+	if ev.Recoverable {
+		t.Error("an auth error stayed recoverable because the session had spoken")
+	}
+}
+
 // TestGrokWatchdogFreesAContinuationStuckOnAMissingResponseDone pins M1: if the vendor
 // never sends response.done for a response, `active` used to stay true for the rest of
 // the session and every later greeting, goodbye or tool continuation was queued and
@@ -1260,6 +1311,16 @@ func TestGrokWatchdogFreesAContinuationStuckOnAMissingResponseDone(t *testing.T)
 // or the session delivers no further audio, no barge-in and no Closed — the child hears
 // silence until the job ends.
 func TestGrokResponseCreateDoesNotBlockTheReadLoop(t *testing.T) {
+	// The wedged mic write is what holds the socket for this test, so the write
+	// deadline must outlast the assertion or the test would be decided by the
+	// deadline closing the socket rather than by the read loop. Shrinking it here
+	// and budgeting the assertion from it makes that ordering explicit instead of
+	// leaving it to the production 10s: everything between the wedge and the audio
+	// (stall detection, response.done, one frame) takes ~100ms, so a third of the
+	// deadline is ample and the two can never cross.
+	const wedgeBudget = 3 * time.Second
+	defer realtimeconn.SetWriteTimeoutForTest(wedgeBudget)()
+
 	fill, srvStop := make(chan struct{}), make(chan struct{})
 	defer close(srvStop)
 	var up websocket.Upgrader
@@ -1323,7 +1384,7 @@ func TestGrokResponseCreateDoesNotBlockTheReadLoop(t *testing.T) {
 	}()
 	stalled := 0
 	for last := int64(-1); stalled < 3; {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 		if n := written.Load(); n == last {
 			stalled++
 		} else {
@@ -1337,7 +1398,7 @@ func TestGrokResponseCreateDoesNotBlockTheReadLoop(t *testing.T) {
 	// still open and still not being read by the vendor, so nothing frees it.
 	select {
 	case <-s.Audio():
-	case <-time.After(2 * time.Second):
+	case <-time.After(wedgeBudget / 3):
 		t.Fatal("no audio after response.done: the read loop is wedged on the continuation's write")
 	}
 

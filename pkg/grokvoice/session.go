@@ -76,6 +76,13 @@ type Session struct {
 	pending map[string]bool // call IDs from response.function_call_arguments.done not yet answered
 	owed    bool            // a tool output or AppendCommentary is waiting on a response.create
 
+	// spoke records that the session has produced at least one model audio frame,
+	// i.e. that the configuration this socket was opened with works. It is what
+	// separates a setup-time refusal of the session (fatal: the call can never
+	// speak) from a mid-call one (recoverable: the call is speaking already, and
+	// only the newest directive was lost). See classifyError.
+	spoke bool
+
 	// activeWatch and lastFrame are the watchdog that stops a missing response.done
 	// from muting the session for good; see maybeContinue and clearStuckActive.
 	activeWatch *time.Timer
@@ -734,9 +741,19 @@ var fatalErrorCodes = map[string]bool{
 //     fatalErrorCodes): every later frame fails the same way.
 //   - session_expired: this client never resumes a Grok session.
 //   - an invalid_request_error whose param names the session itself (session.voice,
-//     session.tools, ...): the session.update that configures the whole call was
-//     refused, so the session is mute or tool-less by construction. A rejected
+//     session.tools, ...) AND that arrives before the session has produced any
+//     audio: the session.update that configures the whole call was refused at
+//     setup, so the session is mute or tool-less by construction. A rejected
 //     non-session request (one bad event) stays recoverable.
+//
+// The "before any audio" qualifier is what keeps a live call alive.
+// AppendInstructions re-sends the whole (and steadily growing) session.update on
+// every scored quiz answer, so a session-scoped refusal is just as likely to be
+// the ninth of those mid-quiz as the setup one. Once the session has spoken, the
+// configuration demonstrably works and a refusal costs only the newest directive
+// — the child keeps talking, and the error is emitted recoverable, which the
+// pipeline logs as a warning. Ending the call mid-question instead would be a
+// far worse failure than the missed directive.
 //
 // Non-recoverable makes gptLivePipeline tear the room session down instead of
 // leaving the child connected to something that can no longer speak.
@@ -748,10 +765,13 @@ func (s *Session) classifyError(raw json.RawMessage) (string, bool) {
 	}
 	typ := strings.ToLower(strings.TrimSpace(p.Type))
 	code := strings.ToLower(strings.TrimSpace(p.Code))
+	s.mu.Lock()
+	spoke := s.spoke
+	s.mu.Unlock()
 	switch {
 	case fatalErrorTypes[typ], fatalErrorCodes[code]:
 		return text, false
-	case typ == "invalid_request_error" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(p.Param)), "session"):
+	case !spoke && typ == "invalid_request_error" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(p.Param)), "session"):
 		return text, false
 	}
 	return text, true
@@ -771,6 +791,9 @@ func (s *Session) handle(raw []byte) {
 	switch ev.Type {
 	case "response.output_audio.delta", "response.audio.delta":
 		if pcm, err := base64.StdEncoding.DecodeString(ev.Delta); err == nil {
+			s.mu.Lock()
+			s.spoke = true // the session is live; a later session refusal is no longer fatal
+			s.mu.Unlock()
 			s.EmitAudio(pcm)
 		}
 	case "input_audio_buffer.speech_started":
