@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1152,4 +1153,197 @@ func TestGrokShapeDumpFallsBackToWholeFrame(t *testing.T) {
 			t.Fatalf("shape leaked frame text %q: %q", leak, shape)
 		}
 	}
+}
+
+// TestGrokErrorEventScrubsTheKeyAndClassifiesFatals pins both halves of the vendor
+// `error` event: the text the pipeline logs verbatim never carries the API key, and
+// a failure that can never fix itself on this socket ends the session instead of
+// being logged as a warning while the toy sits mute.
+func TestGrokErrorEventScrubsTheKeyAndClassifiesFatals(t *testing.T) {
+	const key = "xai-s3cret-key-value"
+	cases := []struct {
+		name        string
+		frame       string
+		recoverable bool
+	}{
+		{"auth error echoing the key", // OpenAI-family APIs echo the key back in this one
+			`{"type":"error","error":{"type":"authentication_error","code":"invalid_api_key","message":"Incorrect API key provided: ` + key + `"}}`, false},
+		{"out of credits",
+			`{"type":"error","error":{"type":"invalid_request_error","code":"insufficient_quota","message":"used all available credits"}}`, false},
+		{"not entitled",
+			`{"type":"error","error":{"type":"permission_error","code":"model_not_found","message":"no access"}}`, false},
+		{"the session's own config was rejected",
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unknown_value","param":"session.voice","message":"unsupported voice"}}`, false},
+		{"session expired and this client never resumes Grok",
+			`{"type":"error","error":{"type":"invalid_request_error","code":"session_expired","message":"session expired"}}`, false},
+		{"one rejected event stays recoverable",
+			`{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","param":"response.modalities","message":"bad value"}}`, true},
+		{"a server-side blip stays recoverable",
+			`{"type":"error","error":{"type":"server_error","message":"internal error"}}`, true},
+		{"an unparsed error object stays recoverable",
+			`{"type":"error","error":"plain text mentioning ` + key + `"}`, true},
+	}
+	for _, c := range cases {
+		s := &Session{Conn: realtimeconn.New(nil)}
+		s.SetSecret(key)
+		s.handle([]byte(c.frame))
+		ev := <-s.Events()
+		e, ok := ev.(gptlive.Error)
+		if !ok {
+			t.Fatalf("%s: event = %T, want gptlive.Error", c.name, ev)
+		}
+		if msg := e.Err.Error(); strings.Contains(msg, key) {
+			t.Errorf("%s: the emitted error carries the API key", c.name) // never print msg here
+		}
+		if strings.Contains(c.frame, key) && !strings.Contains(e.Err.Error(), "***") {
+			t.Errorf("%s: the key was dropped instead of masked", c.name)
+		}
+		if e.Recoverable != c.recoverable {
+			t.Errorf("%s: recoverable = %v, want %v", c.name, e.Recoverable, c.recoverable)
+		}
+	}
+}
+
+// TestGrokWatchdogFreesAContinuationStuckOnAMissingResponseDone pins M1: if the vendor
+// never sends response.done for a response, `active` used to stay true for the rest of
+// the session and every later greeting, goodbye or tool continuation was queued and
+// never spoken. The watchdog must clear it and let the queued item through.
+func TestGrokWatchdogFreesAContinuationStuckOnAMissingResponseDone(t *testing.T) {
+	defer func(d time.Duration) { activeIdleTimeout = d }(activeIdleTimeout)
+	activeIdleTimeout = 20 * time.Millisecond
+
+	fromClient := make(chan map[string]any, 8)
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var m map[string]any
+		if c.ReadJSON(&m) != nil { // session.update
+			return
+		}
+		// A response starts and then the vendor goes quiet forever: no response.done.
+		_ = c.WriteJSON(map[string]any{"type": "response.created"})
+		_ = c.WriteJSON(map[string]any{"type": "response.output_audio.delta",
+			"delta": base64.StdEncoding.EncodeToString([]byte{1, 0})})
+		for {
+			var next map[string]any
+			if c.ReadJSON(&next) != nil {
+				return
+			}
+			fromClient <- next
+		}
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "k", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	recvAudio(t, s.Audio()) // the read loop is past response.created: active is set
+
+	s.AppendCommentary("Say goodbye now.")
+	if m := recvMap(t, fromClient); m["type"] != "conversation.item.create" {
+		t.Fatalf("commentary item = %v", m)
+	}
+	if m := recvMap(t, fromClient); m["type"] != "response.create" {
+		t.Fatalf("after the watchdog cleared the stuck response, got %v, want response.create", m)
+	}
+}
+
+// TestGrokResponseCreateDoesNotBlockTheReadLoop pins I2's second half. The vendor stops
+// reading, so a socket write blocks behind the mic's own wedged write; the continuation
+// response.create that response.done triggers must not be written on the read goroutine,
+// or the session delivers no further audio, no barge-in and no Closed — the child hears
+// silence until the job ends.
+func TestGrokResponseCreateDoesNotBlockTheReadLoop(t *testing.T) {
+	fill, srvStop := make(chan struct{}), make(chan struct{})
+	defer close(srvStop)
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		audio := map[string]any{"type": "response.output_audio.delta",
+			"delta": base64.StdEncoding.EncodeToString([]byte{1, 0})}
+		var m map[string]any
+		if c.ReadJSON(&m) != nil { // session.update
+			return
+		}
+		_ = c.WriteJSON(map[string]any{"type": "response.created"})
+		_ = c.WriteJSON(audio)
+		if c.ReadJSON(&m) != nil { // the commentary item; from here the server never reads again
+			return
+		}
+		select { // wait until the client's writes are wedged with nowhere to go
+		case <-fill:
+		case <-time.After(testTimeout):
+			return
+		}
+		_ = c.WriteJSON(map[string]any{"type": "response.done"})
+		for i := 0; i < 20; i++ {
+			if c.WriteJSON(audio) != nil {
+				return
+			}
+		}
+		<-srvStop // hold the socket open, still not reading, for the whole assertion
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "k", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recvAudio(t, s.Audio()) // past response.created: a response is active
+	s.AppendCommentary("Greet the child now.")
+
+	// The mic pump's own writes fill the socket and stay stuck holding the write lock,
+	// which is what a vendor that stops reading does to a live session.
+	var written atomic.Int64
+	stop := make(chan struct{})
+	var pusher sync.WaitGroup
+	pusher.Add(1)
+	go func() {
+		defer pusher.Done()
+		pcm := make([]byte, 256*1024)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.PushAudio(pcm)
+			written.Add(1)
+		}
+	}()
+	stalled := 0
+	for last := int64(-1); stalled < 3; {
+		time.Sleep(100 * time.Millisecond)
+		if n := written.Load(); n == last {
+			stalled++
+		} else {
+			stalled, last = 0, n
+		}
+	}
+	close(fill)
+
+	// response.done now arrives on the read loop and wants to send response.create. If it
+	// writes there, the read loop stops dead and this audio never arrives — the socket is
+	// still open and still not being read by the vendor, so nothing frees it.
+	select {
+	case <-s.Audio():
+	case <-time.After(2 * time.Second):
+		t.Fatal("no audio after response.done: the read loop is wedged on the continuation's write")
+	}
+
+	close(stop)
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pusher.Wait()
 }

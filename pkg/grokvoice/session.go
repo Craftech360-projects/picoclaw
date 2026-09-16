@@ -32,6 +32,13 @@ const (
 	defaultSilence = 700 * time.Millisecond
 )
 
+// activeIdleTimeout bounds how long a queued continuation (a greeting, a goodbye,
+// a tool result's response.create) waits on a response the vendor never closed.
+// While a response really is in flight the vendor streams audio and transcript
+// frames continuously, so 20s of complete silence from it means the response.done
+// that clears `active` is not coming. A var only so tests can shrink it.
+var activeIdleTimeout = 20 * time.Second
+
 type Config struct {
 	APIKey       string
 	BaseURL      string // default DefaultBaseURL
@@ -68,6 +75,11 @@ type Session struct {
 	active  bool            // a response is in flight: response.created, or a call within one, seen; response.done not yet seen
 	pending map[string]bool // call IDs from response.function_call_arguments.done not yet answered
 	owed    bool            // a tool output or AppendCommentary is waiting on a response.create
+
+	// activeWatch and lastFrame are the watchdog that stops a missing response.done
+	// from muting the session for good; see maybeContinue and clearStuckActive.
+	activeWatch *time.Timer
+	lastFrame   time.Time // when the last server frame of any kind was handled
 
 	logLimit *realtimeconn.LogLimiter // unknown/unparsed events
 	logDone  func(map[string]any)     // the response.done diagnostic's sink; see logDone
@@ -147,7 +159,7 @@ func (s *Session) AppendCommentary(text string) {
 	s.mu.Lock()
 	s.owed = true
 	s.mu.Unlock()
-	s.maybeContinue()
+	s.maybeContinue(false)
 }
 
 func (s *Session) Close(ctx context.Context) error {
@@ -665,7 +677,90 @@ func describeValue(key string, v any, depth int) string {
 	}
 }
 
+// errorPayload is the error object of an `error` server event. The Voice Agent API
+// is an OpenAI-realtime clone (https://docs.x.ai/docs/guides/voice/agent), so the
+// object is {type, code, message, param}: type is the family, code the specific
+// reason, param the request field that was rejected. xAI's REST errors
+// (https://docs.x.ai/openapi.json) use the same families, so both spellings of the
+// message field are accepted.
+type errorPayload struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Error   string `json:"error"` // xAI's REST shape spells the text this way
+	Param   string `json:"param"`
+}
+
+// fatalErrorTypes / fatalErrorCodes are the error families and codes that can never
+// fix themselves on this socket. Everything else defaults to recoverable: a single
+// rejected event (an out-of-band response.create, a stray buffer commit) must not
+// end a child's call.
+var fatalErrorTypes = map[string]bool{
+	"authentication_error": true, // the key is wrong or revoked
+	"permission_error":     true, // the key is not entitled to this model or voice
+	"permission_denied":    true,
+	"insufficient_quota":   true, // out of credits: the session will never produce audio
+	"quota_exceeded":       true,
+	"billing_error":        true,
+}
+
+var fatalErrorCodes = map[string]bool{
+	"invalid_api_key":            true,
+	"invalid_authentication":     true,
+	"authentication_error":       true,
+	"account_deactivated":        true,
+	"permission_denied":          true,
+	"insufficient_quota":         true,
+	"quota_exceeded":             true,
+	"insufficient_credits":       true,
+	"billing_hard_limit_reached": true,
+	// Grok has no session resumption in this client (Dial passes a nil redial), so an
+	// expired session is over; staying connected only hides it behind silence.
+	"session_expired": true,
+}
+
+// classifyError turns a vendor `error` event into the text and recoverability of the
+// emitted gptlive.Error.
+//
+// The text is always scrubbed: this API echoes a partially masked key in an auth
+// error, and the pipeline logs the error text verbatim, so the one path that did not
+// scrub was the one path that could put a key in the log. It is also clipped, since
+// an error message is vendor free text.
+//
+// Recoverability is conservative — recoverable unless the class of failure cannot
+// change on this socket:
+//
+//   - authentication / authorization / quota / billing (fatalErrorTypes,
+//     fatalErrorCodes): every later frame fails the same way.
+//   - session_expired: this client never resumes a Grok session.
+//   - an invalid_request_error whose param names the session itself (session.voice,
+//     session.tools, ...): the session.update that configures the whole call was
+//     refused, so the session is mute or tool-less by construction. A rejected
+//     non-session request (one bad event) stays recoverable.
+//
+// Non-recoverable makes gptLivePipeline tear the room session down instead of
+// leaving the child connected to something that can no longer speak.
+func (s *Session) classifyError(raw json.RawMessage) (string, bool) {
+	text := clip(s.Scrub(strings.TrimSpace(string(raw))), shapeLimit)
+	var p errorPayload
+	if len(raw) == 0 || json.Unmarshal(raw, &p) != nil {
+		return text, true // unparsed (or a bare string): nothing to classify on
+	}
+	typ := strings.ToLower(strings.TrimSpace(p.Type))
+	code := strings.ToLower(strings.TrimSpace(p.Code))
+	switch {
+	case fatalErrorTypes[typ], fatalErrorCodes[code]:
+		return text, false
+	case typ == "invalid_request_error" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(p.Param)), "session"):
+		return text, false
+	}
+	return text, true
+}
+
 func (s *Session) handle(raw []byte) {
+	s.mu.Lock()
+	s.lastFrame = time.Now() // the watchdog's "the vendor has gone quiet" clock
+	s.mu.Unlock()
 	var ev serverEvent
 	if json.Unmarshal(raw, &ev) != nil {
 		if ok, held := s.logLimit.Allow("unparsed"); ok {
@@ -772,10 +867,12 @@ func (s *Session) handle(raw []byte) {
 		// every response's deltas under the same "" key.
 		s.agentText = map[string]string{}
 		s.active = false
+		s.stopActiveWatchLocked()
 		s.mu.Unlock()
-		s.maybeContinue()
+		s.maybeContinue(true)
 	case "error":
-		s.Emit(gptlive.Error{Err: fmt.Errorf("grokvoice: %s", ev.Error), Recoverable: true})
+		text, recoverable := s.classifyError(ev.Error)
+		s.Emit(gptlive.Error{Err: fmt.Errorf("grokvoice: %s", text), Recoverable: recoverable})
 	default:
 		if ignoredEvents[ev.Type] {
 			return
@@ -819,7 +916,7 @@ func (s *Session) answer(call gptlive.FunctionCall) {
 	delete(s.pending, call.CallID)
 	s.owed = true
 	s.mu.Unlock()
-	s.maybeContinue()
+	s.maybeContinue(false)
 }
 
 // maybeContinue sends the single response.create that resumes the conversation,
@@ -834,20 +931,83 @@ func (s *Session) answer(call gptlive.FunctionCall) {
 // create (active is still true, from B) instead of firing it mid-response B
 // (rejected by the protocol) or losing track of A's call once B's bookkeeping
 // would otherwise have overwritten it.
-func (s *Session) maybeContinue() {
+// dispatch says whether the response.create must be handed to another goroutine
+// rather than written on the caller's. handle() passes true because it runs on the
+// read loop: a socket write that blocks there stops every later frame — no audio, no
+// barge-in, no Closed, nothing to end the session on. Every other caller (answer's
+// own goroutine, AppendCommentary from the pipeline, the watchdog's timer) passes
+// false and keeps the write ordered against whatever it sends next.
+func (s *Session) maybeContinue(dispatch bool) {
 	s.mu.Lock()
 	if s.active || len(s.pending) > 0 || !s.owed {
+		// Nothing to send yet. If the ONLY thing holding the continuation up is a
+		// response that is still "active", arm the watchdog: a vendor that never
+		// sends response.done for a response (a cancelled or interrupted one) would
+		// otherwise gate every later greeting, goodbye and tool continuation for the
+		// rest of the session, with the items queued and never spoken.
+		if s.active && len(s.pending) == 0 && s.owed && s.activeWatch == nil {
+			s.activeWatch = time.AfterFunc(activeIdleTimeout, s.clearStuckActive)
+		}
 		s.mu.Unlock()
 		return
 	}
 	s.owed = false
 	s.mu.Unlock()
-	_ = s.Send(map[string]any{"type": "response.create"})
+	create := map[string]any{"type": "response.create"}
+	if !dispatch {
+		_ = s.Send(create)
+		return
+	}
+	// Go is the Conn's tracked helper, so Run waits for this write before it closes
+	// the channels and refuses it once the session is ending. The single
+	// response.create is already claimed above under the mutex (owed is cleared
+	// before the unlock), so dispatching it cannot produce a second one — and it
+	// still goes out strictly after the response.done that unblocked it and after
+	// every pending tool output, since answer() deletes its call from pending only
+	// once its own Send has returned.
+	s.Go(func() { _ = s.Send(create) })
+}
+
+// clearStuckActive is the watchdog maybeContinue arms. It clears active — and only
+// active — when a continuation has been waiting on it for activeIdleTimeout with no
+// frame from the vendor in that time, so the queued item is finally spoken. It never
+// fires while a tool call is outstanding (pending is non-empty) or while the vendor
+// is still streaming the response, so a slow but live response is never cut short.
+func (s *Session) clearStuckActive() {
+	s.mu.Lock()
+	s.activeWatch = nil
+	if !s.active || len(s.pending) > 0 || !s.owed {
+		s.mu.Unlock()
+		return
+	}
+	if idle := time.Since(s.lastFrame); idle < activeIdleTimeout {
+		s.activeWatch = time.AfterFunc(activeIdleTimeout-idle, s.clearStuckActive)
+		s.mu.Unlock()
+		return
+	}
+	s.active = false
+	idleMs := time.Since(s.lastFrame).Milliseconds()
+	s.mu.Unlock()
+	logger.WarnCF("realtime", "grok voice: no response.done for the active response; clearing it so the queued item can be spoken", map[string]any{
+		"idle_ms": idleMs,
+	})
+	s.maybeContinue(false)
+}
+
+// stopActiveWatchLocked disarms the watchdog; s.mu must be held.
+func (s *Session) stopActiveWatchLocked() {
+	if s.activeWatch != nil {
+		s.activeWatch.Stop()
+		s.activeWatch = nil
+	}
 }
 
 // onEnd: Grok has no session resumption here, so an unexpected socket end ends the session
 // (gptLivePipeline leaves the room on a non-recoverable Error).
 func (s *Session) onEnd(err error) {
+	s.mu.Lock()
+	s.stopActiveWatchLocked() // nothing left to continue: the socket is gone
+	s.mu.Unlock()
 	if !s.Closing() {
 		s.Emit(gptlive.Error{Err: errors.New("grokvoice: connection lost: " + s.Scrub(fmt.Sprint(err))), Recoverable: false})
 	}
