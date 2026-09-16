@@ -730,39 +730,57 @@ func TestQuizSessionStartingAfterTheDailyTenIsNotScored(t *testing.T) {
 	}
 }
 
-// TestQuizRecordWonderReportsOncePerSession covers review I2: the Wonder
-// Question can be asked after question ten and again at goodbye; the second
-// record must not send a second report.
-func TestQuizRecordWonderReportsOncePerSession(t *testing.T) {
-	reports := make(chan string, 4)
+// TestQuizRecordWonderReportsEveryCall covers re-review N1: the tracker must
+// not keep only the first quiz_record_wonder. A question recorded before the
+// child answered, then again with the answer, must reach the manager both
+// times (it fills the answer in), and an earlier record of last session's
+// question must not swallow today's. The manager owns the dedupe.
+func TestQuizRecordWonderReportsEveryCall(t *testing.T) {
+	type report struct{ question, answer, code string }
+	reports := make(chan report, 4)
 	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz",
-		WonderReporter: func(question, _, code string) { reports <- code }})
+		WonderReporter: func(question, answer, code string) { reports <- report{question, answer, code} }})
 	tool := findQuizTool(t, tr, "quiz_record_wonder")
-	args := map[string]any{"question": "q", "answer": "a", "code": "W7"}
-	if res := tool.Execute(context.Background(), args); res == nil || res.IsError || res.ForLLM != "recorded" {
+	take := func() report {
+		t.Helper()
+		select {
+		case r := <-reports:
+			return r
+		case <-time.After(2 * time.Second):
+			t.Fatal("quiz_record_wonder never reached WonderReporter")
+			return report{}
+		}
+	}
+
+	if res := tool.Execute(context.Background(), map[string]any{"question": "q", "answer": "", "code": "W7"}); res == nil || res.IsError || res.ForLLM != "recorded" {
 		t.Fatalf("first record: %+v", res)
 	}
-	res := tool.Execute(context.Background(), args)
-	if res == nil || res.IsError || !strings.Contains(res.ForLLM, "already recorded") {
-		t.Fatalf("a second record is a no-op success that says so, got %+v", res)
+	if r := take(); r.answer != "" || r.code != "W7" {
+		t.Errorf("first report = %+v", r)
 	}
-	select {
-	case <-reports:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the first record never reached WonderReporter")
+	if res := tool.Execute(context.Background(), map[string]any{"question": "q", "answer": "a castle of cheese", "code": "W7"}); res == nil || res.IsError || res.ForLLM != "recorded" {
+		t.Fatalf("second record with the answer: %+v", res)
 	}
-	select {
-	case c := <-reports:
-		t.Fatalf("a second record sent a second report (code %s)", c)
-	case <-time.After(50 * time.Millisecond):
+	if r := take(); r.answer != "a castle of cheese" || r.code != "W7" || r.question != "q" {
+		t.Errorf("a second call with the filled-in answer must be reported, got %+v", r)
 	}
 }
 
 // On OpenAI GPT-Live the voice model has no tools, so the Wonder answer is
-// recorded only if its delegation block tells it to delegate.
+// recorded only if its delegation block tells it to delegate, and only for
+// today's question, not last session's one recalled at the start.
 func TestQuizDelegationBlockCoversTheWonderQuestion(t *testing.T) {
-	if got := gptLiveDelegationBlock("English", true); !strings.Contains(got, "quiz_record_wonder") {
-		t.Errorf("delegation block must send the Wonder answer to the helper: %q", got)
+	got := gptLiveDelegationBlock("English", true)
+	for _, want := range []string{"quiz_record_wonder", "TODAY's Wonder Question", "last time's Wonder Question"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("delegation block missing %q: %q", want, got)
+		}
+	}
+	desc := findQuizTool(t, NewQuizTracker(QuizTrackerConfig{Batch: testBatch()}), "quiz_record_wonder").Description()
+	for _, want := range []string{"TODAY's Wonder Question", "last session's Wonder Question"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("quiz_record_wonder description missing %q: %q", want, desc)
+		}
 	}
 }
 

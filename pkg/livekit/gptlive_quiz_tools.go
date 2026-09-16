@@ -48,8 +48,6 @@ type QuizTracker struct {
 	tries       map[int64]int
 	attempts    map[int64][]QuizAttempt
 	onDirective func(string)
-	// wonderRecorded is set by the first RecordWonder; guarded by mu.
-	wonderRecorded bool
 }
 
 func NewQuizTracker(cfg QuizTrackerConfig) *QuizTracker {
@@ -426,24 +424,18 @@ func (t *QuizTracker) StateTypesWritten() map[string]bool {
 	return map[string]bool{t.cfg.MemoType: true}
 }
 
-// RecordWonder reports the child's Wonder answer, once per session, and says
-// whether this call was the one that recorded it. A session has one Wonder
-// Question, but the prompt can ask for it twice (after question ten and again
-// "when the session ends"), and every report is another manager row, so a
-// second call is a no-op. The flag is set under t.mu; WonderReporter is still
-// dispatched on its own goroutine, after the lock is released, per its
-// contract comment on QuizTrackerConfig: the real reporter is a network call
-// and must not block whatever called RecordWonder (the quiz_record_wonder
-// tool).
-func (t *QuizTracker) RecordWonder(question, answer, code string) bool {
-	t.mu.Lock()
-	first := !t.wonderRecorded
-	t.wonderRecorded = true
-	t.mu.Unlock()
-	if first && t.cfg.WonderReporter != nil {
+// RecordWonder reports the child's Wonder answer. It does not deduplicate:
+// the manager is the source of truth for that (per code per day, and verbatim
+// repeats), and a second call for the same question legitimately fills in an
+// answer the first call did not have. RecordWonder touches no tracker state,
+// so there is no lock to release first, but WonderReporter is still
+// dispatched on its own goroutine per its contract comment on
+// QuizTrackerConfig: the real reporter is a network call and must not block
+// whatever called RecordWonder (the quiz_record_wonder tool).
+func (t *QuizTracker) RecordWonder(question, answer, code string) {
+	if t.cfg.WonderReporter != nil {
 		go t.cfg.WonderReporter(question, answer, code)
 	}
-	return first
 }
 
 // Tools are the three functions the backend model may call.
@@ -496,7 +488,8 @@ type quizRecordWonderTool struct{ t *QuizTracker }
 
 func (quizRecordWonderTool) Name() string { return "quiz_record_wonder" }
 func (quizRecordWonderTool) Description() string {
-	return "Record today's Wonder Question (the open question you left the child with) and the child's answer, so it can be recalled tomorrow. Call it once per session."
+	return "Record TODAY's Wonder Question - the new open question you ask the child after today's Daily Ten (or at goodbye) - and the child's answer, so it can be recalled next time. " +
+		"Never use it for last session's Wonder Question when you remind the child of it at the start."
 }
 func (quizRecordWonderTool) Parameters() map[string]any {
 	return map[string]any{
@@ -513,8 +506,6 @@ func (q quizRecordWonderTool) Execute(_ context.Context, args map[string]any) *t
 	question, _ := args["question"].(string)
 	answer, _ := args["answer"].(string)
 	code, _ := args["code"].(string)
-	if !q.t.RecordWonder(question, answer, code) {
-		return tools.SilentResult("already recorded: today's Wonder Question is done. Do not ask a Wonder Question again this session.")
-	}
+	q.t.RecordWonder(question, answer, code)
 	return tools.SilentResult("recorded")
 }
