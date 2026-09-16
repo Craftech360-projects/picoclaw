@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -156,13 +159,157 @@ type serverEvent struct {
 	Name       string `json:"name"`
 	Arguments  string `json:"arguments"`
 	Response   *struct {
-		Usage *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			TotalTokens  int `json:"total_tokens"`
-		} `json:"usage"`
+		Usage *usage `json:"usage"`
 	} `json:"response"`
 	Error json.RawMessage `json:"error"`
+}
+
+// usage decodes response.done.response.usage. xAI's published websocket schema
+// (https://docs.x.ai/voice-realtime.ws.json, response.done -> response.usage)
+// documents only the three flat integers input_tokens/output_tokens/total_tokens
+// — but a live run logged has_usage=true and still produced a zero-token
+// session, which can only mean the server sent a usage object whose numbers live
+// under names the schema does not mention. xAI's own REST spec
+// (https://docs.x.ai/openapi.json) carries three different spellings of the same
+// object, and the model behind the voice agent is served by the same stack:
+//
+//	Usage        (chat completions): prompt_tokens / completion_tokens / total_tokens,
+//	                                 prompt_tokens_details{text,audio,image,cached},
+//	                                 completion_tokens_details{reasoning,audio,...}
+//	ModelUsage   (responses):        input_tokens / output_tokens / total_tokens,
+//	                                 input_tokens_details{cached}, output_tokens_details{reasoning}
+//	OpenAI realtime response.done:   same three flat integers plus
+//	                                 input_token_details / output_token_details (singular
+//	                                 "token") with text/audio/cached splits
+//
+// So every spelling is accepted, and the flat number wins when present; the
+// detail objects are only summed when the flat number is absent or zero, which
+// is exactly the case that used to persist tokens=0.
+type usage struct {
+	// xAI voice-realtime / responses / OpenAI realtime spelling.
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+	// xAI chat-completions spelling of the same two numbers.
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	// Detail objects, in all three documented spellings.
+	InputTokenDetails       tokenDetails `json:"input_token_details"`
+	InputTokensDetails      tokenDetails `json:"input_tokens_details"`
+	PromptTokensDetails     tokenDetails `json:"prompt_tokens_details"`
+	OutputTokenDetails      tokenDetails `json:"output_token_details"`
+	OutputTokensDetails     tokenDetails `json:"output_tokens_details"`
+	CompletionTokensDetails tokenDetails `json:"completion_tokens_details"`
+}
+
+// tokenDetails is one side's breakdown. cached_tokens is deliberately left out
+// of every sum below: xAI documents it as "a subset of text_tokens, not
+// additive" (MediaUsage.input_tokens in openapi.json), as does OpenAI realtime.
+type tokenDetails struct {
+	TextTokens      int `json:"text_tokens"`
+	AudioTokens     int `json:"audio_tokens"`
+	ImageTokens     int `json:"image_tokens"`
+	CachedTokens    int `json:"cached_tokens"`
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+func (d tokenDetails) empty() bool { return d == tokenDetails{} }
+
+// pick returns the first non-empty breakdown among the alternative spellings.
+func pick(ds ...tokenDetails) tokenDetails {
+	for _, d := range ds {
+		if !d.empty() {
+			return d
+		}
+	}
+	return tokenDetails{}
+}
+
+func firstNonZero(ns ...int) int {
+	for _, n := range ns {
+		if n != 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// backendUsage maps the decoded object onto gptlive.BackendUsage, whose
+// Input/Output/Total the pipeline sums across the session.
+func (u *usage) backendUsage(model string) gptlive.BackendUsage {
+	in := pick(u.InputTokenDetails, u.InputTokensDetails, u.PromptTokensDetails)
+	out := pick(u.OutputTokenDetails, u.OutputTokensDetails, u.CompletionTokensDetails)
+	input := firstNonZero(u.InputTokens, u.PromptTokens, in.TextTokens+in.AudioTokens+in.ImageTokens)
+	output := firstNonZero(u.OutputTokens, u.CompletionTokens, out.TextTokens+out.AudioTokens+out.ReasoningTokens)
+	return gptlive.BackendUsage{
+		Model:     model,
+		Input:     input,
+		Cached:    in.CachedTokens,
+		Output:    output,
+		Reasoning: out.ReasoningTokens,
+		Total:     firstNonZero(u.TotalTokens, input+output),
+	}
+}
+
+// protocolStrings are the only string values describeJSON prints: protocol
+// constants (an event type, "realtime.response", a completed/cancelled/
+// incomplete status), never free text. Every other string is elided, so a frame
+// can be described — which is all a field-name mismatch needs — with no way for
+// a transcript of the child or the model to reach the log.
+var protocolStrings = map[string]bool{"type": true, "status": true, "object": true}
+
+// describeJSON renders a frame as its structure alone: the key names at every
+// level, numbers, booleans and nulls verbatim, arrays as their length and
+// element shape, and string values as "str" (bar protocolStrings). Truncated to
+// limit bytes. "unparsed" if raw is not JSON.
+func describeJSON(raw []byte, limit int) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "unparsed"
+	}
+	out := describeValue("", v, 6)
+	if len(out) > limit {
+		out = out[:limit] + "..."
+	}
+	return out
+}
+
+func describeValue(key string, v any, depth int) string {
+	switch t := v.(type) {
+	case map[string]any:
+		if depth == 0 {
+			return "{...}"
+		}
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, k+":"+describeValue(k, t[k], depth-1))
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	case []any:
+		if len(t) == 0 {
+			return "[]"
+		}
+		if depth == 0 {
+			return "[" + strconv.Itoa(len(t)) + "]"
+		}
+		return "[" + strconv.Itoa(len(t)) + "x" + describeValue(key, t[0], depth-1) + "]"
+	case string:
+		if protocolStrings[key] && len(t) <= 32 {
+			return t
+		}
+		return "str"
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	case bool:
+		return strconv.FormatBool(t)
+	default:
+		return "null"
+	}
 }
 
 func (s *Session) handle(raw []byte) {
@@ -203,25 +350,46 @@ func (s *Session) handle(raw []byte) {
 		s.Emit(call)
 		s.Go(func() { s.answer(call) })
 	case "response.done":
-		// usage is optional in xAI's own schema and the live server omits it, which
-		// is invisible from the outside (it just looks like a zero-token session).
-		// response.done is the one event whose schema carries no transcript and no
-		// audio, so the raw frame is safe to show — truncated, scrubbed of the API
-		// key by Conn.Scrub (SetSecret is wired in Dial), and rate-limited.
-		if ok, held := s.logLimit.Allow("response.done"); ok {
+		// usage is optional in xAI's own schema, and a usage object that IS sent
+		// may spell its numbers in any of the ways the usage type documents —
+		// both of which are invisible from the outside (either just looks like a
+		// zero-token session). So the line carries the parsed numbers, and
+		// whenever it has none to carry — no usage at all, or one that mapped to
+		// nothing — it adds the frame's SHAPE: every key name at every level
+		// (usage and its *_details objects included) with numbers kept and every
+		// string value elided by describeJSON. That names the fields we are
+		// missing without logging a word of what was said, which the raw frame
+		// could not promise: this API is an OpenAI-realtime clone whose
+		// response.done carries response.output[].content[].transcript, and this
+		// very bug is proof that the live server departs from the published
+		// schema. Rate-limited under its own key, so an anomalous frame is never
+		// crowded out of the window by the healthy line.
+		hasUsage := ev.Response != nil && ev.Response.Usage != nil
+		var bu gptlive.BackendUsage
+		if hasUsage {
+			bu = ev.Response.Usage.backendUsage(s.cfg.Model)
+		}
+		blind := bu.Input == 0 && bu.Output == 0 && bu.Total == 0
+		key := "response.done"
+		if blind {
+			key = "response.done:no-tokens"
+		}
+		if ok, held := s.logLimit.Allow(key); ok {
 			fields := map[string]any{
 				"has_response": ev.Response != nil,
-				"has_usage":    ev.Response != nil && ev.Response.Usage != nil,
+				"has_usage":    hasUsage,
+				"input":        bu.Input,
+				"output":       bu.Output,
+				"total":        bu.Total,
 				"suppressed":   held,
 			}
-			if ev.Response == nil || ev.Response.Usage == nil {
-				fields["raw"] = s.Scrub(string(raw[:min(len(raw), 400)]))
+			if blind {
+				fields["shape"] = s.Scrub(describeJSON(raw, 400))
 			}
 			logger.InfoCF("realtime", "grok voice: response.done", fields)
 		}
-		if ev.Response != nil && ev.Response.Usage != nil {
-			u := ev.Response.Usage
-			s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.InputTokens, Output: u.OutputTokens, Total: u.TotalTokens})
+		if hasUsage {
+			s.Emit(bu)
 		}
 		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
 		s.mu.Lock()

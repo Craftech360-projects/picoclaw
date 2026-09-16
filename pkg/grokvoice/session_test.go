@@ -544,3 +544,150 @@ func TestGrokConnectionLostErrorScrubsKey(t *testing.T) {
 		t.Fatal("connection-lost error must carry the close text with the key masked")
 	}
 }
+
+// usageFromDone runs one fake-server session that sends a single response.done
+// frame verbatim (a raw string, so the test can feed the vendor's documented
+// JSON byte for byte rather than a Go map's re-encoding of it) and returns the
+// BackendUsage the session emits for it.
+func usageFromDone(t *testing.T, doneFrame string) gptlive.BackendUsage {
+	t.Helper()
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var m map[string]any
+		if c.ReadJSON(&m) != nil { // session.update
+			return
+		}
+		_ = c.WriteMessage(websocket.TextMessage, []byte(doneFrame))
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	s, err := Dial(context.Background(), Config{APIKey: "k", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	deadline := time.After(testTimeout)
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				t.Fatal("events closed before a BackendUsage arrived")
+			}
+			if u, ok := ev.(gptlive.BackendUsage); ok {
+				return u
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for BackendUsage")
+		}
+	}
+}
+
+// TestGrokResponseDoneUsageShapes pins the mapping of
+// response.done.response.usage onto gptlive.BackendUsage for every spelling xAI
+// uses for that object. The first case is the shape xAI's own websocket schema
+// documents (https://docs.x.ai/voice-realtime.ws.json); the rest are the
+// spellings its REST spec (https://docs.x.ai/openapi.json: Usage, ModelUsage)
+// and the OpenAI realtime event it is modelled on use for the same numbers —
+// which is what a live run turned out to be sending, producing has_usage=true
+// and a zero-token session.
+func TestGrokResponseDoneUsageShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		frame                        string
+		input, output, total, cached int
+		reasoning                    int
+	}{
+		{
+			// Exactly xAI's documented response.done, including the surrounding
+			// response object fields from the schema's own example.
+			name: "xai voice-realtime schema, flat integers",
+			frame: `{"event_id":"event_3132","type":"response.done","response":{"id":"resp_001","object":"realtime.response","status":"completed",
+				"usage":{"input_tokens":120,"output_tokens":48,"total_tokens":168}}}`,
+			input: 120, output: 48, total: 168,
+		},
+		{
+			// xAI REST "Usage": prompt_/completion_ naming plus its detail objects.
+			name: "xai chat-completions spelling",
+			frame: `{"type":"response.done","response":{"status":"completed","usage":{
+				"prompt_tokens":120,"completion_tokens":48,"total_tokens":168,
+				"prompt_tokens_details":{"text_tokens":30,"audio_tokens":90,"image_tokens":0,"cached_tokens":64},
+				"completion_tokens_details":{"reasoning_tokens":8,"audio_tokens":40,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0},
+				"num_sources_used":0}}}`,
+			input: 120, output: 48, total: 168, cached: 64, reasoning: 8,
+		},
+		{
+			// OpenAI realtime's response.done usage with only the nested
+			// breakdowns filled in: the totals have to be summed out of them,
+			// leaving cached_tokens out (it is a subset of text_tokens).
+			name: "nested token details only, no flat totals",
+			frame: `{"type":"response.done","response":{"status":"completed","usage":{
+				"input_token_details":{"text_tokens":30,"audio_tokens":90,"cached_tokens":64},
+				"output_token_details":{"text_tokens":8,"audio_tokens":40}}}}`,
+			input: 120, output: 48, total: 168, cached: 64,
+		},
+		{
+			// xAI REST "ModelUsage" spelling, flat numbers present but zero.
+			name: "responses-style details with zeroed flat totals",
+			frame: `{"type":"response.done","response":{"status":"completed","usage":{
+				"input_tokens":0,"output_tokens":0,"total_tokens":0,
+				"input_tokens_details":{"text_tokens":30,"audio_tokens":90,"cached_tokens":64},
+				"output_tokens_details":{"text_tokens":40,"reasoning_tokens":8}}}}`,
+			input: 120, output: 48, total: 168, cached: 64, reasoning: 8,
+		},
+		{
+			// Nothing recognizable: the usage object is still reported (as
+			// zeros), which is the case that makes handle log the raw frame.
+			name:  "unrecognized usage object maps to zeros",
+			frame: `{"type":"response.done","response":{"status":"completed","usage":{"tokens_used":168}}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := usageFromDone(t, tc.frame)
+			if got.Input != tc.input || got.Output != tc.output || got.Total != tc.total {
+				t.Fatalf("input/output/total = %d/%d/%d, want %d/%d/%d (%#v)",
+					got.Input, got.Output, got.Total, tc.input, tc.output, tc.total, got)
+			}
+			if got.Cached != tc.cached || got.Reasoning != tc.reasoning {
+				t.Fatalf("cached/reasoning = %d/%d, want %d/%d", got.Cached, got.Reasoning, tc.cached, tc.reasoning)
+			}
+			if got.Model != DefaultModel {
+				t.Fatalf("model = %q, want %q", got.Model, DefaultModel)
+			}
+		})
+	}
+}
+
+// TestDescribeJSONNamesFieldsWithoutText covers the diagnostic the zero-token
+// case leans on: it must name every field of a frame we failed to map — that is
+// the whole point of logging it — while never letting a transcript through. The
+// frame below is an OpenAI-realtime-shaped response.done (which is what this API
+// is a clone of), carrying both an unmapped usage spelling and agent speech.
+func TestDescribeJSONNamesFieldsWithoutText(t *testing.T) {
+	const secret = "the child said her name is Priya"
+	frame := `{"type":"response.done","response":{"id":"resp_1","object":"realtime.response","status":"completed",
+		"output":[{"type":"message","content":[{"type":"audio","transcript":"` + secret + `"}]}],
+		"usage":{"tokens_used":168,"prompt_tokens_details":{"audio_tokens":90}}}}`
+
+	got := describeJSON([]byte(frame), 400)
+	for _, want := range []string{"tokens_used:168", "prompt_tokens_details", "audio_tokens:90", "status:completed", "transcript:str"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("describeJSON = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "Priya") || strings.Contains(got, secret) {
+		t.Fatalf("describeJSON leaked transcript text: %q", got)
+	}
+	if long := describeJSON([]byte(frame), 40); len(long) > 43 {
+		t.Fatalf("describeJSON ignored its limit: %q", long)
+	}
+	if got := describeJSON([]byte("not json"), 400); got != "unparsed" {
+		t.Fatalf("describeJSON(non-JSON) = %q, want %q", got, "unparsed")
+	}
+}
