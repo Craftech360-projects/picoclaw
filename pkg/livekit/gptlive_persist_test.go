@@ -182,9 +182,10 @@ func TestPersistGPTLiveSessionSendsUsageAndTranscript(t *testing.T) {
 // session that connected and was torn down before any turn completed) must
 // not post an empty chat-history payload, still reports the session end (so
 // the manager API's session record closes out), and correctly skips the
-// usage endpoint — zero tokens really is "nothing to report" here, not a
-// dropped update, since sendChatHistory/sendSessionEnd/sendUsageSummary's own
-// guards are what decide this, not persistGPTLiveSession.
+// usage endpoint — tokens, duration and message count all zero really is
+// "nothing to report" here, not a dropped update, since sendChatHistory/
+// sendSessionEnd/sendUsageSummary's own guards are what decide this, not
+// persistGPTLiveSession.
 func TestPersistGPTLiveSessionWithNoUsageSkipsUsagePost(t *testing.T) {
 	p := &gptLivePipeline{}
 

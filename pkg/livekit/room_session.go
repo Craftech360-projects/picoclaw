@@ -1350,9 +1350,10 @@ func (rs *RoomSession) roomSnapshot() *lksdk.Room {
 // InputTokens/OutputTokens are populated from BackendInputTokens/
 // BackendOutputTokens, not left zero with only TotalTokens set (Task 13
 // review, Critical 1): sendUsageSummary's very first statement skips the POST
-// entirely when both are zero, so reporting only the total would silently
-// drop every gptlive session's usage — voice seconds, token total, and
-// duration alike — with no error, ever reaching /device/token-usage.
+// entirely when tokens, duration and message count are all zero, so
+// reporting only the total would silently drop every gptlive session's usage
+// — voice seconds, token total, and duration alike — with no error, ever
+// reaching /device/token-usage.
 // The rest of the tail — character progress, the LLM session summary and its
 // MEMORY.md append, and the trace bundle — is NOT optional on this path (final
 // whole-branch review, Important 2). This used to be the only thing that ran

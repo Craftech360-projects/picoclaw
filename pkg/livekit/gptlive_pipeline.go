@@ -794,14 +794,15 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			carry = append(carry[:0], carry[n:]...)
 		case <-p.interrupts: // nil channel on GPT-Live-only test pipelines: never ready
 			// Logged here, before the clear, and not from the event pump: seg and
-			// level are owned by this goroutine, and they are what separates a real
-			// barge-in (speaking, with queued audio about to be discarded) from an
-			// idle speech_started that clears an already-empty queue.
+			// level are owned by this goroutine. p.seg.Open() describes the arriving stream,
+			// not the playout queue; level_ms > 0 is the documented signal that queued
+			// model audio was actually dropped, as opposed to an idle speech_started that
+			// clears an already-empty queue.
 			logger.InfoCF("livekit", "gptlive: barge-in", map[string]any{
-				"room":     p.rs.roomName(),
-				"vendor":   p.spec.Vendor,
-				"speaking": p.seg.Open(),
-				"level_ms": level.Milliseconds(),
+				"room":         p.rs.roomName(),
+				"vendor":       p.spec.Vendor,
+				"segment_open": p.seg.Open(),
+				"level_ms":     level.Milliseconds(),
 			})
 			if c, ok := track.(interface{ ClearQueue() }); ok {
 				c.ClearQueue()
@@ -1003,8 +1004,8 @@ func (p *gptLivePipeline) onEvent(ev gptlive.Event) {
 		// so summing each across every response completed this session gives the
 		// session totals. Input/Output are tracked alongside Total (not just
 		// derived from it) because persistGPTLiveSession needs them specifically:
-		// sendUsageSummary skips its POST entirely when both are zero (Task 13
-		// review, Critical 1).
+		// sendUsageSummary skips its POST entirely when tokens, duration and
+		// message count are all zero (Task 13 review, Critical 1).
 		p.mu.Lock()
 		p.backendTokens += e.Total
 		p.backendInputTokens += e.Input
@@ -1221,7 +1222,8 @@ func (p *gptLivePipeline) BackendTokens() int {
 // BackendInputTokens/BackendOutputTokens are the Input/Output breakdown behind
 // BackendTokens' Total (see onEvent's BackendUsage case). persistGPTLiveSession
 // needs these specifically, not just the total: sendUsageSummary's own guard
-// skips the POST entirely when both are zero.
+// skips the POST entirely when tokens, duration and message count are all
+// zero.
 func (p *gptLivePipeline) BackendInputTokens() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()

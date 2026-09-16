@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	protocol "github.com/livekit/protocol/livekit"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -188,8 +192,68 @@ func TestSendUsageSummaryPersistsWhenVendorReportsNoTokens(t *testing.T) {
 	}
 }
 
+// A session with only voice seconds (no tokens, no messages — e.g. the caller
+// never said anything intelligible) must still post: duration alone is
+// billable. This isolates the SessionDurationSeconds term of the guard from
+// MessageCount, so a dropped term or an &&/|| slip that only widened the
+// guard for messages would still be caught here.
+func TestSendUsageSummaryPersistsWithDurationOnly(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	rs := &RoomSession{
+		managerAPIURL: server.URL,
+		deviceMAC:     "aa:bb:cc:dd:ee:ff",
+		roomInfo:      &protocol.Room{Name: "session-duration-only"},
+	}
+
+	err := rs.sendUsageSummary(context.Background(), UsageSnapshot{
+		SessionDurationSeconds: 42.5,
+	})
+	if err != nil {
+		t.Fatalf("sendUsageSummary returned error: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("POSTs = %d, want 1: a 42.5s session with no messages is not empty", posts)
+	}
+}
+
+// A session with only a message count (no tokens, no measured voice duration)
+// must still post: the messages alone are billable. This isolates the
+// MessageCount term of the guard from SessionDurationSeconds, so a dropped
+// term or an &&/|| slip that only widened the guard for duration would still
+// be caught here.
+func TestSendUsageSummaryPersistsWithMessagesOnly(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	rs := &RoomSession{
+		managerAPIURL: server.URL,
+		deviceMAC:     "aa:bb:cc:dd:ee:ff",
+		roomInfo:      &protocol.Room{Name: "session-messages-only"},
+	}
+
+	err := rs.sendUsageSummary(context.Background(), UsageSnapshot{
+		MessageCount: 3,
+	})
+	if err != nil {
+		t.Fatalf("sendUsageSummary returned error: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("POSTs = %d, want 1: a 3-message session with no measured duration is not empty", posts)
+	}
+}
+
 // The guard's original purpose survives: a session where nothing at all happened
-// (a dial failure) still posts nothing.
+// (a dial failure) still posts nothing, and logs why.
 func TestSendUsageSummarySkipsAnEmptySession(t *testing.T) {
 	posts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,11 +268,25 @@ func TestSendUsageSummarySkipsAnEmptySession(t *testing.T) {
 		roomInfo:      &protocol.Room{Name: "session-empty"},
 	}
 
+	logPath := filepath.Join(t.TempDir(), "skip.log")
+	if err := logger.EnableFileLogging(logPath); err != nil {
+		t.Fatalf("EnableFileLogging: %v", err)
+	}
+	t.Cleanup(logger.DisableFileLogging)
+
 	if err := rs.sendUsageSummary(context.Background(), UsageSnapshot{}); err != nil {
 		t.Fatalf("sendUsageSummary returned error: %v", err)
 	}
 	if posts != 0 {
 		t.Fatalf("POSTs = %d, want 0 for a session with no tokens, no voice and no messages", posts)
+	}
+
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(logged), "Post-session usage summary skipped: empty session") {
+		t.Fatalf("skip log missing from %s, got: %s", logPath, logged)
 	}
 }
 
