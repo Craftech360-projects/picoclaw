@@ -763,7 +763,34 @@ func TestGrokResponseDoneUsageShapes(t *testing.T) {
 			name:   "unrecognized usage object maps to zeros",
 			frame:  `{"type":"response.done","response":{"status":"completed","usage":{"tokens_used":168}}}`,
 			inFrom: "none", outFrom: "none", totalFrom: "input+output",
-			usageAt: "response.usage (empty)",
+			usageAt: "response.usage (unmapped)",
+		},
+		{
+			// Both objects populated, each with a number the other lacks: the
+			// sides are resolved independently, top-level winning wherever it
+			// carries anything, so neither object's gap can zero the other's
+			// number. usage_at names both, in input+output order.
+			name: "numbers split across the two usage objects",
+			frame: `{"type":"response.done","response":{"status":"completed",
+				"usage":{"input_tokens":7,"output_tokens":16,"output_token_details":{"reasoning_tokens":5}}},
+				"usage":{"input_tokens":31,"input_token_details":{"cached_tokens":9}}}`,
+			input: 31, output: 16, total: 47, cached: 9, reasoning: 5,
+			inFrom: "input_tokens", outFrom: "output_tokens", totalFrom: "input+output",
+			usageAt: "usage+response.usage",
+		},
+		{
+			// The precedence itself, with both objects carrying a non-zero number
+			// for the SAME side: the top-level one wins, because that is where the
+			// live server puts the numbers while response.usage arrives empty.
+			// The loser's total_tokens is dropped with it — 10 would contradict
+			// the 31/16 that were actually kept.
+			name: "both objects non-zero: top level wins",
+			frame: `{"type":"response.done","response":{"status":"completed",
+				"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}},
+				"usage":{"input_tokens":31,"output_tokens":16}}`,
+			input: 31, output: 16, total: 47,
+			inFrom: "input_tokens", outFrom: "output_tokens", totalFrom: "input+output",
+			usageAt: "usage",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -906,14 +933,14 @@ func TestClipCutsOnRuneBoundaries(t *testing.T) {
 	}
 }
 
-// TestGrokBillableAudioSecondsDriveVoiceUsage: xAI reports its own billed audio
-// time per response (billable_audio_seconds in the top-level usage object). That
-// is what the session must report as VoiceUsage — summed across responses, since
-// VoiceUsage.Seconds is a session running total while the vendor's number is per
-// response — and it must be the same basis at teardown, because the pipeline
-// keeps whichever figure is larger. The wall clock remains the fallback for a
-// vendor that reports none.
-func TestGrokBillableAudioSecondsDriveVoiceUsage(t *testing.T) {
+// TestGrokBillableAudioSecondsAreLoggedNotPersisted: xAI reports its own billed
+// audio time per response (billable_audio_seconds in the top-level usage
+// object). It must reach the LOG — the per-response value and the session's
+// running sum, beside the wall clock they are read against — and it must NOT
+// reach VoiceUsage, which travels to the persistence POST's
+// sessionDurationSeconds where Gemini puts a wall clock and GPT-Live the
+// vendor's session seconds. A ~90 s session that billed 3 s must persist ~90.
+func TestGrokBillableAudioSecondsAreLoggedNotPersisted(t *testing.T) {
 	frame := func(seconds string) string {
 		return `{"type":"response.done","response":{"status":"completed","usage":{}},
 			"usage":{"billable_audio_seconds":` + seconds + `,"input_tokens":31,"output_tokens":16,"total_tokens":47}}`
@@ -954,28 +981,85 @@ func TestGrokBillableAudioSecondsDriveVoiceUsage(t *testing.T) {
 			closed = &c
 		}
 	}
-	// Two responses: the vendor's own 3s, then the running total 5.5s — not a
-	// wall clock, which for this sub-second test would be far smaller, and not
-	// the last response's 2.5s alone.
-	if len(seconds) != 2 || seconds[0] != 3 || seconds[1] != 5.5 {
-		t.Fatalf("VoiceUsage seconds = %v, want [3 5.5]", seconds)
+	// Two responses billing 3 s then 2.5 s. Every VoiceUsage is this test's own
+	// wall clock, which is sub-second (and may read as 0 at the platform's timer
+	// granularity) — never the vendor's 3, never the 5.5 running sum.
+	if len(seconds) != 2 {
+		t.Fatalf("VoiceUsage count = %d, want 2: %v", len(seconds), seconds)
+	}
+	for i, got := range seconds {
+		if got < 0 || got >= 1 {
+			t.Fatalf("VoiceUsage[%d].Seconds = %v, want this test's sub-second wall clock, not the vendor's billed audio", i, got)
+		}
 	}
 	if closed == nil {
 		t.Fatal("no Closed event")
 	}
-	if closed.VoiceSeconds != 5.5 {
-		t.Fatalf("Closed.VoiceSeconds = %v, want 5.5 (the pipeline keeps the larger figure, so teardown must use the same basis)", closed.VoiceSeconds)
+	// The socket is held open for 100ms after the second frame, so teardown's
+	// wall clock is positive — and still nowhere near the 5.5 s billed.
+	if closed.VoiceSeconds <= 0 || closed.VoiceSeconds >= 1 {
+		t.Fatalf("Closed.VoiceSeconds = %v, want the same wall-clock basis as every VoiceUsage (the pipeline keeps the larger figure)", closed.VoiceSeconds)
+	}
+
+	// The billed seconds go to the log instead: the frame's own value, the
+	// running total, and the wall clock they are read against. Only the first
+	// line survives the 30 s rate limiter, so this pins the first response;
+	// TestGrokBilledAudioTotalDedupesByResponseID covers the running sum.
+	lines := capture.all()
+	if len(lines) != 1 {
+		t.Fatalf("diagnostic lines = %d, want exactly 1: %#v", len(lines), lines)
+	}
+	for field, want := range map[string]any{"billable": 3.0, "billable_total": 3.0, "billed_over_wall": true} {
+		if lines[0][field] != want {
+			t.Fatalf("log %s = %v, want %v (line %v)", field, lines[0][field], want, lines[0])
+		}
+	}
+	if w, ok := lines[0]["wall_seconds"].(float64); !ok || w < 0 || w >= 1 {
+		t.Fatalf("log wall_seconds = %v, want this test's sub-second wall clock", lines[0]["wall_seconds"])
 	}
 }
 
-// TestGrokVoiceUsageFallsBackToWallClock: with no billable_audio_seconds
-// anywhere, the session still reports elapsed time rather than nothing.
-func TestGrokVoiceUsageFallsBackToWallClock(t *testing.T) {
+// TestGrokBilledAudioTotalDedupesByResponseID: the logged total sums the
+// vendor's per-response billed audio, and counts a response_id once — the live
+// frame's items carry a "replayed" flag, so a resent response.done must not
+// inflate it. A frame with no id at all is still counted.
+func TestGrokBilledAudioTotalDedupesByResponseID(t *testing.T) {
+	s := &Session{started: time.Now()}
+	for _, tc := range []struct {
+		id      string
+		billed  float64
+		wantSum float64
+	}{
+		{"resp_1", 3, 3},
+		{"resp_2", 2.5, 5.5},
+		{"resp_2", 2.5, 5.5}, // replayed: already counted
+		{"", 1, 6.5},         // no id to dedupe on, so counted
+		{"", 1, 7.5},
+		{"resp_3", 0, 7.5}, // nothing billed
+	} {
+		billed, total := s.recordBilled(tc.id, tc.billed)
+		if billed != tc.billed {
+			t.Fatalf("recordBilled(%q, %v) reported billed %v", tc.id, tc.billed, billed)
+		}
+		if total != tc.wantSum {
+			t.Fatalf("after recordBilled(%q, %v) total = %v, want %v", tc.id, tc.billed, total, tc.wantSum)
+		}
+	}
+}
+
+// TestGrokVoiceUsageIsWallClock: with no billable_audio_seconds anywhere, the
+// session reports elapsed time — the same basis it reports when the vendor does
+// send billed audio, so sessionDurationSeconds means one thing per session and
+// across vendors.
+func TestGrokVoiceUsageIsWallClock(t *testing.T) {
 	events, _ := runDone(t, `{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
 	for _, ev := range events {
 		if u, ok := ev.(gptlive.VoiceUsage); ok {
-			if u.Seconds <= 0 {
-				t.Fatalf("VoiceUsage.Seconds = %v, want the wall-clock fallback", u.Seconds)
+			// Sub-second, because that is how long this test's session lived; it
+			// may read as 0 at the platform's timer granularity, which is why the
+			// lower bound is not strict.
+			if u.Seconds < 0 || u.Seconds >= 1 {
+				t.Fatalf("VoiceUsage.Seconds = %v, want this test's own wall clock", u.Seconds)
 			}
 			return
 		}
@@ -1024,6 +1108,48 @@ func TestGrokShapeDumpShowsWholeUsageObject(t *testing.T) {
 	for _, leak := range []string{said, "elephant", "transcript"} {
 		if strings.Contains(shape, leak) {
 			t.Fatalf("a usage-only dump must not reach the output items at all, got %q in %q", leak, shape)
+		}
+	}
+}
+
+// TestGrokShapeDumpFallsBackToWholeFrame: narrowing the dump to the usage
+// objects only works while the numbers are still inside one of them. When every
+// usage object the frame carries is empty or all-zero — the vendor having moved
+// the numbers to a sibling — the narrowed dump would print two empty braces and
+// nothing else, which is exactly the blind spot this diagnostic was built to
+// close. The whole frame is described instead, with every string still elided.
+func TestGrokShapeDumpFallsBackToWholeFrame(t *testing.T) {
+	const said = "a story about a small elephant who lost his way home"
+	frame := `{"type":"response.done","response_id":"resp_9",
+		"response":{"id":"resp_9","object":"realtime.response","status":"completed","usage":{},
+			"output":[{"type":"message","content":[{"type":"audio","transcript":"` + said + `"}]}],
+			"metrics":{"prompt_units":140,"completion_units":52}},
+		"usage":{},
+		"token_usage":{"in":31,"out":16}}`
+
+	_, logs := runDone(t, frame)
+	if len(logs) != 1 {
+		t.Fatalf("diagnostic lines = %d, want exactly 1: %#v", len(logs), logs)
+	}
+	shape, ok := logs[0]["shape"].(string)
+	if !ok {
+		t.Fatalf("no shape dump on a frame that parsed to nothing: %v", logs[0])
+	}
+	// The sibling that actually holds the numbers is named, which the usage-only
+	// dump could never have shown.
+	for _, want := range []string{"token_usage:{in:31,out:16}", "usage:{}"} {
+		if !strings.Contains(shape, want) {
+			t.Fatalf("shape = %q, want it to contain %q", shape, want)
+		}
+	}
+	// Strings are still elided — the key name of a transcript may appear in a
+	// whole-frame dump, never a word of what was said.
+	if !strings.Contains(shape, "transcript:str") {
+		t.Fatalf("shape = %q, want the transcript elided to str", shape)
+	}
+	for _, leak := range []string{said, "elephant"} {
+		if strings.Contains(shape, leak) {
+			t.Fatalf("shape leaked frame text %q: %q", leak, shape)
 		}
 	}
 }

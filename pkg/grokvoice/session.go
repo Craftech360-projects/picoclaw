@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -47,10 +48,15 @@ type Session struct {
 	cfg     Config
 	started time.Time
 
-	mu            sync.Mutex
-	instructions  string
-	agentText     map[string]string
-	billableAudio float64 // running sum of the vendor's per-response billed audio seconds
+	mu           sync.Mutex
+	instructions string
+	agentText    map[string]string
+	// billableAudio is the running sum of the vendor's per-response billed audio
+	// seconds, and billedSeen the response IDs already counted into it. Both
+	// exist for the response.done LOG LINE alone — see recordBilled for why
+	// this number is deliberately not what VoiceUsage reports.
+	billableAudio float64
+	billedSeen    map[string]bool
 
 	// active, pending and owed together decide when the single response.create
 	// that resumes the conversation may be sent. They are tracked globally
@@ -89,7 +95,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("grokvoice: %w", err)
 	}
 	s := &Session{Conn: realtimeconn.New(ws), cfg: cfg, started: time.Now(), instructions: cfg.Instructions,
-		agentText: map[string]string{}, pending: map[string]bool{},
+		agentText: map[string]string{}, pending: map[string]bool{}, billedSeen: map[string]bool{},
 		logLimit: realtimeconn.NewLogLimiter(30 * time.Second), logDone: logDone}
 	s.SetSecret(cfg.APIKey)
 	if err := s.Send(s.sessionUpdate()); err != nil {
@@ -166,47 +172,118 @@ type serverEvent struct {
 	// member of response. That is where the live server actually puts the
 	// numbers; response.usage, the only place xAI's published schema mentions,
 	// arrives as an empty object. See pickUsage.
-	Usage    *usage `json:"usage"`
-	Response *struct {
+	Usage *usage `json:"usage"`
+	// ResponseID names the response this frame closes. It is used for one thing:
+	// deduping the billed-audio total the response.done line logs, since the
+	// live frame's items carry a "replayed" flag — so the vendor can resend a
+	// response.done, and a replay must not be counted twice.
+	ResponseID string `json:"response_id"`
+	Response   *struct {
+		ID    string `json:"id"`
 		Usage *usage `json:"usage"`
 	} `json:"response"`
 	Error json.RawMessage `json:"error"`
 }
 
-// pickUsage chooses the usage object to report from: the top-level one when it
-// carries anything, otherwise response.usage. Both are tried because the two
-// differ in the live protocol and only one of them is documented — a server that
-// starts filling in the documented place must not go unnoticed. The returned
-// name is logged as usage_at, so a future change of venue is visible in one
-// line instead of another zero-token session.
+// responseID prefers the top-level field and falls back to response.id; the
+// live frame carries both, the published schema only the latter.
+func (ev *serverEvent) responseID() string {
+	if ev.ResponseID != "" {
+		return ev.ResponseID
+	}
+	if ev.Response != nil {
+		return ev.Response.ID
+	}
+	return ""
+}
+
+// pickUsage maps a response.done frame onto gptlive.BackendUsage, reading both
+// places a usage object has ever been seen: the top-level one the live server
+// actually fills and the documented response.usage, which arrives empty. Both
+// are tried because only one of them is documented — a server that starts
+// filling the documented place must not go unnoticed.
+//
+// Each SIDE is resolved independently across the two objects, top-level first
+// and response.usage as the fallback, rather than picking one object whole: a
+// frame carrying input_tokens at the top level and output_tokens only in
+// response.usage used to report output 0, which is the same silent-zero failure
+// this whole mapping exists to prevent. The returned name is logged as usage_at
+// and names the object each number came from (or both, joined, when they were
+// split), so a change of venue costs one log line instead of another zero-token
+// session.
 func (ev *serverEvent) pickUsage(model string) (gptlive.BackendUsage, usageSource, string) {
 	var respUsage *usage
 	if ev.Response != nil {
 		respUsage = ev.Response.Usage
 	}
+	type mapped struct {
+		bu   gptlive.BackendUsage
+		src  usageSource
+		name string
+	}
+	var objs []mapped
 	for _, c := range []struct {
-		u  *usage
-		at string
+		u    *usage
+		name string
 	}{{ev.Usage, "usage"}, {respUsage, "response.usage"}} {
 		if c.u == nil {
 			continue
 		}
-		if bu, src := c.u.backendUsage(model); bu.Input != 0 || bu.Output != 0 || bu.Total != 0 {
-			return bu, src, c.at
+		bu, src := c.u.backendUsage(model)
+		objs = append(objs, mapped{bu, src, c.name})
+	}
+	if len(objs) == 0 {
+		return gptlive.BackendUsage{}, usageSource{Input: "none", Output: "none", Total: "none"}, "none"
+	}
+	out := gptlive.BackendUsage{Model: model}
+	src := usageSource{Input: "none", Output: "none", Total: "none"}
+	var inAt, outAt string
+	for _, o := range objs {
+		// Cached/Reasoning travel with the side they belong to, so a breakdown
+		// is never read out of one object while the total came from the other.
+		if out.Input == 0 && o.bu.Input != 0 {
+			out.Input, out.Cached, src.Input, inAt = o.bu.Input, o.bu.Cached, o.src.Input, o.name
+		}
+		if out.Output == 0 && o.bu.Output != 0 {
+			out.Output, out.Reasoning, src.Output, outAt = o.bu.Output, o.bu.Reasoning, o.src.Output, o.name
 		}
 	}
-	// Nothing usable anywhere: report the first object that was present at all,
-	// so has_usage and the zeros below describe something real.
-	for _, c := range []struct {
-		u  *usage
-		at string
-	}{{ev.Usage, "usage"}, {respUsage, "response.usage"}} {
-		if c.u != nil {
-			bu, src := c.u.backendUsage(model)
-			return bu, src, c.at + " (empty)"
+	// A vendor-sent total is passed through — backendUsage only reports
+	// total_from=total_tokens when the vendor actually sent one — but only from
+	// an object that also supplied a side, so the loser object's total can never
+	// contradict the numbers that were kept. When no side resolved anywhere,
+	// any object's total still counts, since a frame carrying nothing but
+	// total_tokens is better read than dropped. Otherwise the two resolved sides
+	// are added, which is what backendUsage does within one object and stays
+	// right across two.
+	for _, o := range objs {
+		contributed := o.name == inAt || o.name == outAt || (inAt == "" && outAt == "")
+		if contributed && o.src.Total == "total_tokens" && o.bu.Total != 0 {
+			out.Total, src.Total = o.bu.Total, "total_tokens"
+			break
 		}
 	}
-	return gptlive.BackendUsage{}, usageSource{Input: "none", Output: "none", Total: "none"}, "none"
+	if out.Total == 0 {
+		out.Total, src.Total = out.Input+out.Output, "input+output"
+	}
+	return out, src, usageAt(objs[0].name, inAt, outAt)
+}
+
+// usageAt names the object (or objects) the numbers came from. Nothing mapped
+// is reported as "<first present> (unmapped)" — not "(empty)", which is what it
+// used to say and was wrong: an object can be full of numbers and merely spell
+// them in a way this code has not met yet, and an operator reading "(empty)"
+// beside a shape dump of a populated object chases the wrong thing.
+func usageAt(first, inAt, outAt string) string {
+	switch {
+	case inAt != "" && outAt != "" && inAt != outAt:
+		return inAt + "+" + outAt
+	case inAt != "":
+		return inAt
+	case outAt != "":
+		return outAt
+	}
+	return first + " (unmapped)"
 }
 
 // usage decodes a response.done usage object. xAI's published websocket schema
@@ -248,7 +325,8 @@ type usage struct {
 	// BillableAudioSeconds is xAI's own billed audio time for the response. It
 	// appears in no published schema (neither voice-realtime.ws.json nor
 	// openapi.json mentions it); it is read off the live protocol, so it is
-	// treated as optional throughout — see Session.voiceSeconds.
+	// treated as optional throughout, and it is LOGGED ONLY — see
+	// Session.recordBilled and Session.voiceSeconds.
 	BillableAudioSeconds float64 `json:"billable_audio_seconds"`
 }
 
@@ -378,31 +456,56 @@ func (ev *serverEvent) billableAudioSeconds() float64 {
 	return 0
 }
 
-// voiceSeconds adds one response's billable audio time to the session's running
-// total and returns the number to report as VoiceUsage.
+// voiceSeconds is the session's wall clock, and is what every VoiceUsage and
+// the teardown Closed event report.
 //
-// billable_audio_seconds is PER RESPONSE (the live log shows 3 for a single
-// response in a session that ran a minute and a half), while VoiceUsage.Seconds
-// is the session's running total to date — gptLivePipeline.recordVoiceSeconds
-// keeps the high-water mark and never accumulates — so the per-response numbers
-// are summed here. The wall clock stays the fallback for a session where the
-// vendor reports none (the field is in no published schema): reporting the
-// vendor's own billed time is the point, but reporting nothing would be worse
-// than reporting a wall clock. Both this and onEnd's Closed event must return
-// the same basis, since the pipeline keeps whichever is larger — a wall clock
-// emitted at teardown would otherwise silently overwrite the billed total.
-func (s *Session) voiceSeconds(add float64) float64 {
+// It is deliberately NOT the vendor's billable_audio_seconds. VoiceUsage.Seconds
+// travels gptLivePipeline.recordVoiceSeconds -> RoomSession -> the persistence
+// POST's sessionDurationSeconds, a field geminilive fills with a wall clock and
+// gptlive with the vendor's session seconds; feeding summed billed audio into it
+// for Grok alone would silently redefine one persisted billing number per
+// vendor (the observed ~90 s session that billed 3 s would persist ~3). It would
+// also mix bases within a single Grok session, since a response.done that
+// carries no billable_audio_seconds — a tool-call-only response, or the vendor
+// simply omitting an undocumented field — would emit a wall clock that the
+// pipeline's monotonic keep then makes permanent, discarding every later billed
+// total. One meaning per field; the billed number is logged instead, by
+// recordBilled.
+func (s *Session) voiceSeconds() float64 { return time.Since(s.started).Seconds() }
+
+// recordBilled adds one response's vendor-billed audio time to the session's
+// running total and returns that response's own value and the new total, both
+// for the response.done log line — nothing else reads them, and nothing
+// persists them (see voiceSeconds).
+//
+// Logging both is what makes the open question answerable: the field is in no
+// published schema, and whether it is per-response or cumulative cannot be told
+// from one sample. Per-response, the total tracks the session's speech and stays
+// well under its wall clock; cumulative, the sum goes triangular and overtakes
+// the wall clock on the second or third response — which the line's own
+// billable/billable_total/wall_seconds fields show directly.
+//
+// A response ID is counted once: the live frame's items carry a "replayed"
+// flag, so the vendor can resend a response.done, and a replay must not inflate
+// the total. An ID-less frame is counted, since there is nothing to dedupe on.
+func (s *Session) recordBilled(id string, billed float64) (float64, float64) {
 	s.mu.Lock()
-	if add > 0 {
-		s.billableAudio += add
+	defer s.mu.Unlock()
+	if billed > 0 && (id == "" || !s.billedSeen[id]) {
+		if id != "" {
+			if s.billedSeen == nil { // a Session built by hand rather than by Dial
+				s.billedSeen = map[string]bool{}
+			}
+			s.billedSeen[id] = true
+		}
+		s.billableAudio += billed
 	}
-	billed := s.billableAudio
-	s.mu.Unlock()
-	if billed > 0 {
-		return billed
-	}
-	return time.Since(s.started).Seconds()
+	return billed, s.billableAudio
 }
+
+// round1 keeps the log's seconds readable: a wall clock printed to nanosecond
+// precision buries the comparison the line exists to make.
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
 // logDone is the response.done diagnostic's only way out to the log — a
 // variable so the tests can assert what it actually emits, since this is the
@@ -439,8 +542,17 @@ const shapeLimit = 1200
 // live in: every usage object the frame carries, at every place one has ever
 // been seen (the documented response.usage and the top-level one the live server
 // actually fills), each rendered by describeValue so names and numbers survive
-// and strings do not. A frame with no usage object anywhere is described whole,
-// since then the question is where the vendor moved it to.
+// and strings do not.
+//
+// The usage objects alone are enough only while the numbers are still IN one of
+// them under some spelling — which shows up as a non-zero number somewhere
+// inside. When no usage object carries one (none present at all, or every one
+// of them empty or all-zero, e.g. usage:{} beside response.usage:{} with the
+// real numbers moved to a sibling token_usage), that narrowing is exactly the
+// blind spot this diagnostic was built to close, so the WHOLE frame is
+// described instead — the question is then where the vendor moved them to, and
+// only the frame can answer it. Strings stay elided either way, and the caller
+// scrubs and clips the result as before.
 func doneShape(raw []byte) string {
 	var v any
 	if json.Unmarshal(raw, &v) != nil {
@@ -448,18 +560,45 @@ func doneShape(raw []byte) string {
 	}
 	top, _ := v.(map[string]any)
 	var parts []string
+	narrow := false
 	if u, ok := top["usage"]; ok {
 		parts = append(parts, "usage:"+describeValue("usage", u, 6))
+		narrow = narrow || hasNonZeroNumber(u)
 	}
 	if r, ok := top["response"].(map[string]any); ok {
 		if u, ok := r["usage"]; ok {
 			parts = append(parts, "response.usage:"+describeValue("usage", u, 6))
+			narrow = narrow || hasNonZeroNumber(u)
 		}
 	}
-	if len(parts) == 0 {
+	if !narrow {
 		return describeValue("", v, 6)
 	}
 	return strings.Join(parts, " ")
+}
+
+// hasNonZeroNumber reports whether a decoded JSON value carries a non-zero
+// number anywhere inside it. That is what separates a usage object worth
+// dumping on its own — populated, just spelled in a way this code has not met
+// yet — from one that has nothing to say.
+func hasNonZeroNumber(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, e := range t {
+			if hasNonZeroNumber(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if hasNonZeroNumber(e) {
+				return true
+			}
+		}
+	case float64:
+		return t != 0
+	}
+	return false
 }
 
 // describeJSON renders a frame as its structure alone: the key names at every
@@ -587,6 +726,10 @@ func (s *Session) handle(raw []byte) {
 		hasUsage := ev.Usage != nil || (ev.Response != nil && ev.Response.Usage != nil)
 		bu, src, at := ev.pickUsage(s.cfg.Model)
 		blind := bu.Input == 0 && bu.Output == 0 && bu.Total == 0
+		// Recorded outside the rate limiter: the running total has to be right
+		// on the lines that DO get logged, whichever those are.
+		billed, billedTotal := s.recordBilled(ev.responseID(), ev.billableAudioSeconds())
+		wall := s.voiceSeconds()
 		key := "response.done"
 		if blind {
 			key = "response.done:no-tokens"
@@ -602,7 +745,16 @@ func (s *Session) handle(raw []byte) {
 				"input_from":   src.Input,
 				"output_from":  src.Output,
 				"total_from":   src.Total,
-				"suppressed":   held,
+				// The vendor's own billed audio time for this response, the
+				// session's running sum of it, and the wall clock to read them
+				// against — a sum that overtakes the wall clock means
+				// billable_audio_seconds is cumulative, not per-response. None of
+				// the three is persisted; see voiceSeconds and recordBilled.
+				"billable":         billed,
+				"billable_total":   round1(billedTotal),
+				"wall_seconds":     round1(wall),
+				"billed_over_wall": billedTotal > wall,
+				"suppressed":       held,
 			}
 			if blind {
 				fields["shape"] = clip(s.Scrub(doneShape(raw)), shapeLimit)
@@ -612,7 +764,7 @@ func (s *Session) handle(raw []byte) {
 		if hasUsage {
 			s.Emit(bu)
 		}
-		s.Emit(gptlive.VoiceUsage{Seconds: s.voiceSeconds(ev.billableAudioSeconds())})
+		s.Emit(gptlive.VoiceUsage{Seconds: wall})
 		s.mu.Lock()
 		// The response (and every item in it) is finished: clear the accumulated
 		// per-item transcript text now rather than letting it grow for the life
@@ -700,7 +852,7 @@ func (s *Session) onEnd(err error) {
 		s.Emit(gptlive.Error{Err: errors.New("grokvoice: connection lost: " + s.Scrub(fmt.Sprint(err))), Recoverable: false})
 	}
 	// Same basis as every VoiceUsage this session emitted (see voiceSeconds):
-	// the pipeline keeps the larger of the two, so a wall clock here would
-	// overwrite the vendor's own billed audio total at teardown.
-	s.Emit(gptlive.Closed{Reason: "socket closed", VoiceSeconds: s.voiceSeconds(0)})
+	// the pipeline keeps the larger of the two, so the two must never differ in
+	// what they measure.
+	s.Emit(gptlive.Closed{Reason: "socket closed", VoiceSeconds: s.voiceSeconds()})
 }
