@@ -667,7 +667,39 @@ func TestGrokResponseDoneUsageShapes(t *testing.T) {
 		input, output, total, cached int
 		reasoning                    int
 		inFrom, outFrom, totalFrom   string
+		usageAt                      string
 	}{
+		{
+			// The live frame, from the structural dump that finally caught this
+			// (room 208499eb): xAI fills a TOP-LEVEL usage object — a sibling of
+			// type/event_id — and leaves the documented response.usage empty. Cut
+			// down to what the 400-byte dump showed plus the flat numbers it was
+			// truncated before reaching.
+			name: "live xai frame: top-level usage, empty response.usage",
+			frame: `{"event_id":"event_9","previous_item_id":null,"type":"response.done","response_id":"resp_9",
+				"response":{"id":"resp_9","object":"realtime.response","status":"completed","status_details":"none","usage":{},
+					"output":[{"id":"item_9","object":"realtime.item","type":"message","role":"assistant","status":"completed","replayed":false,
+						"content":[{"type":"audio","transcript":"here you go"}]}]},
+				"usage":{"billable_audio_seconds":3,
+					"input_token_details":{"audio_tokens":0,"grok_tokens":0,"text_tokens":31},
+					"output_token_details":{"audio_tokens":12,"text_tokens":4},
+					"input_tokens":31,"output_tokens":16,"total_tokens":47}}`,
+			input: 31, output: 16, total: 47,
+			inFrom: "input_tokens", outFrom: "output_tokens", totalFrom: "total_tokens", usageAt: "usage",
+		},
+		{
+			// The same live frame with the flat numbers absent, so the breakdowns
+			// have to carry it — including the undocumented grok_tokens, which is
+			// summed as a distinct slice of its side.
+			name: "live xai frame: top-level details only, grok_tokens counted",
+			frame: `{"type":"response.done","response":{"status":"completed","usage":{}},
+				"usage":{"billable_audio_seconds":2.5,
+					"input_token_details":{"audio_tokens":90,"grok_tokens":7,"text_tokens":31},
+					"output_token_details":{"audio_tokens":40,"text_tokens":9}}}`,
+			input: 128, output: 49, total: 177,
+			inFrom: "input_token_details sum", outFrom: "output_token_details sum", totalFrom: "input+output",
+			usageAt: "usage",
+		},
 		{
 			// Exactly xAI's documented response.done, including the surrounding
 			// response object fields from the schema's own example. total_tokens
@@ -731,6 +763,7 @@ func TestGrokResponseDoneUsageShapes(t *testing.T) {
 			name:   "unrecognized usage object maps to zeros",
 			frame:  `{"type":"response.done","response":{"status":"completed","usage":{"tokens_used":168}}}`,
 			inFrom: "none", outFrom: "none", totalFrom: "input+output",
+			usageAt: "response.usage (empty)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -745,12 +778,17 @@ func TestGrokResponseDoneUsageShapes(t *testing.T) {
 			if got.Model != DefaultModel {
 				t.Fatalf("model = %q, want %q", got.Model, DefaultModel)
 			}
-			// The line must always say which spelling produced the numbers, not
-			// only when there are none.
+			// The line must always say which spelling produced the numbers, and
+			// which of the two usage objects it read them from — not only when
+			// there are none.
+			usageAt := tc.usageAt
+			if usageAt == "" {
+				usageAt = "response.usage" // the documented place, where most cases put it
+			}
 			for field, want := range map[string]any{
 				"input": tc.input, "output": tc.output, "total": tc.total,
 				"input_from": tc.inFrom, "output_from": tc.outFrom, "total_from": tc.totalFrom,
-				"has_usage": true,
+				"has_usage": true, "usage_at": usageAt,
 			} {
 				if line[field] != want {
 					t.Fatalf("log %s = %v, want %v (line %v)", field, line[field], want, line)
@@ -785,8 +823,12 @@ func TestGrokResponseDoneWithoutTokensLogsTheShape(t *testing.T) {
 			frame: `{"type":"response.done","response":{"status":"completed",
 				"output":[{"type":"message","content":[{"type":"audio","transcript":"` + said + `"}]}],
 				"usage":{"cost_in_usd_ticks":420,"num_sources_used":0}}}`,
+			// A frame that HAS a usage object is described by that object alone —
+			// it is the only place a token mismatch can live, and keeping the dump
+			// off the output items means the transcript is not merely elided but
+			// never visited.
 			hasUsage:  true,
-			wantShape: []string{"cost_in_usd_ticks:420", "num_sources_used:0", "transcript:str"},
+			wantShape: []string{"response.usage:{cost_in_usd_ticks:420", "num_sources_used:0"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -861,5 +903,127 @@ func TestClipCutsOnRuneBoundaries(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatalf("clip produced invalid UTF-8: %q", got)
+	}
+}
+
+// TestGrokBillableAudioSecondsDriveVoiceUsage: xAI reports its own billed audio
+// time per response (billable_audio_seconds in the top-level usage object). That
+// is what the session must report as VoiceUsage — summed across responses, since
+// VoiceUsage.Seconds is a session running total while the vendor's number is per
+// response — and it must be the same basis at teardown, because the pipeline
+// keeps whichever figure is larger. The wall clock remains the fallback for a
+// vendor that reports none.
+func TestGrokBillableAudioSecondsDriveVoiceUsage(t *testing.T) {
+	frame := func(seconds string) string {
+		return `{"type":"response.done","response":{"status":"completed","usage":{}},
+			"usage":{"billable_audio_seconds":` + seconds + `,"input_tokens":31,"output_tokens":16,"total_tokens":47}}`
+	}
+
+	var capture doneCapture
+	capture.install(t)
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var m map[string]any
+		if c.ReadJSON(&m) != nil { // session.update
+			return
+		}
+		_ = c.WriteMessage(websocket.TextMessage, []byte(frame("3")))
+		_ = c.WriteMessage(websocket.TextMessage, []byte(frame("2.5")))
+		time.Sleep(100 * time.Millisecond) // then the vendor drops the socket
+	}))
+	defer srv.Close()
+
+	s, err := Dial(context.Background(), Config{APIKey: "xai-test-key-0123", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var seconds []float64
+	var closed *gptlive.Closed
+	for _, ev := range collectEvents(t, s.Events()) {
+		switch e := ev.(type) {
+		case gptlive.VoiceUsage:
+			seconds = append(seconds, e.Seconds)
+		case gptlive.Closed:
+			c := e
+			closed = &c
+		}
+	}
+	// Two responses: the vendor's own 3s, then the running total 5.5s — not a
+	// wall clock, which for this sub-second test would be far smaller, and not
+	// the last response's 2.5s alone.
+	if len(seconds) != 2 || seconds[0] != 3 || seconds[1] != 5.5 {
+		t.Fatalf("VoiceUsage seconds = %v, want [3 5.5]", seconds)
+	}
+	if closed == nil {
+		t.Fatal("no Closed event")
+	}
+	if closed.VoiceSeconds != 5.5 {
+		t.Fatalf("Closed.VoiceSeconds = %v, want 5.5 (the pipeline keeps the larger figure, so teardown must use the same basis)", closed.VoiceSeconds)
+	}
+}
+
+// TestGrokVoiceUsageFallsBackToWallClock: with no billable_audio_seconds
+// anywhere, the session still reports elapsed time rather than nothing.
+func TestGrokVoiceUsageFallsBackToWallClock(t *testing.T) {
+	events, _ := runDone(t, `{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+	for _, ev := range events {
+		if u, ok := ev.(gptlive.VoiceUsage); ok {
+			if u.Seconds <= 0 {
+				t.Fatalf("VoiceUsage.Seconds = %v, want the wall-clock fallback", u.Seconds)
+			}
+			return
+		}
+	}
+	t.Fatalf("no VoiceUsage among %#v", events)
+}
+
+// TestGrokShapeDumpShowsWholeUsageObject: the 400-byte cap the diagnostic
+// started with truncated the live frame mid-key, inside the very object being
+// diagnosed. A frame carrying usage objects is now described by those objects
+// alone, so both of them fit whole — and the transcript still never does.
+func TestGrokShapeDumpShowsWholeUsageObject(t *testing.T) {
+	const said = "a very long story about a small elephant who lost his way home"
+	frame := `{"event_id":"event_9","previous_item_id":null,"type":"response.done","response_id":"resp_9",
+		"response":{"id":"resp_9","object":"realtime.response","status":"completed","status_details":"none","usage":{},
+			"output":[{"id":"item_9","object":"realtime.item","type":"message","role":"assistant","status":"completed","replayed":false,
+				"content":[{"type":"audio","transcript":"` + said + `"}]}]},
+		"usage":{"billable_audio_seconds":3,"unknown_future_field":9,
+			"input_token_details":{"audio_tokens":0,"grok_tokens":0,"text_tokens":0},
+			"output_token_details":{"audio_tokens":0,"text_tokens":0}}}`
+
+	_, logs := runDone(t, frame)
+	if len(logs) != 1 {
+		t.Fatalf("diagnostic lines = %d, want exactly 1: %#v", len(logs), logs)
+	}
+	shape, ok := logs[0]["shape"].(string)
+	if !ok {
+		t.Fatalf("no shape dump on a frame that parsed to nothing: %v", logs[0])
+	}
+	// Both usage objects, whole: the last member of the last breakdown is
+	// present, so nothing was cut off mid-object, and the empty documented one
+	// is visible as empty.
+	for _, want := range []string{
+		"usage:{billable_audio_seconds:3", "grok_tokens:0",
+		"input_token_details:{audio_tokens:0,grok_tokens:0,text_tokens:0}",
+		"output_token_details:{audio_tokens:0,text_tokens:0}", "unknown_future_field:9",
+		"response.usage:{}",
+	} {
+		if !strings.Contains(shape, want) {
+			t.Fatalf("shape = %q, want it to contain %q", shape, want)
+		}
+	}
+	if strings.Contains(shape, "...") {
+		t.Fatalf("shape was truncated: %q", shape)
+	}
+	for _, leak := range []string{said, "elephant", "transcript"} {
+		if strings.Contains(shape, leak) {
+			t.Fatalf("a usage-only dump must not reach the output items at all, got %q in %q", leak, shape)
+		}
 	}
 }

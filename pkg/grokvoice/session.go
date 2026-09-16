@@ -47,9 +47,10 @@ type Session struct {
 	cfg     Config
 	started time.Time
 
-	mu           sync.Mutex
-	instructions string
-	agentText    map[string]string
+	mu            sync.Mutex
+	instructions  string
+	agentText     map[string]string
+	billableAudio float64 // running sum of the vendor's per-response billed audio seconds
 
 	// active, pending and owed together decide when the single response.create
 	// that resumes the conversation may be sent. They are tracked globally
@@ -161,13 +162,54 @@ type serverEvent struct {
 	CallID     string `json:"call_id"`
 	Name       string `json:"name"`
 	Arguments  string `json:"arguments"`
-	Response   *struct {
+	// Usage is the TOP-LEVEL usage object — a sibling of type/event_id, not a
+	// member of response. That is where the live server actually puts the
+	// numbers; response.usage, the only place xAI's published schema mentions,
+	// arrives as an empty object. See pickUsage.
+	Usage    *usage `json:"usage"`
+	Response *struct {
 		Usage *usage `json:"usage"`
 	} `json:"response"`
 	Error json.RawMessage `json:"error"`
 }
 
-// usage decodes response.done.response.usage. xAI's published websocket schema
+// pickUsage chooses the usage object to report from: the top-level one when it
+// carries anything, otherwise response.usage. Both are tried because the two
+// differ in the live protocol and only one of them is documented — a server that
+// starts filling in the documented place must not go unnoticed. The returned
+// name is logged as usage_at, so a future change of venue is visible in one
+// line instead of another zero-token session.
+func (ev *serverEvent) pickUsage(model string) (gptlive.BackendUsage, usageSource, string) {
+	var respUsage *usage
+	if ev.Response != nil {
+		respUsage = ev.Response.Usage
+	}
+	for _, c := range []struct {
+		u  *usage
+		at string
+	}{{ev.Usage, "usage"}, {respUsage, "response.usage"}} {
+		if c.u == nil {
+			continue
+		}
+		if bu, src := c.u.backendUsage(model); bu.Input != 0 || bu.Output != 0 || bu.Total != 0 {
+			return bu, src, c.at
+		}
+	}
+	// Nothing usable anywhere: report the first object that was present at all,
+	// so has_usage and the zeros below describe something real.
+	for _, c := range []struct {
+		u  *usage
+		at string
+	}{{ev.Usage, "usage"}, {respUsage, "response.usage"}} {
+		if c.u != nil {
+			bu, src := c.u.backendUsage(model)
+			return bu, src, c.at + " (empty)"
+		}
+	}
+	return gptlive.BackendUsage{}, usageSource{Input: "none", Output: "none", Total: "none"}, "none"
+}
+
+// usage decodes a response.done usage object. xAI's published websocket schema
 // (https://docs.x.ai/voice-realtime.ws.json, response.done -> response.usage)
 // documents only the three flat integers input_tokens/output_tokens/total_tokens
 // — but a live run logged has_usage=true and still produced a zero-token
@@ -203,6 +245,11 @@ type usage struct {
 	OutputTokenDetails      tokenDetails `json:"output_token_details"`
 	OutputTokensDetails     tokenDetails `json:"output_tokens_details"`
 	CompletionTokensDetails tokenDetails `json:"completion_tokens_details"`
+	// BillableAudioSeconds is xAI's own billed audio time for the response. It
+	// appears in no published schema (neither voice-realtime.ws.json nor
+	// openapi.json mentions it); it is read off the live protocol, so it is
+	// treated as optional throughout — see Session.voiceSeconds.
+	BillableAudioSeconds float64 `json:"billable_audio_seconds"`
 }
 
 // tokenDetails is one side's breakdown. cached_tokens is deliberately left out
@@ -214,6 +261,15 @@ type tokenDetails struct {
 	ImageTokens     int `json:"image_tokens"`
 	CachedTokens    int `json:"cached_tokens"`
 	ReasoningTokens int `json:"reasoning_tokens"`
+	// GrokTokens is undocumented — it appears in the live input_token_details
+	// (beside audio_tokens and text_tokens) and in neither published schema. It
+	// is summed as a distinct slice of its side's total, the way every other
+	// member here is, because that is what a breakdown member means everywhere
+	// xAI does document one; the only member either vendor calls a subset is
+	// cached_tokens, and this is not it. If it ever turns out to overlap
+	// text_tokens, the effect is an over-count of the fallback path only — the
+	// flat number, when the vendor sends one, always wins over this sum.
+	GrokTokens int `json:"grok_tokens"`
 }
 
 func (d tokenDetails) empty() bool { return d == tokenDetails{} }
@@ -223,7 +279,7 @@ func (d tokenDetails) empty() bool { return d == tokenDetails{} }
 // reasoning tokens count too — xAI's MediaUsage documents output_tokens as
 // "rewritten-prompt text tokens + reasoning tokens + generated image tokens".
 func (d tokenDetails) sum() int {
-	return d.TextTokens + d.AudioTokens + d.ImageTokens + d.ReasoningTokens
+	return d.TextTokens + d.AudioTokens + d.ImageTokens + d.ReasoningTokens + d.GrokTokens
 }
 
 // named is a breakdown together with the member name it was decoded from, so
@@ -310,6 +366,44 @@ func (u *usage) backendUsage(model string) (gptlive.BackendUsage, usageSource) {
 		}
 }
 
+// billableAudioSeconds reads xAI's own billed audio time for this response off
+// whichever usage object carries it.
+func (ev *serverEvent) billableAudioSeconds() float64 {
+	if ev.Usage != nil && ev.Usage.BillableAudioSeconds > 0 {
+		return ev.Usage.BillableAudioSeconds
+	}
+	if ev.Response != nil && ev.Response.Usage != nil {
+		return ev.Response.Usage.BillableAudioSeconds
+	}
+	return 0
+}
+
+// voiceSeconds adds one response's billable audio time to the session's running
+// total and returns the number to report as VoiceUsage.
+//
+// billable_audio_seconds is PER RESPONSE (the live log shows 3 for a single
+// response in a session that ran a minute and a half), while VoiceUsage.Seconds
+// is the session's running total to date — gptLivePipeline.recordVoiceSeconds
+// keeps the high-water mark and never accumulates — so the per-response numbers
+// are summed here. The wall clock stays the fallback for a session where the
+// vendor reports none (the field is in no published schema): reporting the
+// vendor's own billed time is the point, but reporting nothing would be worse
+// than reporting a wall clock. Both this and onEnd's Closed event must return
+// the same basis, since the pipeline keeps whichever is larger — a wall clock
+// emitted at teardown would otherwise silently overwrite the billed total.
+func (s *Session) voiceSeconds(add float64) float64 {
+	s.mu.Lock()
+	if add > 0 {
+		s.billableAudio += add
+	}
+	billed := s.billableAudio
+	s.mu.Unlock()
+	if billed > 0 {
+		return billed
+	}
+	return time.Since(s.started).Seconds()
+}
+
 // logDone is the response.done diagnostic's only way out to the log — a
 // variable so the tests can assert what it actually emits, since this is the
 // one line in the package that reports on a frame's own contents: it has to
@@ -335,6 +429,38 @@ func (s *Session) emitDoneLog(fields map[string]any) {
 // can be described — which is all a field-name mismatch needs — with no way for
 // a transcript of the child or the model to reach the log.
 var protocolStrings = map[string]bool{"type": true, "status": true, "object": true}
+
+// shapeLimit bounds the structural dump. It is generous enough for a whole
+// usage object and both of its breakdowns: the 400-byte cap this started at cut
+// the live frame off mid-key, inside the very object that was being diagnosed.
+const shapeLimit = 1200
+
+// doneShape describes the part of a response.done frame a token mismatch can
+// live in: every usage object the frame carries, at every place one has ever
+// been seen (the documented response.usage and the top-level one the live server
+// actually fills), each rendered by describeValue so names and numbers survive
+// and strings do not. A frame with no usage object anywhere is described whole,
+// since then the question is where the vendor moved it to.
+func doneShape(raw []byte) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return "unparsed"
+	}
+	top, _ := v.(map[string]any)
+	var parts []string
+	if u, ok := top["usage"]; ok {
+		parts = append(parts, "usage:"+describeValue("usage", u, 6))
+	}
+	if r, ok := top["response"].(map[string]any); ok {
+		if u, ok := r["usage"]; ok {
+			parts = append(parts, "response.usage:"+describeValue("usage", u, 6))
+		}
+	}
+	if len(parts) == 0 {
+		return describeValue("", v, 6)
+	}
+	return strings.Join(parts, " ")
+}
 
 // describeJSON renders a frame as its structure alone: the key names at every
 // level, numbers, booleans and nulls verbatim, arrays as their length and
@@ -445,22 +571,21 @@ func (s *Session) handle(raw []byte) {
 		// member each one came from (input_from/output_from/total_from) — that is
 		// what lets the tolerant mapping above be narrowed later, and what makes a
 		// vendor switching spellings visible before it regresses to zero rather
-		// than after. And whenever the line has no numbers to carry — no usage at
-		// all, or one that mapped to nothing — it adds the frame's SHAPE: every key name at every level
-		// (usage and its *_details objects included) with numbers kept and every
-		// string value elided by describeJSON. That names the fields we are
-		// missing without logging a word of what was said, which the raw frame
-		// could not promise: this API is an OpenAI-realtime clone whose
-		// response.done carries response.output[].content[].transcript, and this
-		// very bug is proof that the live server departs from the published
-		// schema. Rate-limited under its own key, so an anomalous frame is never
-		// crowded out of the window by the healthy line.
-		hasUsage := ev.Response != nil && ev.Response.Usage != nil
-		var bu gptlive.BackendUsage
-		src := usageSource{Input: "none", Output: "none", Total: "none"}
-		if hasUsage {
-			bu, src = ev.Response.Usage.backendUsage(s.cfg.Model)
-		}
+		// than after — as does usage_at, which says WHICH usage object was read
+		// (the live server fills the top-level one and leaves response.usage
+		// empty; only the latter is documented). And whenever the line has no
+		// numbers to carry — no usage anywhere, or one that mapped to nothing —
+		// it adds the frame's SHAPE: every key name at every level (usage and its
+		// *_details objects included) with numbers kept and every string value
+		// elided by doneShape. That names the fields we are missing without
+		// logging a word of what was said, which a raw frame could not promise:
+		// this API is an OpenAI-realtime clone whose response.done carries
+		// response.output[].content[].transcript, and this very bug is proof that
+		// the live server departs from the published schema. Rate-limited under
+		// its own key, so an anomalous frame is never crowded out of the window
+		// by the healthy line.
+		hasUsage := ev.Usage != nil || (ev.Response != nil && ev.Response.Usage != nil)
+		bu, src, at := ev.pickUsage(s.cfg.Model)
 		blind := bu.Input == 0 && bu.Output == 0 && bu.Total == 0
 		key := "response.done"
 		if blind {
@@ -470,6 +595,7 @@ func (s *Session) handle(raw []byte) {
 			fields := map[string]any{
 				"has_response": ev.Response != nil,
 				"has_usage":    hasUsage,
+				"usage_at":     at,
 				"input":        bu.Input,
 				"output":       bu.Output,
 				"total":        bu.Total,
@@ -479,14 +605,14 @@ func (s *Session) handle(raw []byte) {
 				"suppressed":   held,
 			}
 			if blind {
-				fields["shape"] = clip(s.Scrub(describeJSON(raw)), 400)
+				fields["shape"] = clip(s.Scrub(doneShape(raw)), shapeLimit)
 			}
 			s.emitDoneLog(fields)
 		}
 		if hasUsage {
 			s.Emit(bu)
 		}
-		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
+		s.Emit(gptlive.VoiceUsage{Seconds: s.voiceSeconds(ev.billableAudioSeconds())})
 		s.mu.Lock()
 		// The response (and every item in it) is finished: clear the accumulated
 		// per-item transcript text now rather than letting it grow for the life
@@ -573,5 +699,8 @@ func (s *Session) onEnd(err error) {
 	if !s.Closing() {
 		s.Emit(gptlive.Error{Err: errors.New("grokvoice: connection lost: " + s.Scrub(fmt.Sprint(err))), Recoverable: false})
 	}
-	s.Emit(gptlive.Closed{Reason: "socket closed", VoiceSeconds: time.Since(s.started).Seconds()})
+	// Same basis as every VoiceUsage this session emitted (see voiceSeconds):
+	// the pipeline keeps the larger of the two, so a wall clock here would
+	// overwrite the vendor's own billed audio total at teardown.
+	s.Emit(gptlive.Closed{Reason: "socket closed", VoiceSeconds: s.voiceSeconds(0)})
 }
