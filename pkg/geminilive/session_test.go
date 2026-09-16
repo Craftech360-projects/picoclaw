@@ -498,6 +498,64 @@ func TestGeminiUsageResetsOnATurnThatEndsOnGenerationCompleteAlone(t *testing.T)
 	}
 }
 
+// TestGeminiRepeatedUsageMetadataStraddlingATurnEndIsCountedOnce pins B2, the window the
+// turn key opened: a usageMetadata repeated within ONE turn but split by a turn-end signal
+// used to look like the first usage of a new turn, reset the baseline and be emitted — and,
+// since the pipeline sums every BackendUsage, billed — a second time. The dedupe test above
+// sends its repeats back to back, so only this shape covers the boundary.
+func TestGeminiRepeatedUsageMetadataStraddlingATurnEndIsCountedOnce(t *testing.T) {
+	usage := func(prompt, response, total int) map[string]any {
+		return map[string]any{"usageMetadata": map[string]any{
+			"promptTokenCount": prompt, "responseTokenCount": response, "totalTokenCount": total,
+		}}
+	}
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // setup
+		send := func(v any) { _ = c.WriteMessage(websocket.BinaryMessage, []byte(mustJSON(v))) }
+		content := func(v map[string]any) { send(map[string]any{"serverContent": v}) }
+		send(map[string]any{"setupComplete": map[string]any{}})
+		// One turn, its usage repeated either side of generationComplete.
+		content(map[string]any{"modelTurn": map[string]any{"parts": []map[string]any{
+			{"inlineData": map[string]any{"data": base64.StdEncoding.EncodeToString([]byte{1, 0, 2, 0})}},
+		}}})
+		send(usage(9248, 120, 9368))
+		content(map[string]any{"generationComplete": true})
+		send(usage(9248, 120, 9368))
+		content(map[string]any{"turnComplete": true})
+		// A second, genuinely new turn still has to be credited in full.
+		send(usage(10241, 90, 10331))
+		content(map[string]any{"turnComplete": true})
+		content(map[string]any{"interrupted": true}) // the test's end marker
+		time.Sleep(time.Second)
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	var input, output, total int
+	for done := false; !done; {
+		switch e := nextEvent(t, s).(type) {
+		case gptlive.BackendUsage:
+			input, output, total = input+e.Input, output+e.Output, total+e.Total
+		case gptlive.Interrupted:
+			done = true
+		}
+	}
+	if input != 9248+10241 || output != 120+90 || total != 9368+10331 {
+		t.Fatalf("summed usage = input %d, output %d, total %d; want %d/%d/%d (the repeat across generationComplete was billed again)",
+			input, output, total, 9248+10241, 120+90, 9368+10331)
+	}
+}
+
 // blockingExec holds the tool call open until the test has torn the socket down, so the
 // toolResponse is written exactly while the connection is being replaced.
 type blockingExec struct{ ready chan struct{} }

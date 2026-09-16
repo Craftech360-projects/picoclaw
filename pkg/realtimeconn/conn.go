@@ -150,10 +150,20 @@ func (c *Conn) Done() <-chan struct{}        { return c.done }
 // and without a deadline they were the last writes that could wedge a session with
 // no reads. The deadline is cleared afterwards so the socket handed back carries
 // none of it.
+//
+// A timed-out write closes the socket, the same contract Send keeps and for the same
+// reason: gorilla cannot resynchronise after a write deadline fires, so the socket
+// reads fine and can never write again. Handing one of those back to Run would be
+// worse than in Send's case — the read loop would keep the call looking alive while
+// every mic write failed silently, with nothing to tear the room down.
 func WriteJSON(ws *websocket.Conn, v any) error {
 	_ = ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 	err := ws.WriteJSON(v)
 	_ = ws.SetWriteDeadline(time.Time{})
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		_ = ws.Close()
+	}
 	return err
 }
 

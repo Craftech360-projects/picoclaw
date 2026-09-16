@@ -790,7 +790,11 @@ func (s *Session) handle(raw []byte) {
 	}
 	switch ev.Type {
 	case "response.output_audio.delta", "response.audio.delta":
-		if pcm, err := base64.StdEncoding.DecodeString(ev.Delta); err == nil {
+		if pcm, err := base64.StdEncoding.DecodeString(ev.Delta); err == nil && len(pcm) > 0 {
+			// len(pcm) > 0, not err == nil: DecodeString("") returns nil, nil, so an
+			// empty or absent delta is a frame shaped like audio that carries none —
+			// EmitAudio drops it, and it must not be what makes a genuine setup
+			// refusal look survivable. See classifyError.
 			s.mu.Lock()
 			s.spoke = true // the session is live; a later session refusal is no longer fatal
 			s.mu.Unlock()

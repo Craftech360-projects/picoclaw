@@ -49,6 +49,23 @@ func recvAudio(t *testing.T, ch <-chan []byte) []byte {
 	}
 }
 
+// recvError waits for one emitted event and asserts it is a gptlive.Error, failing
+// the test (instead of hanging to the go test default) if none arrives in testTimeout.
+func recvError(t *testing.T, what string, ch <-chan gptlive.Event) gptlive.Error {
+	t.Helper()
+	select {
+	case ev := <-ch:
+		e, ok := ev.(gptlive.Error)
+		if !ok {
+			t.Fatalf("%s: event = %T, want gptlive.Error", what, ev)
+		}
+		return e
+	case <-time.After(testTimeout):
+		t.Fatalf("%s: timed out waiting for an error event", what)
+		return gptlive.Error{}
+	}
+}
+
 // collectEvents drains ch until it closes, failing the test instead of
 // hanging forever if that takes longer than testTimeout.
 func collectEvents(t *testing.T, ch <-chan gptlive.Event) []gptlive.Event {
@@ -1220,37 +1237,41 @@ func TestGrokSessionRejectionIsFatalOnlyBeforeTheSessionHasSpoken(t *testing.T) 
 	// Setup-time: the configuration never worked, so the call is over.
 	setup := &Session{Conn: realtimeconn.New(nil)}
 	setup.handle([]byte(refusal))
-	ev, ok := (<-setup.Events()).(gptlive.Error)
-	if !ok {
-		t.Fatalf("setup-time refusal: want gptlive.Error")
-	}
-	if ev.Recoverable {
+	if recvError(t, "setup-time refusal", setup.Events()).Recoverable {
 		t.Error("a session.update refused before any audio must be fatal: the session can never speak")
+	}
+
+	// An audio delta carrying NO audio must not count as having spoken: a vendor that
+	// opens the stream with an empty delta before its validator rejects the setup
+	// session.update would otherwise leave the child on a connected room with a
+	// session that was never configured and will never speak.
+	empty := &Session{Conn: realtimeconn.New(nil)}
+	empty.handle([]byte(`{"type":"response.output_audio.delta","delta":""}`))
+	select {
+	case pcm := <-empty.Audio():
+		t.Fatalf("an empty delta emitted %d bytes of audio", len(pcm))
+	default:
+	}
+	empty.handle([]byte(refusal))
+	if recvError(t, "refusal after an empty delta", empty.Events()).Recoverable {
+		t.Error("an empty audio delta made a setup refusal recoverable; only real audio may do that")
 	}
 
 	// Mid-call: the same frame, after the model has spoken. The call must survive.
 	live := &Session{Conn: realtimeconn.New(nil)}
 	live.handle([]byte(audio))
-	if pcm := <-live.Audio(); len(pcm) == 0 {
+	if pcm := recvAudio(t, live.Audio()); len(pcm) == 0 {
 		t.Fatal("no audio emitted")
 	}
 	live.handle([]byte(refusal))
-	ev, ok = (<-live.Events()).(gptlive.Error)
-	if !ok {
-		t.Fatalf("mid-call refusal: want gptlive.Error")
-	}
-	if !ev.Recoverable {
+	if !recvError(t, "mid-call refusal", live.Events()).Recoverable {
 		t.Error("a session.update refused after the session has spoken ended the call; it must only be logged")
 	}
 
 	// Auth/quota stay fatal whether or not the session has spoken: every later frame
 	// fails the same way, so the "has spoken" narrowing must not reach them.
 	live.handle([]byte(`{"type":"error","error":{"type":"authentication_error","code":"invalid_api_key","message":"bad key"}}`))
-	ev, ok = (<-live.Events()).(gptlive.Error)
-	if !ok {
-		t.Fatalf("auth error after audio: want gptlive.Error")
-	}
-	if ev.Recoverable {
+	if recvError(t, "auth error after audio", live.Events()).Recoverable {
 		t.Error("an auth error stayed recoverable because the session had spoken")
 	}
 }

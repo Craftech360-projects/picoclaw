@@ -172,7 +172,24 @@ func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 	// and for the same reason nothing else can be writing to ws at this point. It
 	// still goes through realtimeconn.WriteJSON for the write deadline: this runs on
 	// the Run goroutine, so a stalled write here would wedge the whole session.
-	s.flushToolResponses(func(v any) error { return realtimeconn.WriteJSON(ws, v) })
+	// A write that fails here is not survivable on this socket (a gorilla connection
+	// is unusable after any write error, and WriteJSON closes it outright on a
+	// timeout), so connect fails rather than handing Run a socket that can never
+	// write: redial then fails and the session ends through onEnd instead of the
+	// child getting a live-looking call with no microphone path. The entries stay
+	// queued either way.
+	var replayErr error
+	s.flushToolResponses(func(v any) error {
+		err := realtimeconn.WriteJSON(ws, v)
+		if err != nil && replayErr == nil {
+			replayErr = err
+		}
+		return err
+	})
+	if replayErr != nil {
+		_ = ws.Close()
+		return nil, fmt.Errorf("geminilive: replaying a tool result on the resumed socket: %w", replayErr)
+	}
 	return ws, nil
 }
 
@@ -460,9 +477,22 @@ func (s *Session) handleMessage(raw []byte) {
 		// advances on EVERY turn end (generationComplete included). That block runs
 		// first in the same handleMessage call, so a message carrying both a turn
 		// end and usageMetadata still credits the turn that just ended in full.
+		//
+		// A turn-end signal falling BETWEEN two byte-identical usageMetadata messages
+		// is the one shape the key alone gets wrong: the repeat looks like the first
+		// usage of a new turn, the baseline resets, and the same totals are emitted —
+		// and billed — a second time. So a message identical to the one before it is
+		// never emitted across a reset; `changed`, already computed above for the log
+		// line, is exactly that test. The mirror case it costs is two CONSECUTIVE
+		// turns whose six counts are all numerically equal, whose second turn would
+		// then be dropped: unreachable in a real session, since promptTokenCount
+		// carries the conversation so far and grows every turn — and an under-count
+		// of one turn is the lesser error next to billing a turn twice.
+		repeat := false
 		if s.turnUsageAt != s.usageTurn {
 			s.turnUsage = gptlive.BackendUsage{} // a new turn's usage is its own, not a delta on the last one
 			s.turnUsageAt = s.usageTurn
+			repeat = !changed
 		}
 		delta := gptlive.BackendUsage{
 			Model:  s.cfg.Model,
@@ -483,7 +513,7 @@ func (s *Session) handleMessage(raw []byte) {
 				})
 			}
 		}
-		if delta.Input > 0 || delta.Output > 0 || delta.Total > 0 {
+		if !repeat && (delta.Input > 0 || delta.Output > 0 || delta.Total > 0) {
 			delta.Input, delta.Output, delta.Total = max(delta.Input, 0), max(delta.Output, 0), max(delta.Total, 0)
 			s.Emit(delta)
 		}
