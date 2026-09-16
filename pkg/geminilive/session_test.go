@@ -285,7 +285,11 @@ func TestGeminiDialErrorScrubsRawAndEscapedKey(t *testing.T) {
 func TestGeminiCommentaryPerModelFamily(t *testing.T) {
 	for model, want := range map[string]string{
 		"gemini-3.1-flash-live-preview":                 `{"realtimeInput":{"text":"hi"}}`,
+		"gemini-3.8-live":                               `{"realtimeInput":{"text":"hi"}}`,
+		"gemini-3.8-live-extended-thinking":             `{"realtimeInput":{"text":"hi"}}`,
+		"gemini-9.9-live-not-invented-yet":              `{"realtimeInput":{"text":"hi"}}`,
 		"gemini-2.5-flash-native-audio-preview-12-2025": `{"clientContent":{"turnComplete":true,"turns":[{"parts":[{"text":"hi"}],"role":"user"}]}}`,
+		"gemini-2.5-pro-live-preview":                   `{"clientContent":{"turnComplete":true,"turns":[{"parts":[{"text":"hi"}],"role":"user"}]}}`,
 	} {
 		sent := make(chan string, 4)
 		var up websocket.Upgrader
@@ -317,6 +321,9 @@ func TestGeminiSetupDisablesThinkingOnlyFor25(t *testing.T) {
 	for model, want := range map[string]bool{
 		"gemini-2.5-flash-native-audio-preview-12-2025": true,
 		"gemini-3.1-flash-live-preview":                 false,
+		"gemini-3.8-live":                               false,
+		"gemini-3.8-live-extended-thinking":             false,
+		"gemini-9.9-live-not-invented-yet":              false,
 		"gemini-2.5-pro-live-preview":                   false,
 	} {
 		setups := make(chan string, 1)
@@ -354,7 +361,9 @@ func TestGeminiSetupDisablesThinkingOnlyFor25(t *testing.T) {
 		if want && (!has || string(tc) != `{"thinkingBudget":0}`) {
 			t.Fatalf("%s: generationConfig.thinkingConfig = %s, want {\"thinkingBudget\":0}", model, tc)
 		}
-		if !want && (has || strings.Contains(raw, "thinking")) {
+		// `"thinking` matches a JSON key (thinkingConfig, thinkingLevel, ...) but not a model
+		// name that merely ends in "-extended-thinking", where the quote follows the word.
+		if !want && (has || strings.Contains(raw, `"thinking`)) {
 			t.Fatalf("%s: setup must not carry a thinking config, got %s", model, tc)
 		}
 		_ = s.Close(context.Background())

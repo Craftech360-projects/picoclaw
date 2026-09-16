@@ -45,7 +45,10 @@ In manager-web against dev, Runtime Providers → Realtime:
    the env fallback is gone.
 2. `google-gemini-live`: paste the Gemini key; set Voice Model to
    `gemini-3.1-flash-live-preview` (2x faster replies than 2.5 in local testing, at
-   roughly 2x the prompt tokens per turn).
+   roughly 2x the prompt tokens per turn). The key also exposes `gemini-3.8-live` and
+   `gemini-3.8-live-extended-thinking`, and Voice Model accepts any of them — the code
+   now treats everything newer than 2.5 alike. Keep 3.1 as the default until 3.8 has had
+   a live run.
 3. `xai-grok-voice`: paste the xAI key.
 4. Leave exactly one row active. Activating Gemini or Grok makes it the default for
    every session on the box; the dashboard can still pick a provider per session.

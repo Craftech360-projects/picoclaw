@@ -245,20 +245,27 @@ func (s *Session) AppendInstructions(string) {
 	}
 }
 
-// isGemini31 reports a Gemini 3.1 Live model (the same substring check the LiveKit plugin uses).
-func isGemini31(model string) bool { return strings.Contains(model, "3.1") }
+// usesRealtimeText reports a model that takes mid-session text as realtimeInput.text rather than
+// as a clientContent turn. The test is inverted on purpose: from 3.1 onwards the Live API restricts
+// clientContent to seeding conversation history at the start of a session, so a mid-session
+// greeting or goodbye sent that way is rejected or ignored. 2.5 is the only family that still
+// wants the clientContent turn, so match *it* and let every newer model (3.1, 3.5, 3.8 and
+// whatever comes next) fall through to realtimeInput.text without another edit here.
+func usesRealtimeText(model string) bool { return !strings.Contains(model, "2.5") }
 
 // disableThinkingBudget reports a 2.5 Flash model, whose setup turns thinking off with
 // generationConfig.thinkingConfig.thinkingBudget 0: thinking cost seconds before the first audio.
 // Scoped to Flash, not all of 2.5: a 2.5 Pro Live model's minimum thinking budget is 128, so
 // sending 0 would make it refuse the setup.
 // 3.1 takes thinkingLevel instead of thinkingBudget and already defaults to "minimal", so it is left alone.
+// Deliberately NOT widened the way usesRealtimeText was: which thinking field 3.8 and later accept
+// is unverified, and setup fails outright on an unknown field, so newer models keep the vendor default.
 func disableThinkingBudget(model string) bool { return strings.Contains(model, "2.5-flash") }
 
-// AppendCommentary makes the model say something now. 3.1 models take realtime text;
+// AppendCommentary makes the model say something now. 3.1 and newer models take realtime text;
 // 2.5 models take a completed user turn.
 func (s *Session) AppendCommentary(text string) {
-	if isGemini31(s.cfg.Model) {
+	if usesRealtimeText(s.cfg.Model) {
 		_ = s.Send(map[string]any{"realtimeInput": map[string]any{"text": text}})
 		return
 	}
