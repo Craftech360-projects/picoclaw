@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/gptlive"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -62,6 +63,7 @@ type Session struct {
 	owed    bool            // a tool output or AppendCommentary is waiting on a response.create
 
 	logLimit *realtimeconn.LogLimiter // unknown/unparsed events
+	logDone  func(map[string]any)     // the response.done diagnostic's sink; see logDone
 }
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
@@ -86,7 +88,8 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("grokvoice: %w", err)
 	}
 	s := &Session{Conn: realtimeconn.New(ws), cfg: cfg, started: time.Now(), instructions: cfg.Instructions,
-		agentText: map[string]string{}, pending: map[string]bool{}, logLimit: realtimeconn.NewLogLimiter(30 * time.Second)}
+		agentText: map[string]string{}, pending: map[string]bool{},
+		logLimit: realtimeconn.NewLogLimiter(30 * time.Second), logDone: logDone}
 	s.SetSecret(cfg.APIKey)
 	if err := s.Send(s.sessionUpdate()); err != nil {
 		_ = s.Conn.Close()
@@ -215,40 +218,115 @@ type tokenDetails struct {
 
 func (d tokenDetails) empty() bool { return d == tokenDetails{} }
 
-// pick returns the first non-empty breakdown among the alternative spellings.
-func pick(ds ...tokenDetails) tokenDetails {
+// sum adds up a breakdown. cached_tokens is excluded (see the type comment);
+// every other member is a distinct slice of the same side's total, so image and
+// reasoning tokens count too — xAI's MediaUsage documents output_tokens as
+// "rewritten-prompt text tokens + reasoning tokens + generated image tokens".
+func (d tokenDetails) sum() int {
+	return d.TextTokens + d.AudioTokens + d.ImageTokens + d.ReasoningTokens
+}
+
+// named is a breakdown together with the member name it was decoded from, so
+// the log can always say which spelling a number came from.
+type named struct {
+	tokenDetails
+	name string
+}
+
+func pick(ds ...named) named {
 	for _, d := range ds {
 		if !d.empty() {
 			return d
 		}
 	}
-	return tokenDetails{}
+	return named{name: "none"}
 }
 
-func firstNonZero(ns ...int) int {
-	for _, n := range ns {
-		if n != 0 {
-			return n
+// candidate is one spelling of a side's numbers: a flat member and the
+// breakdown belonging to the SAME family. Keeping them paired is what stops
+// Cached/Reasoning being read out of one vendor's spelling while the total came
+// from another's, when a frame happens to carry both.
+type candidate struct {
+	flat int
+	name string
+	det  named
+}
+
+// resolve returns one side's token count, the breakdown that goes with it, and
+// the member name the count came from. A flat number always wins; a breakdown
+// is summed only when no flat member of any spelling carries anything, which is
+// the case that used to persist tokens=0.
+func resolve(cands ...candidate) (int, named, string) {
+	for _, c := range cands {
+		if c.flat != 0 {
+			return c.flat, c.det, c.name
 		}
 	}
-	return 0
+	for _, c := range cands {
+		if !c.det.empty() {
+			return c.det.sum(), c.det, c.det.name + " sum"
+		}
+	}
+	return 0, named{name: "none"}, "none"
 }
+
+// usageSource names the member each number was taken from. It is logged on
+// every response.done line, not just the ones that parsed to nothing: a tolerant
+// six-way mapping that never says which way it went can never be narrowed, and a
+// vendor quietly switching spellings would stay invisible until it regressed to
+// zero again.
+type usageSource struct{ Input, Output, Total string }
 
 // backendUsage maps the decoded object onto gptlive.BackendUsage, whose
 // Input/Output/Total the pipeline sums across the session.
-func (u *usage) backendUsage(model string) gptlive.BackendUsage {
-	in := pick(u.InputTokenDetails, u.InputTokensDetails, u.PromptTokensDetails)
-	out := pick(u.OutputTokenDetails, u.OutputTokensDetails, u.CompletionTokensDetails)
-	input := firstNonZero(u.InputTokens, u.PromptTokens, in.TextTokens+in.AudioTokens+in.ImageTokens)
-	output := firstNonZero(u.OutputTokens, u.CompletionTokens, out.TextTokens+out.AudioTokens+out.ReasoningTokens)
-	return gptlive.BackendUsage{
-		Model:     model,
-		Input:     input,
-		Cached:    in.CachedTokens,
-		Output:    output,
-		Reasoning: out.ReasoningTokens,
-		Total:     firstNonZero(u.TotalTokens, input+output),
+func (u *usage) backendUsage(model string) (gptlive.BackendUsage, usageSource) {
+	input, in, inFrom := resolve(
+		candidate{u.InputTokens, "input_tokens", pick(
+			named{u.InputTokenDetails, "input_token_details"},
+			named{u.InputTokensDetails, "input_tokens_details"})},
+		candidate{u.PromptTokens, "prompt_tokens", named{u.PromptTokensDetails, "prompt_tokens_details"}},
+	)
+	output, out, outFrom := resolve(
+		candidate{u.OutputTokens, "output_tokens", pick(
+			named{u.OutputTokenDetails, "output_token_details"},
+			named{u.OutputTokensDetails, "output_tokens_details"})},
+		candidate{u.CompletionTokens, "completion_tokens", named{u.CompletionTokensDetails, "completion_tokens_details"}},
+	)
+	total, totalFrom := u.TotalTokens, "total_tokens"
+	if total == 0 {
+		total, totalFrom = input+output, "input+output"
 	}
+	return gptlive.BackendUsage{
+			Model:     model,
+			Input:     input,
+			Cached:    in.CachedTokens,
+			Output:    output,
+			Reasoning: out.ReasoningTokens,
+			Total:     total,
+		}, usageSource{
+			Input:  inFrom,
+			Output: outFrom,
+			Total:  totalFrom,
+		}
+}
+
+// logDone is the response.done diagnostic's only way out to the log — a
+// variable so the tests can assert what it actually emits, since this is the
+// one line in the package that reports on a frame's own contents: it has to
+// fire when nothing parsed (a live run that reports zero tokens must explain
+// itself) and it must never carry a string value out of that frame. Dial copies
+// it into the Session, so a test swapping it back can never race a session that
+// is still reading frames.
+var logDone = func(fields map[string]any) {
+	logger.InfoCF("realtime", "grok voice: response.done", fields)
+}
+
+func (s *Session) emitDoneLog(fields map[string]any) {
+	f := s.logDone
+	if f == nil { // a Session built by hand rather than by Dial
+		f = logDone
+	}
+	f(fields)
 }
 
 // protocolStrings are the only string values describeJSON prints: protocol
@@ -260,18 +338,28 @@ var protocolStrings = map[string]bool{"type": true, "status": true, "object": tr
 
 // describeJSON renders a frame as its structure alone: the key names at every
 // level, numbers, booleans and nulls verbatim, arrays as their length and
-// element shape, and string values as "str" (bar protocolStrings). Truncated to
-// limit bytes. "unparsed" if raw is not JSON.
-func describeJSON(raw []byte, limit int) string {
+// element shape, and string values as "str" (bar protocolStrings). "unparsed"
+// if raw is not JSON. Callers scrub first and clip after — in that order, so a
+// secret can never survive by straddling the cut.
+func describeJSON(raw []byte) string {
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return "unparsed"
 	}
-	out := describeValue("", v, 6)
-	if len(out) > limit {
-		out = out[:limit] + "..."
+	return describeValue("", v, 6)
+}
+
+// clip shortens s to at most limit bytes, cutting on a rune boundary so a
+// multi-byte character is never split into replacement-character garbage.
+func clip(s string, limit int) string {
+	if len(s) <= limit {
+		return s
 	}
-	return out
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 func describeValue(key string, v any, depth int) string {
@@ -353,9 +441,12 @@ func (s *Session) handle(raw []byte) {
 		// usage is optional in xAI's own schema, and a usage object that IS sent
 		// may spell its numbers in any of the ways the usage type documents —
 		// both of which are invisible from the outside (either just looks like a
-		// zero-token session). So the line carries the parsed numbers, and
-		// whenever it has none to carry — no usage at all, or one that mapped to
-		// nothing — it adds the frame's SHAPE: every key name at every level
+		// zero-token session). So the line carries the parsed numbers AND the
+		// member each one came from (input_from/output_from/total_from) — that is
+		// what lets the tolerant mapping above be narrowed later, and what makes a
+		// vendor switching spellings visible before it regresses to zero rather
+		// than after. And whenever the line has no numbers to carry — no usage at
+		// all, or one that mapped to nothing — it adds the frame's SHAPE: every key name at every level
 		// (usage and its *_details objects included) with numbers kept and every
 		// string value elided by describeJSON. That names the fields we are
 		// missing without logging a word of what was said, which the raw frame
@@ -366,8 +457,9 @@ func (s *Session) handle(raw []byte) {
 		// crowded out of the window by the healthy line.
 		hasUsage := ev.Response != nil && ev.Response.Usage != nil
 		var bu gptlive.BackendUsage
+		src := usageSource{Input: "none", Output: "none", Total: "none"}
 		if hasUsage {
-			bu = ev.Response.Usage.backendUsage(s.cfg.Model)
+			bu, src = ev.Response.Usage.backendUsage(s.cfg.Model)
 		}
 		blind := bu.Input == 0 && bu.Output == 0 && bu.Total == 0
 		key := "response.done"
@@ -381,12 +473,15 @@ func (s *Session) handle(raw []byte) {
 				"input":        bu.Input,
 				"output":       bu.Output,
 				"total":        bu.Total,
+				"input_from":   src.Input,
+				"output_from":  src.Output,
+				"total_from":   src.Total,
 				"suppressed":   held,
 			}
 			if blind {
-				fields["shape"] = s.Scrub(describeJSON(raw, 400))
+				fields["shape"] = clip(s.Scrub(describeJSON(raw)), 400)
 			}
-			logger.InfoCF("realtime", "grok voice: response.done", fields)
+			s.emitDoneLog(fields)
 		}
 		if hasUsage {
 			s.Emit(bu)

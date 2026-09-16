@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 
@@ -545,12 +547,41 @@ func TestGrokConnectionLostErrorScrubsKey(t *testing.T) {
 	}
 }
 
-// usageFromDone runs one fake-server session that sends a single response.done
-// frame verbatim (a raw string, so the test can feed the vendor's documented
-// JSON byte for byte rather than a Go map's re-encoding of it) and returns the
-// BackendUsage the session emits for it.
-func usageFromDone(t *testing.T, doneFrame string) gptlive.BackendUsage {
+// doneCapture is a replacement for the package's logDone sink that records what
+// the response.done diagnostic emitted. Dial copies logDone into the Session, so
+// installing one before Dial and restoring it after the session ends never races
+// a session that is still reading frames.
+type doneCapture struct {
+	mu   sync.Mutex
+	logs []map[string]any
+}
+
+func (c *doneCapture) install(t *testing.T) {
 	t.Helper()
+	prev := logDone
+	logDone = func(fields map[string]any) {
+		c.mu.Lock()
+		c.logs = append(c.logs, fields)
+		c.mu.Unlock()
+	}
+	t.Cleanup(func() { logDone = prev })
+}
+
+func (c *doneCapture) all() []map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]map[string]any(nil), c.logs...)
+}
+
+// runDone runs one fake-server session that sends a single response.done frame
+// verbatim (a raw string, so the test can feed the vendor's documented JSON byte
+// for byte rather than a Go map's re-encoding of it) and returns every event the
+// session emitted plus everything the diagnostic logged.
+func runDone(t *testing.T, doneFrame string) ([]gptlive.Event, []map[string]any) {
+	t.Helper()
+	var capture doneCapture
+	capture.install(t)
+
 	var up websocket.Upgrader
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := up.Upgrade(w, r, nil)
@@ -567,89 +598,143 @@ func usageFromDone(t *testing.T, doneFrame string) gptlive.BackendUsage {
 	}))
 	defer srv.Close()
 
-	s, err := Dial(context.Background(), Config{APIKey: "k", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	// A realistic key, not the single letter the other tests use: Conn.Scrub
+	// masks every occurrence of the secret in what it is handed, and a one-letter
+	// secret would punch holes in the shape dump's own field names.
+	s, err := Dial(context.Background(), Config{APIKey: "xai-test-key-0123", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close(context.Background())
 
+	// VoiceUsage is emitted for every response.done, after the BackendUsage (if
+	// any), so seeing it means the frame has been fully handled and the
+	// diagnostic has already run.
+	var events []gptlive.Event
 	deadline := time.After(testTimeout)
-	for {
+	for done := false; !done; {
 		select {
 		case ev, ok := <-s.Events():
 			if !ok {
-				t.Fatal("events closed before a BackendUsage arrived")
+				t.Fatal("events closed before response.done was handled")
 			}
-			if u, ok := ev.(gptlive.BackendUsage); ok {
-				return u
-			}
+			events = append(events, ev)
+			_, done = ev.(gptlive.VoiceUsage)
 		case <-deadline:
-			t.Fatal("timed out waiting for BackendUsage")
+			t.Fatalf("timed out waiting for response.done to be handled; got %#v", events)
 		}
 	}
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	return events, capture.all()
+}
+
+// usageFromDone is runDone reduced to the BackendUsage the session emitted, plus
+// the one diagnostic line the frame produced.
+func usageFromDone(t *testing.T, doneFrame string) (gptlive.BackendUsage, map[string]any) {
+	t.Helper()
+	events, logs := runDone(t, doneFrame)
+	if len(logs) != 1 {
+		t.Fatalf("diagnostic lines = %d, want exactly 1: %#v", len(logs), logs)
+	}
+	for _, ev := range events {
+		if u, ok := ev.(gptlive.BackendUsage); ok {
+			return u, logs[0]
+		}
+	}
+	t.Fatalf("no BackendUsage among %#v", events)
+	return gptlive.BackendUsage{}, nil
 }
 
 // TestGrokResponseDoneUsageShapes pins the mapping of
 // response.done.response.usage onto gptlive.BackendUsage for every spelling xAI
-// uses for that object. The first case is the shape xAI's own websocket schema
+// uses for that object, and the *_from labels that say which spelling a live
+// frame actually used. The first case is the shape xAI's own websocket schema
 // documents (https://docs.x.ai/voice-realtime.ws.json); the rest are the
 // spellings its REST spec (https://docs.x.ai/openapi.json: Usage, ModelUsage)
 // and the OpenAI realtime event it is modelled on use for the same numbers —
 // which is what a live run turned out to be sending, producing has_usage=true
 // and a zero-token session.
+//
+// Every case's numbers are deliberately distinguishable: no flat number equals
+// the sum of the breakdown beside it, and no vendor-sent total_tokens equals
+// input+output, so dropping any one json tag — or silently recomputing a total
+// the vendor did send — fails a case instead of passing by arithmetic accident.
 func TestGrokResponseDoneUsageShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name                         string
 		frame                        string
 		input, output, total, cached int
 		reasoning                    int
+		inFrom, outFrom, totalFrom   string
 	}{
 		{
 			// Exactly xAI's documented response.done, including the surrounding
-			// response object fields from the schema's own example.
+			// response object fields from the schema's own example. total_tokens
+			// is NOT input+output: a vendor-reported total must be passed through.
 			name: "xai voice-realtime schema, flat integers",
 			frame: `{"event_id":"event_3132","type":"response.done","response":{"id":"resp_001","object":"realtime.response","status":"completed",
-				"usage":{"input_tokens":120,"output_tokens":48,"total_tokens":168}}}`,
-			input: 120, output: 48, total: 168,
+				"usage":{"input_tokens":120,"output_tokens":48,"total_tokens":171}}}`,
+			input: 120, output: 48, total: 171,
+			inFrom: "input_tokens", outFrom: "output_tokens", totalFrom: "total_tokens",
 		},
 		{
 			// xAI REST "Usage": prompt_/completion_ naming plus its detail objects.
+			// The breakdowns sum to 125 and 48 — neither matches the flat number
+			// beside it, so this case only passes if the flat member wins.
 			name: "xai chat-completions spelling",
 			frame: `{"type":"response.done","response":{"status":"completed","usage":{
-				"prompt_tokens":120,"completion_tokens":48,"total_tokens":168,
-				"prompt_tokens_details":{"text_tokens":30,"audio_tokens":90,"image_tokens":0,"cached_tokens":64},
+				"prompt_tokens":111,"completion_tokens":47,"total_tokens":158,
+				"prompt_tokens_details":{"text_tokens":30,"audio_tokens":90,"image_tokens":5,"cached_tokens":64},
 				"completion_tokens_details":{"reasoning_tokens":8,"audio_tokens":40,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0},
 				"num_sources_used":0}}}`,
-			input: 120, output: 48, total: 168, cached: 64, reasoning: 8,
+			input: 111, output: 47, total: 158, cached: 64, reasoning: 8,
+			inFrom: "prompt_tokens", outFrom: "completion_tokens", totalFrom: "total_tokens",
+		},
+		{
+			// The same spelling with no detail objects at all — the frame that
+			// regresses to tokens=0 the moment the prompt_tokens/completion_tokens
+			// tags are dropped, which no details-carrying case can catch.
+			name: "xai chat-completions spelling, no details",
+			frame: `{"type":"response.done","response":{"status":"completed","usage":{
+				"prompt_tokens":77,"completion_tokens":33,"total_tokens":110}}}`,
+			input: 77, output: 33, total: 110,
+			inFrom: "prompt_tokens", outFrom: "completion_tokens", totalFrom: "total_tokens",
 		},
 		{
 			// OpenAI realtime's response.done usage with only the nested
 			// breakdowns filled in: the totals have to be summed out of them,
-			// leaving cached_tokens out (it is a subset of text_tokens).
+			// leaving cached_tokens out (it is a subset of text_tokens), and
+			// total_tokens has to be derived because the vendor sent none.
 			name: "nested token details only, no flat totals",
 			frame: `{"type":"response.done","response":{"status":"completed","usage":{
-				"input_token_details":{"text_tokens":30,"audio_tokens":90,"cached_tokens":64},
-				"output_token_details":{"text_tokens":8,"audio_tokens":40}}}}`,
-			input: 120, output: 48, total: 168, cached: 64,
+				"input_token_details":{"text_tokens":31,"audio_tokens":90,"cached_tokens":64},
+				"output_token_details":{"text_tokens":9,"audio_tokens":40}}}}`,
+			input: 121, output: 49, total: 170, cached: 64,
+			inFrom: "input_token_details sum", outFrom: "output_token_details sum", totalFrom: "input+output",
 		},
 		{
 			// xAI REST "ModelUsage" spelling, flat numbers present but zero.
+			// Image and reasoning tokens count towards their side's total: xAI's
+			// MediaUsage documents output_tokens as text + reasoning + image.
 			name: "responses-style details with zeroed flat totals",
 			frame: `{"type":"response.done","response":{"status":"completed","usage":{
 				"input_tokens":0,"output_tokens":0,"total_tokens":0,
-				"input_tokens_details":{"text_tokens":30,"audio_tokens":90,"cached_tokens":64},
-				"output_tokens_details":{"text_tokens":40,"reasoning_tokens":8}}}}`,
-			input: 120, output: 48, total: 168, cached: 64, reasoning: 8,
+				"input_tokens_details":{"text_tokens":30,"audio_tokens":90,"image_tokens":5,"cached_tokens":64},
+				"output_tokens_details":{"text_tokens":40,"reasoning_tokens":8,"image_tokens":2}}}}`,
+			input: 125, output: 50, total: 175, cached: 64, reasoning: 8,
+			inFrom: "input_tokens_details sum", outFrom: "output_tokens_details sum", totalFrom: "input+output",
 		},
 		{
 			// Nothing recognizable: the usage object is still reported (as
-			// zeros), which is the case that makes handle log the raw frame.
-			name:  "unrecognized usage object maps to zeros",
-			frame: `{"type":"response.done","response":{"status":"completed","usage":{"tokens_used":168}}}`,
+			// zeros), which is the case that makes handle log the frame's shape.
+			name:   "unrecognized usage object maps to zeros",
+			frame:  `{"type":"response.done","response":{"status":"completed","usage":{"tokens_used":168}}}`,
+			inFrom: "none", outFrom: "none", totalFrom: "input+output",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := usageFromDone(t, tc.frame)
+			got, line := usageFromDone(t, tc.frame)
 			if got.Input != tc.input || got.Output != tc.output || got.Total != tc.total {
 				t.Fatalf("input/output/total = %d/%d/%d, want %d/%d/%d (%#v)",
 					got.Input, got.Output, got.Total, tc.input, tc.output, tc.total, got)
@@ -660,22 +745,97 @@ func TestGrokResponseDoneUsageShapes(t *testing.T) {
 			if got.Model != DefaultModel {
 				t.Fatalf("model = %q, want %q", got.Model, DefaultModel)
 			}
+			// The line must always say which spelling produced the numbers, not
+			// only when there are none.
+			for field, want := range map[string]any{
+				"input": tc.input, "output": tc.output, "total": tc.total,
+				"input_from": tc.inFrom, "output_from": tc.outFrom, "total_from": tc.totalFrom,
+				"has_usage": true,
+			} {
+				if line[field] != want {
+					t.Fatalf("log %s = %v, want %v (line %v)", field, line[field], want, line)
+				}
+			}
 		})
 	}
 }
 
-// TestDescribeJSONNamesFieldsWithoutText covers the diagnostic the zero-token
-// case leans on: it must name every field of a frame we failed to map — that is
-// the whole point of logging it — while never letting a transcript through. The
-// frame below is an OpenAI-realtime-shaped response.done (which is what this API
-// is a clone of), carrying both an unmapped usage spelling and agent speech.
+// TestGrokResponseDoneWithoutTokensLogsTheShape drives the diagnostic itself
+// through a real session: a usage-less frame and an all-zero-usage frame must
+// BOTH produce a shape dump (the live bug reported has_usage=true with zero
+// tokens and printed nothing that could explain it), and neither may carry a
+// string value out of the frame — this API's response.done can hold
+// response.output[].content[].transcript.
+func TestGrokResponseDoneWithoutTokensLogsTheShape(t *testing.T) {
+	const said = "tell me the one about the elephant"
+	for _, tc := range []struct {
+		name      string
+		frame     string
+		hasUsage  bool
+		wantShape []string
+	}{
+		{
+			name: "no usage object at all",
+			frame: `{"type":"response.done","response":{"status":"completed",
+				"output":[{"type":"message","content":[{"type":"audio","transcript":"` + said + `"}]}]}}`,
+			wantShape: []string{"output:[1x", "transcript:str", "status:completed"},
+		},
+		{
+			name: "usage present but every number zero",
+			frame: `{"type":"response.done","response":{"status":"completed",
+				"output":[{"type":"message","content":[{"type":"audio","transcript":"` + said + `"}]}],
+				"usage":{"cost_in_usd_ticks":420,"num_sources_used":0}}}`,
+			hasUsage:  true,
+			wantShape: []string{"cost_in_usd_ticks:420", "num_sources_used:0", "transcript:str"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events, logs := runDone(t, tc.frame)
+			if len(logs) != 1 {
+				t.Fatalf("diagnostic lines = %d, want exactly 1: %#v", len(logs), logs)
+			}
+			line := logs[0]
+			if line["has_usage"] != tc.hasUsage {
+				t.Fatalf("has_usage = %v, want %v", line["has_usage"], tc.hasUsage)
+			}
+			if line["input"] != 0 || line["output"] != 0 || line["total"] != 0 {
+				t.Fatalf("expected zeroed numbers, got %v", line)
+			}
+			shape, ok := line["shape"].(string)
+			if !ok {
+				t.Fatalf("no shape dump on a frame that parsed to nothing: %v", line)
+			}
+			for _, want := range tc.wantShape {
+				if !strings.Contains(shape, want) {
+					t.Fatalf("shape = %q, want it to contain %q", shape, want)
+				}
+			}
+			for _, leak := range []string{said, "elephant"} {
+				if strings.Contains(shape, leak) {
+					t.Fatalf("shape leaked frame text %q: %q", leak, shape)
+				}
+			}
+			if !tc.hasUsage {
+				for _, ev := range events {
+					if u, ok := ev.(gptlive.BackendUsage); ok {
+						t.Fatalf("usage-less frame emitted %#v", u)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDescribeJSONNamesFieldsWithoutText covers the diagnostic's formatter
+// directly: it must name every field of a frame we failed to map — that is the
+// whole point of logging it — while never letting a transcript through.
 func TestDescribeJSONNamesFieldsWithoutText(t *testing.T) {
 	const secret = "the child said her name is Priya"
 	frame := `{"type":"response.done","response":{"id":"resp_1","object":"realtime.response","status":"completed",
 		"output":[{"type":"message","content":[{"type":"audio","transcript":"` + secret + `"}]}],
 		"usage":{"tokens_used":168,"prompt_tokens_details":{"audio_tokens":90}}}}`
 
-	got := describeJSON([]byte(frame), 400)
+	got := describeJSON([]byte(frame))
 	for _, want := range []string{"tokens_used:168", "prompt_tokens_details", "audio_tokens:90", "status:completed", "transcript:str"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("describeJSON = %q, want it to contain %q", got, want)
@@ -684,10 +844,22 @@ func TestDescribeJSONNamesFieldsWithoutText(t *testing.T) {
 	if strings.Contains(got, "Priya") || strings.Contains(got, secret) {
 		t.Fatalf("describeJSON leaked transcript text: %q", got)
 	}
-	if long := describeJSON([]byte(frame), 40); len(long) > 43 {
-		t.Fatalf("describeJSON ignored its limit: %q", long)
-	}
-	if got := describeJSON([]byte("not json"), 400); got != "unparsed" {
+	if got := describeJSON([]byte("not json")); got != "unparsed" {
 		t.Fatalf("describeJSON(non-JSON) = %q, want %q", got, "unparsed")
+	}
+}
+
+// TestClipCutsOnRuneBoundaries: the shape dump is scrubbed first and clipped
+// second, and a cut through a multi-byte rune would emit replacement garbage.
+func TestClipCutsOnRuneBoundaries(t *testing.T) {
+	if got := clip("abc", 10); got != "abc" {
+		t.Fatalf("clip(short) = %q, want it untouched", got)
+	}
+	got := clip("héllo", 2) // 6 bytes: a limit of 2 falls inside the é
+	if got != "h..." {
+		t.Fatalf("clip = %q, want %q", got, "h...")
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("clip produced invalid UTF-8: %q", got)
 	}
 }

@@ -93,9 +93,11 @@ func (s *stubSessionStore) Close() error                { return nil }
 // review (Important 4) says should have existed from the start: it is what
 // would have caught Critical 1 (persistGPTLiveSession populating only
 // TotalTokens, leaving InputTokens/OutputTokens at zero, which made
-// sendUsageSummary's own guard — "if usage.InputTokens == 0 &&
+// sendUsageSummary's guard of the day — a bare "if usage.InputTokens == 0 &&
 // usage.OutputTokens == 0 { return nil }" — skip the POST to
-// /device/token-usage for every single gptlive session, silently). This
+// /device/token-usage for every single gptlive session, silently; the guard has
+// since narrowed to a session with no tokens, no seconds and no messages at
+// all). This
 // drives a real pipeline through onEvent exactly the way a live session would
 // (a user turn, an agent turn, a BackendUsage report, a VoiceUsage report),
 // then calls persistGPTLiveSession against a fake manager API and asserts all
