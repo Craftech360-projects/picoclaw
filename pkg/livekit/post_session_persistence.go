@@ -223,7 +223,16 @@ func safeTraceSuffix(in string) string {
 }
 
 func (rs *RoomSession) sendUsageSummary(ctx context.Context, usage UsageSnapshot) error {
-	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
+	// Skip only a session where nothing at all happened (a dial failure). Tokens
+	// alone are not the test: a vendor may report none — xAI's Grok Voice leaves
+	// response.done.response.usage out, which its own schema allows — while the
+	// voice seconds and the message count are real and billable.
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 &&
+		usage.SessionDurationSeconds <= 0 && usage.MessageCount == 0 {
+		logger.InfoCF("livekit", "Post-session usage summary skipped: empty session", map[string]any{
+			"room":       rs.roomName(),
+			"device_mac": rs.deviceMAC,
+		})
 		return nil
 	}
 

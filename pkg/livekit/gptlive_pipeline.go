@@ -793,6 +793,16 @@ func (p *gptLivePipeline) driveSegmenter(ctx context.Context, audio <-chan []byt
 			write(out) // bytesToPCM16 copies, so reusing carry below is safe
 			carry = append(carry[:0], carry[n:]...)
 		case <-p.interrupts: // nil channel on GPT-Live-only test pipelines: never ready
+			// Logged here, before the clear, and not from the event pump: seg and
+			// level are owned by this goroutine, and they are what separates a real
+			// barge-in (speaking, with queued audio about to be discarded) from an
+			// idle speech_started that clears an already-empty queue.
+			logger.InfoCF("livekit", "gptlive: barge-in", map[string]any{
+				"room":     p.rs.roomName(),
+				"vendor":   p.spec.Vendor,
+				"speaking": p.seg.Open(),
+				"level_ms": level.Milliseconds(),
+			})
 			if c, ok := track.(interface{ ClearQueue() }); ok {
 				c.ClearQueue()
 			}

@@ -145,6 +145,73 @@ func TestSendUsageSummaryIncludesTotalTokens(t *testing.T) {
 	}
 }
 
+// A vendor whose response.done omits the optional usage object (xAI's Grok Voice
+// does exactly that) leaves the token counters at zero while the voice seconds and
+// the message count are real. Those two are the billable quantities for such a
+// session, so the summary must still be POSTed.
+func TestSendUsageSummaryPersistsWhenVendorReportsNoTokens(t *testing.T) {
+	var payload map[string]any
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	rs := &RoomSession{
+		managerAPIURL: server.URL,
+		deviceMAC:     "aa:bb:cc:dd:ee:ff",
+		roomInfo:      &protocol.Room{Name: "session-grok"},
+	}
+
+	err := rs.sendUsageSummary(context.Background(), UsageSnapshot{
+		SessionDurationSeconds: 93.440995,
+		MessageCount:           11,
+	})
+	if err != nil {
+		t.Fatalf("sendUsageSummary returned error: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("POSTs = %d, want 1: a 93s, 11-message session is not empty", posts)
+	}
+	if got := payload["sessionDurationSeconds"]; got != 93.441 {
+		t.Fatalf("sessionDurationSeconds payload = %#v, want 93.441", got)
+	}
+	if got := payload["messageCount"]; got != float64(11) {
+		t.Fatalf("messageCount payload = %#v, want 11", got)
+	}
+	if got := payload["totalTokens"]; got != float64(0) {
+		t.Fatalf("totalTokens payload = %#v, want 0 (never synthesise tokens)", got)
+	}
+}
+
+// The guard's original purpose survives: a session where nothing at all happened
+// (a dial failure) still posts nothing.
+func TestSendUsageSummarySkipsAnEmptySession(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{}}`))
+	}))
+	defer server.Close()
+
+	rs := &RoomSession{
+		managerAPIURL: server.URL,
+		deviceMAC:     "aa:bb:cc:dd:ee:ff",
+		roomInfo:      &protocol.Room{Name: "session-empty"},
+	}
+
+	if err := rs.sendUsageSummary(context.Background(), UsageSnapshot{}); err != nil {
+		t.Fatalf("sendUsageSummary returned error: %v", err)
+	}
+	if posts != 0 {
+		t.Fatalf("POSTs = %d, want 0 for a session with no tokens, no voice and no messages", posts)
+	}
+}
+
 func TestSendSessionSummaryAndEnd(t *testing.T) {
 	var summaryPayload map[string]any
 	var endPayload map[string]any

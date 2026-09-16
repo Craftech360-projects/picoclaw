@@ -203,6 +203,22 @@ func (s *Session) handle(raw []byte) {
 		s.Emit(call)
 		s.Go(func() { s.answer(call) })
 	case "response.done":
+		// usage is optional in xAI's own schema and the live server omits it, which
+		// is invisible from the outside (it just looks like a zero-token session).
+		// response.done is the one event whose schema carries no transcript and no
+		// audio, so the raw frame is safe to show — truncated, scrubbed of the API
+		// key by Conn.Scrub (SetSecret is wired in Dial), and rate-limited.
+		if ok, held := s.logLimit.Allow("response.done"); ok {
+			fields := map[string]any{
+				"has_response": ev.Response != nil,
+				"has_usage":    ev.Response != nil && ev.Response.Usage != nil,
+				"suppressed":   held,
+			}
+			if ev.Response == nil || ev.Response.Usage == nil {
+				fields["raw"] = s.Scrub(string(raw[:min(len(raw), 400)]))
+			}
+			logger.InfoCF("realtime", "grok voice: response.done", fields)
+		}
 		if ev.Response != nil && ev.Response.Usage != nil {
 			u := ev.Response.Usage
 			s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.InputTokens, Output: u.OutputTokens, Total: u.TotalTokens})
