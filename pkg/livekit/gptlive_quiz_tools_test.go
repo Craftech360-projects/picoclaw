@@ -2,6 +2,7 @@ package livekit
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -479,4 +480,163 @@ func TestQuizScoreAnswerRejectsOutOfRangeResultValue(t *testing.T) {
 		t.Errorf("expected an error result for a result value outside correct/miss/revealed, got %+v", result)
 	}
 	rec.expectNone(t)
+}
+
+// dailyTenBatch is a batch longer than what is left of the day, which is the
+// normal shape: the manager serves a full-size batch (plus bonus leftovers)
+// whatever answered_today already is.
+func dailyTenBatch(answeredToday, size int) *QuizBatch {
+	b := &QuizBatch{Level: 3, Band: "6-8", Bank: "quiz", AnsweredToday: answeredToday}
+	for i := 0; i < size; i++ {
+		id := int64(101 + i)
+		b.Questions = append(b.Questions, QuizQuestion{ID: id, IDString: fmt.Sprint(id),
+			Text: fmt.Sprintf("Practice question number %d?", id), Answer: "yes"})
+	}
+	return b
+}
+
+// TestQuizDailyTenEndsAtTenNotWhenTheBatchRunsOut covers a live Gemini bug
+// (task-8 diagnosis 3): with AnsweredToday=9 and an 11-question batch the tool
+// result for the tenth answer said "10 of 20 ... ask question 207", and the
+// model scored two more. The day ends at ten, whatever the batch holds.
+func TestQuizDailyTenEndsAtTenNotWhenTheBatchRunsOut(t *testing.T) {
+	ws := t.TempDir()
+	rec := newQuizAnswerRecorder()
+	batch := dailyTenBatch(9, 11)
+	batch.WonderToAsk = &WonderToAsk{Code: "W7", Text: "If you could build a house out of any food, what would you use?"}
+	var pushed []string
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: ws, MemoType: "daily_quiz", AnswerReporter: rec.report})
+	tr.OnDirective(func(d string) { pushed = append(pushed, d) })
+
+	d, err := tr.Score("101", "correct", "yes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call := rec.take(t); call.questionID != 101 || call.result != "correct" {
+		t.Errorf("the tenth answer is still reported: %+v", call)
+	}
+	for _, want := range []string{
+		`id=101 "Practice question number 101?" is already scored`,
+		"Today's Daily Ten is complete (10 of 10)",
+		"Do NOT ask any more quiz questions today",
+		"Celebrate briefly",
+		"ONE Wonder Question",
+		`"If you could build a house out of any food, what would you use?"`,
+		"quiz_record_wonder",
+		"W7",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("day-complete result missing %q: %q", want, d)
+		}
+	}
+	for _, bad := range []string{"Ask question", "102", "of 20", "of 11"} {
+		if strings.Contains(d, bad) {
+			t.Errorf("day-complete result must not contain %q: %q", bad, d)
+		}
+	}
+	tr.mu.Lock()
+	pending := tr.pendingLocked()
+	tr.mu.Unlock()
+	if pending != nil {
+		t.Errorf("pendingLocked at the Daily Ten = question %s, want nil", pending.IDString)
+	}
+	if got := tr.Status(); !strings.Contains(got, "answered=10 of 10") || !strings.Contains(got, "all questions done") {
+		t.Errorf("Status() at the Daily Ten = %q", got)
+	}
+	if len(pushed) == 0 || pushed[len(pushed)-1] != d {
+		t.Errorf("the day-complete result must also replace the voice model's last question directive, pushed=%q", pushed)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(ws, "memory", "state", "daily_quiz.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	memo := strings.TrimSpace(string(raw))
+	for _, want := range []string{"status=completed", "scored_q=101", "result=correct", "answered=10"} {
+		if !strings.Contains(memo, want) {
+			t.Errorf("tenth MEMO missing %q: %s", want, memo)
+		}
+	}
+	if id, result, ok := parseQuizVerdict(memo, batch, map[int64]bool{}); !ok || id != 101 || result != "correct" {
+		t.Errorf("parseQuizVerdict must still accept the completed MEMO: id=%d result=%q ok=%v", id, result, ok)
+	}
+
+	// The hard stop: a model that ignores the text still cannot score question 11.
+	tool := findQuizTool(t, tr, "quiz_score_answer")
+	for _, result := range []string{"correct", "miss", "revealed"} {
+		res := tool.Execute(context.Background(), map[string]any{"question_id": "102", "result": result, "transcript": "yes"})
+		if res == nil || !res.IsError {
+			t.Fatalf("scoring past the Daily Ten (result=%s) must be refused, got %+v", result, res)
+		}
+		if !strings.Contains(res.ForLLM, "Daily Ten is already complete") || !strings.Contains(res.ForLLM, "not ask") {
+			t.Errorf("refusal must tell the model the day is done and not to ask more: %q", res.ForLLM)
+		}
+	}
+	rec.expectNone(t)
+}
+
+func TestQuizDailyTenFromZeroStopsAtTenInAThirteenQuestionBatch(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: dailyTenBatch(0, 13), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	for i := 1; i <= 9; i++ {
+		d, err := tr.Score(fmt.Sprint(100+i), "correct", "yes")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf("%d of 10 of today's questions are done", i); !strings.Contains(d, want) {
+			t.Errorf("after answer %d the count must read %q: %q", i, want, d)
+		}
+	}
+	d, err := tr.Score("110", "correct", "yes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d, "Today's Daily Ten is complete (10 of 10)") || strings.Contains(d, "Ask question 111") {
+		t.Errorf("the tenth answer ends the day: %q", d)
+	}
+	// No served Wonder Question: the model asks one of its own and records it.
+	for _, want := range []string{"ONE Wonder Question", "quiz_record_wonder"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("day-complete result without a served wonder missing %q: %q", want, d)
+		}
+	}
+	if _, err := tr.Score("111", "correct", "yes"); err == nil {
+		t.Error("question 11 of the day must be refused")
+	}
+}
+
+func TestQuizMissOnTheTenthQuestionStillStaysOnIt(t *testing.T) {
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: dailyTenBatch(9, 11), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	d, err := tr.Score("101", "miss", "no")
+	if err != nil {
+		t.Fatalf("a miss before the cap must still be accepted: %v", err)
+	}
+	for _, want := range []string{"Stay on", "Practice question number 101?", "9 of 10"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("miss result missing %q: %q", want, d)
+		}
+	}
+	if strings.Contains(d, "Daily Ten is complete") {
+		t.Errorf("a miss does not complete the day: %q", d)
+	}
+}
+
+func TestQuizExhaustedLadderOnTheTenthQuestionWrapsUp(t *testing.T) {
+	batch := dailyTenBatch(9, 11)
+	batch.Questions[0].ChoiceOrder = []string{"yes", "no"}
+	batch.Questions[0].TeachText = "it is always yes"
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	tr.Score("101", "miss", "no")
+	tr.Score("101", "miss", "no")
+	d, err := tr.Score("101", "miss", "no")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"all three tries", "then wrap up the quiz", "Today's Daily Ten is complete (10 of 10)"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("exhausted ladder at the Daily Ten missing %q: %q", want, d)
+		}
+	}
+	if strings.Contains(d, "next question") || strings.Contains(d, "Ask question") {
+		t.Errorf("the last question of the day must not point at a next question: %q", d)
+	}
 }

@@ -1489,7 +1489,7 @@ func (ab *AgentBridge) wonderClosingDirective() string {
 		if ab.quizBatch.Questions[i].ID != pending {
 			continue
 		}
-		if ab.quizBatch.AnsweredToday+i+1 < 10 {
+		if ab.quizBatch.AnsweredToday+i+1 < dailyQuizTarget {
 			return ""
 		}
 		return fmt.Sprintf(

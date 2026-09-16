@@ -93,7 +93,17 @@ func (t *QuizTracker) find(id string) *QuizQuestion {
 	return nil
 }
 
+// dayCompleteLocked reports whether today's Daily Ten is already scored. The
+// batch can be longer than what is left of the day, so this, not running out
+// of batch questions, is what ends the quiz. Caller holds t.mu.
+func (t *QuizTracker) dayCompleteLocked() bool {
+	return t.cfg.Batch.AnsweredToday+len(t.reported) >= dailyQuizTarget
+}
+
 func (t *QuizTracker) pendingLocked() *QuizQuestion {
+	if t.dayCompleteLocked() {
+		return nil
+	}
 	for i := range t.cfg.Batch.Questions {
 		if !t.reported[t.cfg.Batch.Questions[i].ID] {
 			return &t.cfg.Batch.Questions[i]
@@ -106,8 +116,7 @@ func (t *QuizTracker) pendingLocked() *QuizQuestion {
 func (t *QuizTracker) Status() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	answered := t.cfg.Batch.AnsweredToday + len(t.reported)
-	total := t.cfg.Batch.AnsweredToday + len(t.cfg.Batch.Questions)
+	answered, total := t.doneLocked()
 	q := t.pendingLocked()
 	if q == nil {
 		return fmt.Sprintf("STATUS: answered=%d of %d today | all questions done", answered, total)
@@ -134,6 +143,13 @@ func (t *QuizTracker) Status() string {
 // same string Score just returned.
 func (t *QuizTracker) Score(questionID, result, transcript string) (string, error) {
 	t.mu.Lock()
+	// The hard stop behind the day-complete result: a model that ignores it
+	// and asks an eleventh question still cannot write an answer row for it.
+	if t.dayCompleteLocked() {
+		t.mu.Unlock()
+		return "", fmt.Errorf("today's Daily Ten is already complete (%d of %d); nothing was scored. Do not ask or score any more quiz questions today",
+			dailyQuizTarget, dailyQuizTarget)
+	}
 	q := t.find(questionID)
 	if q == nil {
 		t.mu.Unlock()
@@ -200,8 +216,15 @@ func (t *QuizTracker) ladderExhausted(q *QuizQuestion) bool {
 // (answerCB) for the caller to dispatch once unlocked, per the note on Score.
 func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive string, err error, answerCB func(), nextCB func()) {
 	answered := t.cfg.Batch.AnsweredToday + len(t.reported) + 1
-	memo := fmt.Sprintf("MEMO: type=%s | date=%s | scored_q=%s | scored_text=%s | result=%s | answered=%d",
-		t.cfg.MemoType, t.cfg.Now().Format("2006-01-02"), q.IDString, strings.ReplaceAll(q.Text, "|", "/"), verdict, answered)
+	// status=completed on the answer that completes the Daily Ten, where
+	// AGENT.md's completed MEMO carries it: Saved State counts a day as
+	// finished only when it says so.
+	status := ""
+	if answered >= dailyQuizTarget {
+		status = " | status=completed"
+	}
+	memo := fmt.Sprintf("MEMO: type=%s | date=%s%s | scored_q=%s | scored_text=%s | result=%s | answered=%d",
+		t.cfg.MemoType, t.cfg.Now().Format("2006-01-02"), status, q.IDString, strings.ReplaceAll(q.Text, "|", "/"), verdict, answered)
 	if _, _, ok := parseQuizVerdict(memo, t.cfg.Batch, t.reported); !ok {
 		return "", fmt.Errorf("verdict for question %s did not validate against the bank", q.IDString), nil, nil
 	}
@@ -250,18 +273,59 @@ func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive s
 		// point it at the wrap-up instead. doorDirectiveText is left alone
 		// because the cascade shares it.
 		terminal = strings.ReplaceAll(terminal, "move straight on to the next question", "then wrap up the quiz")
-		return strings.TrimSpace(terminal + "\n\n" + scored + fmt.Sprintf(
-			"\nAll of today's questions are done (%d of %d). Celebrate briefly and move on to free play. Do NOT ask any quiz question again today.",
-			done, total)), nil, answerCB, nil
+		var end string
+		if t.dayCompleteLocked() {
+			end = t.dayCompleteTextLocked()
+		} else {
+			end = fmt.Sprintf(
+				"All of today's questions are done (%d of %d). Celebrate briefly and move on to free play. Do NOT ask any quiz question again today.",
+				done, total)
+		}
+		directive = strings.TrimSpace(terminal + "\n\n" + scored + "\n" + end)
+		// Push it too: on GPT-Live the voice model's instructions otherwise still
+		// end with the question just answered, the last directive pushed.
+		if t.onDirective != nil {
+			onDirective := t.onDirective
+			nextCB = func() { onDirective(directive) }
+		}
+		return directive, nil, answerCB, nextCB
 	}
 	nextDirective, nextCB := t.nextDirectiveLocked(next, false)
 	return strings.TrimSpace(terminal + "\n\n" + scored + "\n\n" + nextDirective), nil, answerCB, nextCB
 }
 
+// dayCompleteTextLocked is the result for the answer that completes the Daily
+// Ten. It closes the day the way the cascade does (AGENT.md 2b and
+// wonderClosingDirective): celebrate, then leave the child with ONE Wonder
+// Question — the server's when one was served — recorded via
+// quiz_record_wonder, since this path has no model-written MEMO to carry it.
+// Caller holds t.mu.
+func (t *QuizTracker) dayCompleteTextLocked() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Today's Daily Ten is complete (%d of %d). Do NOT ask any more quiz questions today. ", dailyQuizTarget, dailyQuizTarget)
+	b.WriteString("Celebrate briefly, then leave the child with ONE Wonder Question. It is never scored. ")
+	if ask := t.cfg.Batch.WonderToAsk; ask != nil && strings.TrimSpace(ask.Text) != "" {
+		fmt.Fprintf(&b, "Ask EXACTLY this Wonder Question, in your own warm words but the same question: %q. Not one of your own. ", strings.TrimSpace(ask.Text))
+		b.WriteString("When the child answers, call quiz_record_wonder with question set to that question, answer set to what they said")
+		if code := strings.TrimSpace(ask.Code); code != "" {
+			fmt.Fprintf(&b, ", and code=%s", code)
+		}
+		b.WriteString(".")
+	} else {
+		b.WriteString("Make it a short, open question with no right answer, about anything at all. ")
+		b.WriteString("When the child answers, call quiz_record_wonder with question set to the question as you asked it and answer set to what they said.")
+	}
+	return b.String()
+}
+
 // doneLocked is today's done count, counted as recordLocked's MEMO `answered`
-// is. Caller holds t.mu.
+// is, out of the Daily Ten: both are capped at dailyQuizTarget, so the count
+// agrees with the prompt's "N of 10" STATUS line instead of the batch size.
+// Caller holds t.mu.
 func (t *QuizTracker) doneLocked() (done, total int) {
-	return t.cfg.Batch.AnsweredToday + len(t.reported), t.cfg.Batch.AnsweredToday + len(t.cfg.Batch.Questions)
+	done = min(t.cfg.Batch.AnsweredToday+len(t.reported), dailyQuizTarget)
+	total = min(t.cfg.Batch.AnsweredToday+len(t.cfg.Batch.Questions), dailyQuizTarget)
+	return done, total
 }
 
 // nextDirectiveLocked returns the Door directive for q and, when OnDirective

@@ -94,6 +94,13 @@ func (q QuizQuestion) DoorFor(tries int) int {
 	return door
 }
 
+// dailyQuizTarget is the size of the Daily Ten: the number of scored answers
+// that completes a child's day. It matches the manager's DAILY_QUESTION_TARGET.
+// A batch can hold more questions than are left of the day (the manager serves
+// a full batch plus bonus leftovers whatever answered_today is), so the day
+// ends at this many answers, never when the batch runs out.
+const dailyQuizTarget = 10
+
 // QuizBatch is one session's worth of questions: the current Level for this
 // device's age band, or a champion-replay level when every level is cleared.
 type QuizBatch struct {
@@ -619,8 +626,8 @@ func quizQuestionsBlock(batch *QuizBatch) string {
 			batch.AnsweredToday))
 	} else {
 		b.WriteString(fmt.Sprintf(
-			"\nSTATUS: today's Daily Ten is NOT complete - %d of 10 scored so far today, and the questions below are the ones still to ask. Ignore anything in the conversation or your memory that says today is finished; this line is computed from the record and overrides it.",
-			batch.AnsweredToday))
+			"\nSTATUS: today's Daily Ten is NOT complete - %d of %d scored so far today, and the questions below are the ones still to ask. Ignore anything in the conversation or your memory that says today is finished; this line is computed from the record and overrides it.",
+			batch.AnsweredToday, dailyQuizTarget))
 	}
 	b.WriteString("\nAsk ONLY these questions, in order, one per turn. Never invent a question.")
 	b.WriteString("\nIf the child does not answer, encourage and re-ask the same question — never move on to the next question until this one has been judged.")
