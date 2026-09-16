@@ -64,9 +64,22 @@ type Session struct {
 	lastUsage      [6]int                   // the usage line is logged only when these counts change
 	// turnUsage is the largest usageMetadata this turn has already reported to the
 	// pipeline; only the growth over it is emitted, so a usageMetadata repeated
-	// within a turn cannot inflate the persisted totals. Reset at every turn end.
+	// within a turn cannot inflate the persisted totals.
+	//
+	// It is KEYED to usageTurn rather than cleared at one particular turn end:
+	// usageTurn advances on every turn-end signal — generationComplete included,
+	// which s.turn deliberately does not, since s.turn also drives the per-turn
+	// log line and transcript IDs and must count real turns. A turn that ends on
+	// a standalone generationComplete (which this file already treats as a turn
+	// end, see stopFlushTimer/flushUser below) therefore still starts the next
+	// turn's accounting from zero. Without the key, the next turn's first usage
+	// would be emitted as the DIFFERENCE BETWEEN TURNS rather than the turn, and
+	// because turnUsage is a running max() it would never recover for the rest of
+	// the session.
 	// See the usageMetadata branch of handleMessage.
-	turnUsage gptlive.BackendUsage
+	turnUsage   gptlive.BackendUsage
+	usageTurn   int // advances on every turn end; see turnUsage
+	turnUsageAt int // the usageTurn turnUsage was accumulated for
 	// pendingTools are toolResponses whose socket died before they could be
 	// written; they are replayed on the socket that replaces it. See answer and
 	// flushToolResponses. hasPendingTools mirrors len(pendingTools) > 0 so the read
@@ -126,7 +139,7 @@ func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 		// Dial scrubs the raw key; the URL carries the escaped form, which differs for keys with + / = etc.
 		return nil, errors.New("geminilive: " + strings.ReplaceAll(err.Error(), escaped, "***"))
 	}
-	if err := ws.WriteJSON(s.setup()); err != nil {
+	if err := realtimeconn.WriteJSON(ws, s.setup()); err != nil {
 		_ = ws.Close()
 		return nil, fmt.Errorf("geminilive: setup: %w", err)
 	}
@@ -156,8 +169,10 @@ func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 	// A toolResponse whose socket died is replayed here, on the new socket, as soon
 	// as it is set up. Writing to ws directly is what makes that possible: Run has
 	// not swapped it into the Conn yet, so s.Send would still address the dead one —
-	// and for the same reason nothing else can be writing to ws at this point.
-	s.flushToolResponses(func(v any) error { return ws.WriteJSON(v) })
+	// and for the same reason nothing else can be writing to ws at this point. It
+	// still goes through realtimeconn.WriteJSON for the write deadline: this runs on
+	// the Run goroutine, so a stalled write here would wedge the whole session.
+	s.flushToolResponses(func(v any) error { return realtimeconn.WriteJSON(ws, v) })
 	return ws, nil
 }
 
@@ -392,6 +407,11 @@ func (s *Session) handleMessage(raw []byte) {
 		if c.GenerationComplete || c.TurnComplete || c.Interrupted {
 			s.stopFlushTimer()
 			s.flushUser()
+			// Every turn end, including a generationComplete with no turnComplete
+			// behind it, closes the usage accounting for the turn: see turnUsage.
+			s.mu.Lock()
+			s.usageTurn++
+			s.mu.Unlock()
 		}
 		if c.Interrupted {
 			s.Emit(gptlive.Interrupted{})
@@ -405,7 +425,6 @@ func (s *Session) handleMessage(raw []byte) {
 			s.turn++
 			s.agentText = ""
 			s.flushTimer = nil
-			s.turnUsage = gptlive.BackendUsage{} // the next turn's usage is its own, not a delta on this one
 			s.mu.Unlock()
 		}
 	}
@@ -437,9 +456,14 @@ func (s *Session) handleMessage(raw []byte) {
 		// — what the live runs show, with prompt tokens rising per turn and the
 		// session total equal to the sum of the turn totals — reporting exactly
 		// what it reports today, while a repeat inside the same turn adds nothing.
-		// turnUsage is reset at every turn end (see the serverContent block above,
-		// which runs first, so a message carrying both turnComplete and
-		// usageMetadata still credits the turn that just ended in full).
+		// turnUsage is keyed to usageTurn, which the serverContent block above
+		// advances on EVERY turn end (generationComplete included). That block runs
+		// first in the same handleMessage call, so a message carrying both a turn
+		// end and usageMetadata still credits the turn that just ended in full.
+		if s.turnUsageAt != s.usageTurn {
+			s.turnUsage = gptlive.BackendUsage{} // a new turn's usage is its own, not a delta on the last one
+			s.turnUsageAt = s.usageTurn
+		}
 		delta := gptlive.BackendUsage{
 			Model:  s.cfg.Model,
 			Input:  u.PromptTokenCount - s.turnUsage.Input,

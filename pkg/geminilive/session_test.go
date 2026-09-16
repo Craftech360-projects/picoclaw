@@ -443,6 +443,61 @@ func TestGeminiRepeatedUsageMetadataInOneTurnIsCountedOnce(t *testing.T) {
 	}
 }
 
+// TestGeminiUsageResetsOnATurnThatEndsOnGenerationCompleteAlone pins N2. This file already
+// treats a standalone generationComplete as a turn end (it stops the flush timer and
+// flushes the user transcript on it), but the per-turn usage baseline used to be cleared
+// only on turnComplete/interrupted. A turn that ended on generationComplete alone therefore
+// left the previous turn's totals in place, so the NEXT turn's usage was emitted as the
+// difference between turns (10241-9248 = 993 instead of 10241) — and because the baseline
+// is a running max() the under-count compounded for the rest of the session.
+func TestGeminiUsageResetsOnATurnThatEndsOnGenerationCompleteAlone(t *testing.T) {
+	usage := func(prompt, response, total int) map[string]any {
+		return map[string]any{"usageMetadata": map[string]any{
+			"promptTokenCount": prompt, "responseTokenCount": response, "totalTokenCount": total,
+		}}
+	}
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // setup
+		send := func(v any) { _ = c.WriteMessage(websocket.BinaryMessage, []byte(mustJSON(v))) }
+		content := func(v map[string]any) { send(map[string]any{"serverContent": v}) }
+		send(map[string]any{"setupComplete": map[string]any{}})
+		// Turn 1 ends on generationComplete with no turnComplete behind it.
+		send(usage(9248, 120, 9368))
+		content(map[string]any{"generationComplete": true})
+		// Turn 2 must be counted in full, not as its growth over turn 1.
+		send(usage(10241, 90, 10331))
+		content(map[string]any{"turnComplete": true})
+		content(map[string]any{"interrupted": true}) // the test's end marker
+		time.Sleep(time.Second)
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	var input, output, total int
+	for done := false; !done; {
+		switch e := nextEvent(t, s).(type) {
+		case gptlive.BackendUsage:
+			input, output, total = input+e.Input, output+e.Output, total+e.Total
+		case gptlive.Interrupted:
+			done = true
+		}
+	}
+	if input != 9248+10241 || output != 120+90 || total != 9368+10331 {
+		t.Fatalf("summed usage = input %d, output %d, total %d; want %d/%d/%d (turn 2 was counted as a delta on turn 1)",
+			input, output, total, 9248+10241, 120+90, 9368+10331)
+	}
+}
+
 // blockingExec holds the tool call open until the test has torn the socket down, so the
 // toolResponse is written exactly while the connection is being replaced.
 type blockingExec struct{ ready chan struct{} }

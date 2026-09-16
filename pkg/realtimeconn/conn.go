@@ -35,6 +35,18 @@ const toolTimeout = 30 * time.Second // same bound as gptlive's delegated tool c
 // A var only so tests can shrink it.
 var writeTimeout = 10 * time.Second
 
+// SetWriteTimeoutForTest shrinks the per-write deadline and returns a function that
+// restores it. Vendor-package tests that wedge a socket deliberately need the deadline
+// inside their own budget, so that a wedged-write assertion can never be decided by the
+// production 10s instead of by the behaviour under test. Nothing in production calls it;
+// call it before the session is dialled and restore it after the session is closed, so
+// no live writer reads the var while it changes.
+func SetWriteTimeoutForTest(d time.Duration) func() {
+	prev := writeTimeout
+	writeTimeout = d
+	return func() { writeTimeout = prev }
+}
+
 // Dial opens a websocket. A refused upgrade is reported with the vendor's error body
 // (for example xAI's "used all available credits"), and secret is scrubbed from every
 // error because Gemini's key rides in the URL.
@@ -130,6 +142,20 @@ func (c *Conn) scrub(s string) string {
 func (c *Conn) Audio() <-chan []byte         { return c.audio }
 func (c *Conn) Events() <-chan gptlive.Event { return c.events }
 func (c *Conn) Done() <-chan struct{}        { return c.done }
+
+// WriteJSON writes one JSON message on a socket a Conn does not own yet, under the
+// same writeTimeout Send applies. The setup frame and the resume-time toolResponse
+// replay are both written inside geminilive's connect, on the Run goroutine, while
+// the Conn still holds the socket being replaced — so they cannot go through Send,
+// and without a deadline they were the last writes that could wedge a session with
+// no reads. The deadline is cleared afterwards so the socket handed back carries
+// none of it.
+func WriteJSON(ws *websocket.Conn, v any) error {
+	_ = ws.SetWriteDeadline(time.Now().Add(writeTimeout))
+	err := ws.WriteJSON(v)
+	_ = ws.SetWriteDeadline(time.Time{})
+	return err
+}
 
 // Send writes one JSON message on the current socket, under writeTimeout: a write
 // that cannot complete in that time fails instead of blocking its caller (and every
