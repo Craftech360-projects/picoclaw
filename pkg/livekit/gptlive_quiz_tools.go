@@ -48,6 +48,8 @@ type QuizTracker struct {
 	tries       map[int64]int
 	attempts    map[int64][]QuizAttempt
 	onDirective func(string)
+	// wonderRecorded is set by the first RecordWonder; guarded by mu.
+	wonderRecorded bool
 }
 
 func NewQuizTracker(cfg QuizTrackerConfig) *QuizTracker {
@@ -93,11 +95,14 @@ func (t *QuizTracker) find(id string) *QuizQuestion {
 	return nil
 }
 
-// dayCompleteLocked reports whether today's Daily Ten is already scored. The
-// batch can be longer than what is left of the day, so this, not running out
-// of batch questions, is what ends the quiz. Caller holds t.mu.
+// dayCompleteLocked reports whether today's scored quiz is over. The batch can
+// be longer than what is left of the day, so this, not running out of batch
+// questions, is what ends the quiz. The server can also end the day before ten
+// (a level finished today: DayComplete with answered_today < 10) and still
+// serve a full next-level batch, which must not be scored either. Caller holds
+// t.mu.
 func (t *QuizTracker) dayCompleteLocked() bool {
-	return t.cfg.Batch.AnsweredToday+len(t.reported) >= dailyQuizTarget
+	return t.cfg.Batch.DayComplete || t.cfg.Batch.AnsweredToday+len(t.reported) >= dailyQuizTarget
 }
 
 func (t *QuizTracker) pendingLocked() *QuizQuestion {
@@ -119,6 +124,9 @@ func (t *QuizTracker) Status() string {
 	answered, total := t.doneLocked()
 	q := t.pendingLocked()
 	if q == nil {
+		if t.dayCompleteLocked() {
+			return fmt.Sprintf("STATUS: answered=%d of %d today | today's Daily Ten is complete, all questions done; do not ask or score another quiz question today", answered, total)
+		}
 		return fmt.Sprintf("STATUS: answered=%d of %d today | all questions done", answered, total)
 	}
 	tries := t.tries[q.ID]
@@ -146,9 +154,13 @@ func (t *QuizTracker) Score(questionID, result, transcript string) (string, erro
 	// The hard stop behind the day-complete result: a model that ignores it
 	// and asks an eleventh question still cannot write an answer row for it.
 	if t.dayCompleteLocked() {
+		scored := t.cfg.Batch.AnsweredToday + len(t.reported)
 		t.mu.Unlock()
-		return "", fmt.Errorf("today's Daily Ten is already complete (%d of %d); nothing was scored. Do not ask or score any more quiz questions today",
-			dailyQuizTarget, dailyQuizTarget)
+		// No "10 of 10": the server can end the day earlier (a level finished).
+		// The Bonus Buzz sentence is there because the persona tells a single
+		// model to score every short reply, so its Bonus Buzz lands here too.
+		return "", fmt.Errorf("today's Daily Ten is already complete (%d scored today); nothing was scored. Do not ask or score any more quiz questions today. "+
+			"An unscored Bonus Buzz answer needs no tool call: just react warmly and carry on", scored)
 	}
 	q := t.find(questionID)
 	if q == nil {
@@ -303,17 +315,21 @@ func (t *QuizTracker) recordLocked(q *QuizQuestion, verdict string) (directive s
 func (t *QuizTracker) dayCompleteTextLocked() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Today's Daily Ten is complete (%d of %d). Do NOT ask any more quiz questions today. ", dailyQuizTarget, dailyQuizTarget)
-	b.WriteString("Celebrate briefly, then leave the child with ONE Wonder Question. It is never scored. ")
+	b.WriteString("Celebrate briefly, then leave the child with ONE Wonder Question right now; it is never scored. ")
+	b.WriteString("Ask it only this once, not again later or at goodbye. ")
+	// The record step names the tool but does not assume the reader can call
+	// it: on OpenAI GPT-Live this text is also pushed to the voice model, which
+	// has no tools and gets the answer recorded by delegating.
 	if ask := t.cfg.Batch.WonderToAsk; ask != nil && strings.TrimSpace(ask.Text) != "" {
-		fmt.Fprintf(&b, "Ask EXACTLY this Wonder Question, in your own warm words but the same question: %q. Not one of your own. ", strings.TrimSpace(ask.Text))
-		b.WriteString("When the child answers, call quiz_record_wonder with question set to that question, answer set to what they said")
+		fmt.Fprintf(&b, "Ask EXACTLY this one, in your own warm words but the same question: %q. Not one of your own. ", strings.TrimSpace(ask.Text))
+		b.WriteString("When the child answers, get it recorded once with quiz_record_wonder (question = that question, answer = what they said")
 		if code := strings.TrimSpace(ask.Code); code != "" {
-			fmt.Fprintf(&b, ", and code=%s", code)
+			fmt.Fprintf(&b, ", code=%s", code)
 		}
-		b.WriteString(".")
+		b.WriteString("); delegate that if you cannot call tools.")
 	} else {
-		b.WriteString("Make it a short, open question with no right answer, about anything at all. ")
-		b.WriteString("When the child answers, call quiz_record_wonder with question set to the question as you asked it and answer set to what they said.")
+		b.WriteString("Make it a short, open question with no right answer. ")
+		b.WriteString("When the child answers, get it recorded once with quiz_record_wonder (question = the question as you asked it, answer = what they said); delegate that if you cannot call tools.")
 	}
 	return b.String()
 }
@@ -410,15 +426,24 @@ func (t *QuizTracker) StateTypesWritten() map[string]bool {
 	return map[string]bool{t.cfg.MemoType: true}
 }
 
-// RecordWonder reports the child's Wonder answer. RecordWonder touches no
-// tracker state, so there is no lock to release first, but WonderReporter is
-// still dispatched on its own goroutine per its contract comment on
-// QuizTrackerConfig: the real reporter is a network call and must not block
-// whatever called RecordWonder (the quiz_record_wonder tool).
-func (t *QuizTracker) RecordWonder(question, answer, code string) {
-	if t.cfg.WonderReporter != nil {
+// RecordWonder reports the child's Wonder answer, once per session, and says
+// whether this call was the one that recorded it. A session has one Wonder
+// Question, but the prompt can ask for it twice (after question ten and again
+// "when the session ends"), and every report is another manager row, so a
+// second call is a no-op. The flag is set under t.mu; WonderReporter is still
+// dispatched on its own goroutine, after the lock is released, per its
+// contract comment on QuizTrackerConfig: the real reporter is a network call
+// and must not block whatever called RecordWonder (the quiz_record_wonder
+// tool).
+func (t *QuizTracker) RecordWonder(question, answer, code string) bool {
+	t.mu.Lock()
+	first := !t.wonderRecorded
+	t.wonderRecorded = true
+	t.mu.Unlock()
+	if first && t.cfg.WonderReporter != nil {
 		go t.cfg.WonderReporter(question, answer, code)
 	}
+	return first
 }
 
 // Tools are the three functions the backend model may call.
@@ -471,7 +496,7 @@ type quizRecordWonderTool struct{ t *QuizTracker }
 
 func (quizRecordWonderTool) Name() string { return "quiz_record_wonder" }
 func (quizRecordWonderTool) Description() string {
-	return "Record the Wonder Question the child asked today and the answer given, so it can be recalled tomorrow."
+	return "Record today's Wonder Question (the open question you left the child with) and the child's answer, so it can be recalled tomorrow. Call it once per session."
 }
 func (quizRecordWonderTool) Parameters() map[string]any {
 	return map[string]any{
@@ -488,6 +513,8 @@ func (q quizRecordWonderTool) Execute(_ context.Context, args map[string]any) *t
 	question, _ := args["question"].(string)
 	answer, _ := args["answer"].(string)
 	code, _ := args["code"].(string)
-	q.t.RecordWonder(question, answer, code)
+	if !q.t.RecordWonder(question, answer, code) {
+		return tools.SilentResult("already recorded: today's Wonder Question is done. Do not ask a Wonder Question again this session.")
+	}
 	return tools.SilentResult("recorded")
 }

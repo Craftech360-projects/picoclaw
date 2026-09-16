@@ -523,7 +523,8 @@ func TestQuizDailyTenEndsAtTenNotWhenTheBatchRunsOut(t *testing.T) {
 		"ONE Wonder Question",
 		`"If you could build a house out of any food, what would you use?"`,
 		"quiz_record_wonder",
-		"W7",
+		"code=W7",
+		"Ask it only this once, not again later or at goodbye",
 	} {
 		if !strings.Contains(d, want) {
 			t.Errorf("day-complete result missing %q: %q", want, d)
@@ -605,7 +606,9 @@ func TestQuizDailyTenFromZeroStopsAtTenInAThirteenQuestionBatch(t *testing.T) {
 }
 
 func TestQuizMissOnTheTenthQuestionStillStaysOnIt(t *testing.T) {
-	tr := NewQuizTracker(QuizTrackerConfig{Batch: dailyTenBatch(9, 11), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	rec := newQuizAnswerRecorder()
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: dailyTenBatch(9, 11), Workspace: t.TempDir(), MemoType: "daily_quiz",
+		AnswerReporter: rec.report})
 	d, err := tr.Score("101", "miss", "no")
 	if err != nil {
 		t.Fatalf("a miss before the cap must still be accepted: %v", err)
@@ -618,6 +621,20 @@ func TestQuizMissOnTheTenthQuestionStillStaysOnIt(t *testing.T) {
 	if strings.Contains(d, "Daily Ten is complete") {
 		t.Errorf("a miss does not complete the day: %q", d)
 	}
+	rec.expectNone(t)
+
+	// A later correct answer on the same question completes the day, once.
+	d, err = tr.Score("101", "correct", "yes")
+	if err != nil {
+		t.Fatalf("a correct answer after a miss on question ten must be accepted: %v", err)
+	}
+	if !strings.Contains(d, "Today's Daily Ten is complete (10 of 10)") {
+		t.Errorf("the correct answer after the miss completes the day: %q", d)
+	}
+	if call := rec.take(t); call.questionID != 101 || call.result != "correct" || len(call.attempts) != 2 {
+		t.Errorf("want one report for 101 correct carrying both tries, got %+v", call)
+	}
+	rec.expectNone(t)
 }
 
 func TestQuizExhaustedLadderOnTheTenthQuestionWrapsUp(t *testing.T) {
@@ -625,8 +642,11 @@ func TestQuizExhaustedLadderOnTheTenthQuestionWrapsUp(t *testing.T) {
 	batch.Questions[0].ChoiceOrder = []string{"yes", "no"}
 	batch.Questions[0].TeachText = "it is always yes"
 	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: t.TempDir(), MemoType: "daily_quiz"})
-	tr.Score("101", "miss", "no")
-	tr.Score("101", "miss", "no")
+	for i := 1; i <= 2; i++ {
+		if _, err := tr.Score("101", "miss", "no"); err != nil {
+			t.Fatalf("miss %d on question ten must be accepted: %v", i, err)
+		}
+	}
 	d, err := tr.Score("101", "miss", "no")
 	if err != nil {
 		t.Fatal(err)
@@ -638,5 +658,129 @@ func TestQuizExhaustedLadderOnTheTenthQuestionWrapsUp(t *testing.T) {
 	}
 	if strings.Contains(d, "next question") || strings.Contains(d, "Ask question") {
 		t.Errorf("the last question of the day must not point at a next question: %q", d)
+	}
+}
+
+// The day-complete result is also pushed through AppendInstructions, which the
+// gptlive session truncates past 1600 characters (maxAppendChars). The longest
+// shape (exhausted ladder + served wonder, long texts) must fit whole, or the
+// recording step at the end is what gets cut.
+func TestQuizDayCompletePushFitsTheAppendCap(t *testing.T) {
+	batch := dailyTenBatch(9, 11)
+	batch.Questions[0].Text = strings.Repeat("Which of these animals lives in the ocean and breathes air? ", 2)
+	batch.Questions[0].ChoiceOrder = []string{"whale", "shark"}
+	batch.Questions[0].TeachText = "whales come up to breathe"
+	batch.WonderToAsk = &WonderToAsk{Code: "W123", Text: strings.Repeat("If you could talk to any animal for a whole day, which would it be? ", 2)}
+	var pushed string
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	tr.OnDirective(func(d string) { pushed = d })
+	for i := 0; i < 3; i++ {
+		if _, err := tr.Score("101", "miss", "shark"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len([]rune(gptLiveDirectiveSupersedes + pushed)); n > 1600 {
+		t.Errorf("pushed day-complete block is %d chars, over the 1600-char append cap", n)
+	}
+	if !strings.HasSuffix(pushed, "delegate that if you cannot call tools.") {
+		t.Errorf("pushed day-complete block must end with the recording step: %q", pushed)
+	}
+}
+
+// TestQuizServerDayCompleteIsNotScored covers review I1: the manager also ends
+// the day when a level is finished (day_complete with answered_today < 10) and
+// still serves a full next-level batch. None of it may be scored today.
+func TestQuizServerDayCompleteIsNotScored(t *testing.T) {
+	rec := newQuizAnswerRecorder()
+	batch := dailyTenBatch(6, 10)
+	batch.DayComplete = true
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: batch, Workspace: t.TempDir(), MemoType: "daily_quiz", AnswerReporter: rec.report})
+	if got := tr.Status(); strings.Contains(got, "pending question") || !strings.Contains(got, "Daily Ten is complete") {
+		t.Errorf("Status() on a server-completed day = %q", got)
+	}
+	_, err := tr.Score("101", "correct", "yes")
+	if err == nil {
+		t.Fatal("a question on a server-completed day must be refused")
+	}
+	for _, want := range []string{"already complete (6 scored today)", "nothing was scored", "Bonus Buzz answer needs no tool call"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal missing %q: %q", want, err.Error())
+		}
+	}
+	if strings.Contains(err.Error(), "10 of 10") {
+		t.Errorf("the day ended by level at six; the refusal must not claim 10 of 10: %q", err.Error())
+	}
+	rec.expectNone(t)
+}
+
+func TestQuizSessionStartingAfterTheDailyTenIsNotScored(t *testing.T) {
+	rec := newQuizAnswerRecorder()
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: dailyTenBatch(10, 10), Workspace: t.TempDir(), MemoType: "daily_quiz", AnswerReporter: rec.report})
+	if got := tr.Status(); !strings.Contains(got, "answered=10 of 10") || strings.Contains(got, "pending question") {
+		t.Errorf("Status() at session start with ten already scored = %q", got)
+	}
+	res := findQuizTool(t, tr, "quiz_score_answer").Execute(context.Background(),
+		map[string]any{"question_id": "101", "result": "correct", "transcript": "yes"})
+	if res == nil || !res.IsError || !strings.Contains(res.ForLLM, "Bonus Buzz") {
+		t.Errorf("scoring after the Daily Ten must be refused with the Bonus Buzz note, got %+v", res)
+	}
+	rec.expectNone(t)
+	if got := tr.StateTypesWritten(); len(got) != 0 {
+		t.Errorf("a refused score must write no state, got %v", got)
+	}
+}
+
+// TestQuizRecordWonderReportsOncePerSession covers review I2: the Wonder
+// Question can be asked after question ten and again at goodbye; the second
+// record must not send a second report.
+func TestQuizRecordWonderReportsOncePerSession(t *testing.T) {
+	reports := make(chan string, 4)
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz",
+		WonderReporter: func(question, _, code string) { reports <- code }})
+	tool := findQuizTool(t, tr, "quiz_record_wonder")
+	args := map[string]any{"question": "q", "answer": "a", "code": "W7"}
+	if res := tool.Execute(context.Background(), args); res == nil || res.IsError || res.ForLLM != "recorded" {
+		t.Fatalf("first record: %+v", res)
+	}
+	res := tool.Execute(context.Background(), args)
+	if res == nil || res.IsError || !strings.Contains(res.ForLLM, "already recorded") {
+		t.Fatalf("a second record is a no-op success that says so, got %+v", res)
+	}
+	select {
+	case <-reports:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first record never reached WonderReporter")
+	}
+	select {
+	case c := <-reports:
+		t.Fatalf("a second record sent a second report (code %s)", c)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// On OpenAI GPT-Live the voice model has no tools, so the Wonder answer is
+// recorded only if its delegation block tells it to delegate.
+func TestQuizDelegationBlockCoversTheWonderQuestion(t *testing.T) {
+	if got := gptLiveDelegationBlock("English", true); !strings.Contains(got, "quiz_record_wonder") {
+		t.Errorf("delegation block must send the Wonder answer to the helper: %q", got)
+	}
+}
+
+func TestQuizBatchRunningOutBelowTenPushesTheEnding(t *testing.T) {
+	var pushed []string
+	tr := NewQuizTracker(QuizTrackerConfig{Batch: testBatch(), Workspace: t.TempDir(), MemoType: "daily_quiz"})
+	tr.OnDirective(func(d string) { pushed = append(pushed, d) })
+	if _, err := tr.Score("11", "correct", "eight"); err != nil {
+		t.Fatal(err)
+	}
+	d, err := tr.Score("12", "correct", "blue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d, "All of today's questions are done (4 of 4)") {
+		t.Errorf("batch-exhausted result = %q", d)
+	}
+	if len(pushed) != 2 || pushed[1] != d {
+		t.Errorf("the batch-exhausted ending must be pushed as the current directive, pushed=%q", pushed)
 	}
 }

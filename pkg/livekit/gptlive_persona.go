@@ -95,6 +95,8 @@ func gptLiveDelegationBlock(language string, hasQuiz bool) string {
 		b.WriteString("(the helper calls quiz_score_answer), and then do exactly what the result tells you to do next:\n")
 		b.WriteString("ask plainly, offer the two choices, explain then re-ask, or reveal and move on.\n")
 		b.WriteString("Never decide on your own whether an answer was right.\n")
+		b.WriteString("When the child answers the Wonder Question, delegate once so the question and their answer get recorded\n")
+		b.WriteString("(the helper calls quiz_record_wonder).\n")
 	}
 	fmt.Fprintf(&b, "Speak %s with the child unless they clearly switch language.\n", language)
 	b.WriteString("</delegation>\n\n")
