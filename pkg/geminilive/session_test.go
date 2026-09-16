@@ -376,3 +376,140 @@ func TestGeminiConnectionLostErrorScrubsKey(t *testing.T) {
 		t.Fatal("connection-lost error must carry the close text with the key masked")
 	}
 }
+
+// TestGeminiRepeatedUsageMetadataInOneTurnIsCountedOnce pins I3. The pipeline SUMS every
+// BackendUsage into the tokens it persists, and a usageMetadata message carries the current
+// turn's totals rather than a delta, so a vendor that repeats it within a turn used to
+// multiply the persisted tokens by the number of repeats. The totals a live run produces
+// today — one usageMetadata per turn, prompt tokens rising per turn, the session total equal
+// to the sum of the turn totals — must come out unchanged.
+func TestGeminiRepeatedUsageMetadataInOneTurnIsCountedOnce(t *testing.T) {
+	usage := func(prompt, response, total int) map[string]any {
+		return map[string]any{"usageMetadata": map[string]any{
+			"promptTokenCount": prompt, "responseTokenCount": response, "totalTokenCount": total,
+		}}
+	}
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // setup
+		send := func(v any) { _ = c.WriteMessage(websocket.BinaryMessage, []byte(mustJSON(v))) }
+		content := func(v map[string]any) { send(map[string]any{"serverContent": v}) }
+		send(map[string]any{"setupComplete": map[string]any{}})
+		// Turn 1: the same usage repeated, as a vendor sending it per frame would.
+		send(usage(9248, 120, 9368))
+		send(usage(9248, 120, 9368))
+		send(usage(9248, 120, 9368))
+		content(map[string]any{"turnComplete": true})
+		// Turn 2: its own totals, with the prompt grown by the conversation so far.
+		send(usage(10241, 90, 10331))
+		content(map[string]any{"turnComplete": true})
+		content(map[string]any{"interrupted": true}) // the test's end marker
+		time.Sleep(time.Second)
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	var input, output, total int
+	for done := false; !done; {
+		switch e := nextEvent(t, s).(type) {
+		case gptlive.BackendUsage:
+			input, output, total = input+e.Input, output+e.Output, total+e.Total
+		case gptlive.Interrupted:
+			done = true
+		}
+	}
+	// Exactly the two turns, each counted once: what one usageMetadata per turn already gives.
+	if input != 9248+10241 || output != 120+90 || total != 9368+10331 {
+		t.Fatalf("summed usage = input %d, output %d, total %d; want %d/%d/%d",
+			input, output, total, 9248+10241, 120+90, 9368+10331)
+	}
+}
+
+// blockingExec holds the tool call open until the test has torn the socket down, so the
+// toolResponse is written exactly while the connection is being replaced.
+type blockingExec struct{ ready chan struct{} }
+
+func (e blockingExec) Execute(_ context.Context, _ string, _ map[string]any) (string, bool) {
+	<-e.ready
+	return "scored", false
+}
+
+// TestGeminiToolResponseIsReplayedOnTheResumedSocket pins I4. Gemini is the one vendor that
+// redials mid-session; a toolResponse written between the read error and the socket swap went
+// to a dead socket and was lost, leaving the model waiting on a quiz score that never arrived.
+// It must reach the socket that replaces it.
+func TestGeminiToolResponseIsReplayedOnTheResumedSocket(t *testing.T) {
+	toolDone := make(chan struct{})
+	toolResponses := make(chan string, 4)
+	var conns atomic.Int32
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // setup
+		send := func(v any) { _ = c.WriteMessage(websocket.BinaryMessage, []byte(mustJSON(v))) }
+		send(map[string]any{"setupComplete": map[string]any{}})
+		if conns.Add(1) == 1 {
+			send(map[string]any{"sessionResumptionUpdate": map[string]any{"newHandle": "h1", "resumable": true}})
+			send(map[string]any{"toolCall": map[string]any{"functionCalls": []any{
+				map[string]any{"id": "f1", "name": "quiz_score_answer", "args": map[string]any{"correct": true}},
+			}}})
+			time.Sleep(50 * time.Millisecond) // let the toolCall land, then drop the socket
+			_ = c.Close()
+			close(toolDone) // only now does the tool return, so its write hits the dead socket
+			return
+		}
+		// The resumed socket keeps producing frames, so a result queued a moment after the
+		// resume finished is flushed too.
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			for i := 0; i < 40; i++ {
+				select {
+				case <-stop:
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+				send(map[string]any{"serverContent": map[string]any{"outputTranscription": map[string]any{"text": "."}}})
+			}
+		}()
+		for {
+			_, data, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			if strings.Contains(string(data), "toolResponse") {
+				toolResponses <- strings.TrimSpace(string(data)) // WriteJSON appends a newline
+			}
+		}
+	}))
+	defer srv.Close()
+	s, err := Dial(context.Background(), Config{APIKey: "g", BaseURL: "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Executor: blockingExec{ready: toolDone}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+
+	select {
+	case got := <-toolResponses:
+		want := `{"toolResponse":{"functionResponses":[{"id":"f1","name":"quiz_score_answer","response":{"output":"scored"}}]}}`
+		if got != want {
+			t.Fatalf("replayed toolResponse = %s, want %s", got, want)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the toolResponse was lost with the socket it was written to; the quiz stalls here")
+	}
+}

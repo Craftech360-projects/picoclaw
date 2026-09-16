@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -61,6 +62,18 @@ type Session struct {
 	logLimit       *realtimeconn.LogLimiter // unknown/unparsed frames
 	usageLimit     *realtimeconn.LogLimiter // the usage line: at most once a second, so every turn still logs
 	lastUsage      [6]int                   // the usage line is logged only when these counts change
+	// turnUsage is the largest usageMetadata this turn has already reported to the
+	// pipeline; only the growth over it is emitted, so a usageMetadata repeated
+	// within a turn cannot inflate the persisted totals. Reset at every turn end.
+	// See the usageMetadata branch of handleMessage.
+	turnUsage gptlive.BackendUsage
+	// pendingTools are toolResponses whose socket died before they could be
+	// written; they are replayed on the socket that replaces it. See answer and
+	// flushToolResponses. hasPendingTools mirrors len(pendingTools) > 0 so the read
+	// loop can check it on every frame without taking mu.
+	pendingTools    []pendingTool
+	flushingTools   bool
+	hasPendingTools atomic.Bool
 	// flushTimer is started by the current turn's first model output and flushes the user
 	// transcript userFlushDelay later if the turn has not ended by then; nil until that output
 	flushTimer *time.Timer
@@ -140,6 +153,11 @@ func (s *Session) connect(ctx context.Context) (*websocket.Conn, error) {
 	s.mu.Lock()
 	s.socketOpened = time.Now()
 	s.mu.Unlock()
+	// A toolResponse whose socket died is replayed here, on the new socket, as soon
+	// as it is set up. Writing to ws directly is what makes that possible: Run has
+	// not swapped it into the Conn yet, so s.Send would still address the dead one —
+	// and for the same reason nothing else can be writing to ws at this point.
+	s.flushToolResponses(func(v any) error { return ws.WriteJSON(v) })
 	return ws, nil
 }
 
@@ -312,6 +330,13 @@ func (s *Session) handleMessage(raw []byte) {
 		return
 	}
 	s.logUnknownKeys(raw)
+	// A frame means this socket is live. If a toolResponse was queued after the
+	// resume had already flushed the queue (the tool returned a moment too late),
+	// this is what gets it out — off the read goroutine, so the write can never
+	// stall the read loop.
+	if s.hasPendingTools.Load() {
+		s.Go(func() { s.flushToolResponses(s.Send) })
+	}
 	if c := m.ServerContent; c != nil {
 		if c.InputTranscription != nil {
 			s.mu.Lock()
@@ -373,6 +398,7 @@ func (s *Session) handleMessage(raw []byte) {
 			s.turn++
 			s.agentText = ""
 			s.flushTimer = nil
+			s.turnUsage = gptlive.BackendUsage{} // the next turn's usage is its own, not a delta on this one
 			s.mu.Unlock()
 		}
 	}
@@ -395,6 +421,26 @@ func (s *Session) handleMessage(raw []byte) {
 		s.mu.Lock()
 		changed := counts != s.lastUsage
 		s.lastUsage = counts
+		// The pipeline SUMS every BackendUsage into the tokens it persists, and a
+		// usageMetadata message carries the CURRENT TURN's totals, not a delta — so
+		// a vendor that repeats usageMetadata within a turn (the limiter below
+		// exists because it might) would multiply the persisted tokens by the
+		// number of times it repeated. Only the growth over what this turn has
+		// already emitted is emitted, which leaves a single usageMetadata per turn
+		// — what the live runs show, with prompt tokens rising per turn and the
+		// session total equal to the sum of the turn totals — reporting exactly
+		// what it reports today, while a repeat inside the same turn adds nothing.
+		// turnUsage is reset at every turn end (see the serverContent block above,
+		// which runs first, so a message carrying both turnComplete and
+		// usageMetadata still credits the turn that just ended in full).
+		delta := gptlive.BackendUsage{
+			Model:  s.cfg.Model,
+			Input:  u.PromptTokenCount - s.turnUsage.Input,
+			Output: u.ResponseTokenCount - s.turnUsage.Output,
+			Total:  u.TotalTokenCount - s.turnUsage.Total,
+		}
+		s.turnUsage = gptlive.BackendUsage{Input: max(s.turnUsage.Input, u.PromptTokenCount),
+			Output: max(s.turnUsage.Output, u.ResponseTokenCount), Total: max(s.turnUsage.Total, u.TotalTokenCount)}
 		s.mu.Unlock()
 		if changed {
 			// usage normally arrives once per turn; the limiter only bites if a vendor sends it per frame
@@ -406,7 +452,12 @@ func (s *Session) handleMessage(raw []byte) {
 				})
 			}
 		}
-		s.Emit(gptlive.BackendUsage{Model: s.cfg.Model, Input: u.PromptTokenCount, Output: u.ResponseTokenCount, Total: u.TotalTokenCount})
+		if delta.Input > 0 || delta.Output > 0 || delta.Total > 0 {
+			delta.Input, delta.Output, delta.Total = max(delta.Input, 0), max(delta.Output, 0), max(delta.Total, 0)
+			s.Emit(delta)
+		}
+		// VoiceUsage is the session's wall clock to date, replaced (monotonically) by
+		// the pipeline rather than summed, so a repeat costs nothing.
 		s.Emit(gptlive.VoiceUsage{Seconds: time.Since(s.started).Seconds()})
 	}
 	if r := m.SessionResumptionUpdate; r != nil {
@@ -498,17 +549,117 @@ func (s *Session) answer(call gptlive.FunctionCall, args map[string]any) {
 	if isErr {
 		response = map[string]any{"error": output}
 	}
-	sendErr := s.Send(map[string]any{"toolResponse": map[string]any{"functionResponses": []map[string]any{
+	payload := map[string]any{"toolResponse": map[string]any{"functionResponses": []map[string]any{
 		{"id": call.CallID, "name": call.Name, "response": response},
-	}}})
+	}}}
+	sendErr := s.Send(payload)
+	if sendErr != nil {
+		// Gemini is the one vendor that redials mid-session, and Send writes to
+		// whichever socket Conn currently holds: between the read error and the
+		// swap, that is a dead socket. A toolResponse lost there leaves the model
+		// waiting on a result that never arrives — for quiz_score_answer the quiz
+		// stalls mid-question and the child gets dead air — so it is queued and
+		// replayed on the socket that replaces it. Bounded: see flushToolResponses.
+		s.queueToolResponse(pendingTool{name: call.Name, payload: payload, queued: time.Now()})
+	}
 	logger.InfoCF("realtime", "gemini live: tool result", map[string]any{
-		"name": call.Name, "is_error": isErr, "ms": toolMs, "output_bytes": len(output), "response_sent": sendErr == nil,
+		"name": call.Name, "is_error": isErr, "ms": toolMs, "output_bytes": len(output),
+		"response_sent": sendErr == nil, "queued_for_resume": sendErr != nil,
 	})
 }
 
+// pendingTool is one toolResponse whose socket died before it could be written.
+type pendingTool struct {
+	name    string
+	payload map[string]any
+	queued  time.Time
+}
+
+const (
+	// toolResponseReplayWindow bounds how long a queued toolResponse is worth
+	// replaying. A redial dials for at most 15s and then waits up to setupTimeout
+	// for setupComplete, so 30s covers a resumption with room to spare; past that
+	// the model has moved on and delivering a stale quiz score would be worse than
+	// dropping it. Dropped results are warned about, never silently discarded.
+	toolResponseReplayWindow = 30 * time.Second
+	// maxPendingToolResponses bounds the queue itself, so a socket that never comes
+	// back cannot grow it without limit.
+	maxPendingToolResponses = 8
+)
+
+func (s *Session) queueToolResponse(p pendingTool) {
+	s.mu.Lock()
+	if len(s.pendingTools) >= maxPendingToolResponses {
+		dropped := s.pendingTools[0]
+		s.pendingTools = s.pendingTools[1:]
+		logger.WarnCF("realtime", "gemini live: tool result dropped; the replay queue is full", map[string]any{"name": dropped.name})
+	}
+	s.pendingTools = append(s.pendingTools, p)
+	s.mu.Unlock()
+	s.hasPendingTools.Store(true)
+}
+
+// flushToolResponses writes every queued toolResponse with send, which is the new
+// socket's own writer during a resume (connect, before Run has swapped it in — so
+// nothing else can be writing to it) and s.Send afterwards. Anything that still
+// cannot be written stays queued for the next attempt until the replay window
+// expires. One flush at a time, so a response is never written twice or out of order.
+func (s *Session) flushToolResponses(send func(any) error) {
+	s.mu.Lock()
+	if s.flushingTools || len(s.pendingTools) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.flushingTools = true
+	queue := s.pendingTools
+	s.pendingTools = nil
+	s.mu.Unlock()
+
+	var keep []pendingTool
+	for _, p := range queue {
+		waited := time.Since(p.queued)
+		if waited > toolResponseReplayWindow {
+			logger.WarnCF("realtime", "gemini live: tool result dropped; no socket accepted it in time", map[string]any{
+				"name": p.name, "waited_ms": waited.Milliseconds(),
+			})
+			continue
+		}
+		if err := send(p.payload); err != nil {
+			keep = append(keep, p)
+			continue
+		}
+		logger.InfoCF("realtime", "gemini live: tool result delivered on the resumed socket", map[string]any{
+			"name": p.name, "waited_ms": waited.Milliseconds(),
+		})
+	}
+
+	s.mu.Lock()
+	s.pendingTools = append(keep, s.pendingTools...)
+	pending := len(s.pendingTools) > 0
+	s.flushingTools = false
+	s.mu.Unlock()
+	s.hasPendingTools.Store(pending)
+}
+
+// dropPendingToolResponses reports the results that never reached the model, so a
+// stalled quiz has a log line naming it rather than only response_sent=false.
+func (s *Session) dropPendingToolResponses() {
+	s.mu.Lock()
+	queue := s.pendingTools
+	s.pendingTools = nil
+	s.mu.Unlock()
+	s.hasPendingTools.Store(false)
+	for _, p := range queue {
+		logger.WarnCF("realtime", "gemini live: tool result dropped; the session ended before a socket accepted it", map[string]any{
+			"name": p.name, "waited_ms": time.Since(p.queued).Milliseconds(),
+		})
+	}
+}
+
 func (s *Session) onEnd(err error) {
-	s.stopFlushTimer() // Run has stopped accepting Go work, so a timer that already fired is a no-op
-	s.flushUser()      // an utterance the model never answered is still part of the history
+	s.stopFlushTimer()           // Run has stopped accepting Go work, so a timer that already fired is a no-op
+	s.flushUser()                // an utterance the model never answered is still part of the history
+	s.dropPendingToolResponses() // no socket left to replay them on; say so rather than lose them silently
 	if !s.Closing() {
 		s.Emit(gptlive.Error{Err: errors.New("geminilive: connection lost: " + s.Scrub(fmt.Sprint(err))), Recoverable: false})
 	}
