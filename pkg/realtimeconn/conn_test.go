@@ -3,6 +3,8 @@ package realtimeconn
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,5 +230,55 @@ func TestGoRejectsWorkOnceRunBeginsShuttingDownButEmitStillWorks(t *testing.T) {
 		}
 	default:
 		t.Fatal("Emit was rejected before ended was set")
+	}
+}
+
+// TestSendTimesOutAndClosesTheSocketWhenTheVendorStopsReading pins the write deadline.
+// The server upgrades and then never reads, so once the kernel buffers fill, a write has
+// nowhere to go: without a deadline this blocks the caller (for Grok, the read goroutine)
+// forever. Send must fail with a timeout instead, and must close the socket so Run's read
+// loop ends rather than leaving a connection gorilla can no longer write a frame on.
+func TestSendTimesOutAndClosesTheSocketWhenTheVendorStopsReading(t *testing.T) {
+	defer func(d time.Duration) { writeTimeout = d }(writeTimeout)
+	writeTimeout = 250 * time.Millisecond
+
+	var up websocket.Upgrader
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		time.Sleep(5 * time.Second) // never reads: the client's writes back up
+	}))
+	defer srv.Close()
+
+	ws, err := Dial(context.Background(), wsURL(srv), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(ws)
+	ended := make(chan error, 1)
+	go c.Run(func([]byte) {}, nil, func(err error) { ended <- err })
+
+	payload := strings.Repeat("x", 256*1024)
+	var sendErr error
+	deadline := time.Now().Add(20 * time.Second)
+	for i := 0; sendErr == nil && time.Now().Before(deadline); i++ {
+		sendErr = c.Send(map[string]any{"pad": payload})
+	}
+	if sendErr == nil {
+		t.Fatal("Send never failed: no write deadline is in force")
+	}
+	var netErr net.Error
+	if !errors.As(sendErr, &netErr) || !netErr.Timeout() {
+		t.Fatalf("Send error = %v, want a write timeout", sendErr)
+	}
+	// The socket is closed, so the read loop ends on its own instead of holding a session
+	// that can never speak again.
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not end after the write deadline closed the socket")
 	}
 }

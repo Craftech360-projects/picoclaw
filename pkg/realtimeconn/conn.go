@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,16 @@ import (
 )
 
 const toolTimeout = 30 * time.Second // same bound as gptlive's delegated tool calls
+
+// writeTimeout bounds one socket write. Without it a vendor that stops reading
+// (TCP backpressure, a stalled proxy) blocks the writer forever behind writeMu —
+// and with it every other writer, including a read loop that sends on the same
+// socket. The session then goes mute with no audio, no barge-in, no Closed and
+// no error, so nothing tears the room down and the child hears silence until the
+// job ends. 10s is the upper end of what the vendors' own SDKs use and is orders
+// of magnitude above a healthy write (the mic pushes a 100ms frame every 100ms).
+// A var only so tests can shrink it.
+var writeTimeout = 10 * time.Second
 
 // Dial opens a websocket. A refused upgrade is reported with the vendor's error body
 // (for example xAI's "used all available credits"), and secret is scrubbed from every
@@ -120,15 +131,32 @@ func (c *Conn) Audio() <-chan []byte         { return c.audio }
 func (c *Conn) Events() <-chan gptlive.Event { return c.events }
 func (c *Conn) Done() <-chan struct{}        { return c.done }
 
-// Send writes one JSON message on the current socket.
+// Send writes one JSON message on the current socket, under writeTimeout: a write
+// that cannot complete in that time fails instead of blocking its caller (and every
+// other writer) forever.
+//
+// A timed-out write also closes the socket. gorilla leaves a connection unusable
+// after a write deadline fires — it cannot resynchronise a half-written frame — so
+// leaving it open would only trade a blocked goroutine for a socket that reads fine
+// and can never speak again, which is the same permanent silence one step removed.
+// Closing it ends Run's read loop, which redials (Gemini) or emits the
+// non-recoverable error that tears the room session down (Grok).
 func (c *Conn) Send(v any) error {
 	c.mu.Lock()
 	ws, sock := c.ws, c.sock
 	c.mu.Unlock()
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	_ = ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 	err := ws.WriteJSON(v)
-	if err != nil && sock.sendFails.Add(1) == 1 {
+	c.writeMu.Unlock()
+	if err == nil {
+		return nil
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		_ = ws.Close()
+	}
+	if sock.sendFails.Add(1) == 1 {
 		// once per socket: the mic pushes every 100ms, and the socket-end line carries the count
 		logger.WarnCF("realtime", "vendor socket send failed; later failures on this socket are only counted", map[string]any{
 			"socket_seq": sock.seq, "error": truncate(c.scrub(err.Error())),
