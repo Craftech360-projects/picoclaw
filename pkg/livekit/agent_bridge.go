@@ -674,6 +674,26 @@ func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey st
 		return "", 0, nil
 	}
 
+	batch := ab.sessionConversation(sessionKey)
+	if len(batch) == 0 {
+		return ab.sessions.GetSummary(sessionKey), 0, nil
+	}
+
+	existingSummary := ab.sessions.GetSummary(sessionKey)
+	newSummary, err := ab.bridgeSummarizeBatch(ctx, batch, existingSummary)
+	if err != nil || strings.TrimSpace(newSummary) == "" {
+		return "", len(batch), err
+	}
+
+	ab.sessions.SetSummary(sessionKey, newSummary)
+	_ = ab.sessions.Save(sessionKey)
+	return newSummary, len(batch), nil
+}
+
+// sessionConversation is the session's user/assistant turns still in history,
+// falling back to the transcript when history is empty. Turns already folded into
+// the rolling summary are not here; callers that need them read GetSummary too.
+func (ab *AgentBridge) sessionConversation(sessionKey string) []providers.Message {
 	history := ab.sessions.GetHistory(sessionKey)
 	if len(history) == 0 {
 		for _, msg := range ab.TranscriptSnapshot() {
@@ -694,19 +714,7 @@ func (ab *AgentBridge) FinalizeSessionSummary(ctx context.Context, sessionKey st
 			batch = append(batch, msg)
 		}
 	}
-	if len(batch) == 0 {
-		return ab.sessions.GetSummary(sessionKey), 0, nil
-	}
-
-	existingSummary := ab.sessions.GetSummary(sessionKey)
-	newSummary, err := ab.bridgeSummarizeBatch(ctx, batch, existingSummary)
-	if err != nil || strings.TrimSpace(newSummary) == "" {
-		return "", len(batch), err
-	}
-
-	ab.sessions.SetSummary(sessionKey, newSummary)
-	_ = ab.sessions.Save(sessionKey)
-	return newSummary, len(batch), nil
+	return batch
 }
 
 // ChatStream sends a user message through the LLM and streams the response.

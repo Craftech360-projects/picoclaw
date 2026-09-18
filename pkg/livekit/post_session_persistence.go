@@ -128,6 +128,11 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 					"error":    err.Error(),
 				})
 			}
+			// Same gate as the summary: a preempted handoff skips both, since the
+			// next session is waiting on the workspace lock.
+			factsCtx, factsCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			rs.persistChildFacts(factsCtx, bridge)
+			factsCancel()
 		}
 
 		if len(messages) > 0 {

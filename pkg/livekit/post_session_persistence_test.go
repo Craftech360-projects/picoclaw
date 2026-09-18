@@ -233,6 +233,11 @@ func TestPersistPostSessionDataSavesSummaryAndChatHistoryBeforeSessionEnd(t *tes
 			order = append(order, "end")
 		case "/agent/chat-history/session":
 			order = append(order, "chat-history")
+		case "/agent/device/aa:bb:cc:dd:ee:ff/facts":
+			// Unpaired device: no facts extraction follows.
+			order = append(order, "facts")
+			_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"kidId":null,"facts":[]}}`))
+			return
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -299,6 +304,11 @@ func TestPersistPostSessionDataSkipsSummaryOnPreemptedTeardown(t *testing.T) {
 			order = append(order, "end")
 		case "/agent/chat-history/session":
 			order = append(order, "chat-history")
+		case "/agent/device/aa:bb:cc:dd:ee:ff/facts":
+			// Unpaired device: no facts extraction follows.
+			order = append(order, "facts")
+			_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"kidId":null,"facts":[]}}`))
+			return
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
