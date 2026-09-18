@@ -182,7 +182,7 @@ func TestSendSessionSummaryAndEnd(t *testing.T) {
 		roomInfo:         &protocol.Room{Name: "session-1"},
 	}
 
-	if err := rs.sendSessionSummary(context.Background(), "summary text", 4); err != nil {
+	if err := rs.sendSessionSummary(context.Background(), "summary text", 4, "gpt-test"); err != nil {
 		t.Fatalf("sendSessionSummary returned error: %v", err)
 	}
 	if err := rs.sendSessionEnd(context.Background(), 4); err != nil {
@@ -193,6 +193,9 @@ func TestSendSessionSummaryAndEnd(t *testing.T) {
 	}
 	if summaryPayload["sourceMessageCount"] != float64(4) {
 		t.Fatalf("sourceMessageCount payload = %+v", summaryPayload)
+	}
+	if summaryPayload["model"] != "gpt-test" {
+		t.Fatalf("model payload = %+v", summaryPayload)
 	}
 	if endPayload["status"] != "ended" {
 		t.Fatalf("end payload = %+v", endPayload)

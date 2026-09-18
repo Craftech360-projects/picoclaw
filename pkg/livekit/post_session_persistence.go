@@ -121,7 +121,7 @@ func (rs *RoomSession) persistPostSessionData(bridge *AgentBridge) {
 		defer persistCancel()
 
 		if summary != "" {
-			if err := rs.sendSessionSummary(persistCtx, summary, summaryMessageCount); err != nil {
+			if err := rs.sendSessionSummary(persistCtx, summary, summaryMessageCount, bridge.modelID); err != nil {
 				logger.WarnCF("livekit", "Failed to persist session summary to manager", map[string]any{
 					"room":     rs.roomName(),
 					"messages": summaryMessageCount,
@@ -361,7 +361,9 @@ func (rs *RoomSession) persistSummaryToMemoryFile(bridge *AgentBridge, summary s
 	return nil
 }
 
-func (rs *RoomSession) sendSessionSummary(ctx context.Context, summary string, sourceMessageCount int) error {
+// model is the one bridgeSummarizeBatch summarised with (the bridge's model), so
+// the manager can tell which model wrote which summary.
+func (rs *RoomSession) sendSessionSummary(ctx context.Context, summary string, sourceMessageCount int, model string) error {
 	if strings.TrimSpace(summary) == "" {
 		return nil
 	}
@@ -378,6 +380,9 @@ func (rs *RoomSession) sendSessionSummary(ctx context.Context, summary string, s
 	}
 	if rs.agentID != "" {
 		payload["agentId"] = rs.agentID
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		payload["model"] = model
 	}
 	headers := managerAPIServiceHeaders(rs.managerAPISecret)
 
