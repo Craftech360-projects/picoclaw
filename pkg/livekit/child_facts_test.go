@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,33 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
+
+func TestRestoreChildFactsWritesStateFileAndClearsItWithoutAChild(t *testing.T) {
+	reply := `{"code":0,"data":{"kidId":"77","facts":[{"category":"pet","subject":"dog","fact":"Has a dog named Bruno"}]}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/device/aa:bb:cc:dd:ee:ff/facts" || r.URL.Query().Get("limit") != "20" {
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+		_, _ = w.Write([]byte(reply))
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	path := filepath.Join(stateDir(workspace), ChildFactsStateFile)
+
+	RestoreChildFacts(context.Background(), server.URL, "secret", "aa:bb:cc:dd:ee:ff", workspace)
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), "- Has a dog named Bruno") {
+		t.Fatalf("state file = %q, err = %v", data, err)
+	}
+
+	// The toy is unpaired (or handed to a sibling): the previous facts must go.
+	reply = `{"code":0,"data":{"kidId":null,"facts":[]}}`
+	RestoreChildFacts(context.Background(), server.URL, "secret", "aa:bb:cc:dd:ee:ff", workspace)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("state file still present after unpairing: %v", err)
+	}
+}
 
 func TestParseChildFactsFindsArrayInsideProseAndDropsEmptyItems(t *testing.T) {
 	reply := "Sure!\n```json\n[{\"category\":\"pet\",\"subject\":\"dog\",\"fact\":\"Has a dog named Bruno\"},{\"category\":\"likes\",\"subject\":\"\",\"fact\":\"x\"}]\n```"

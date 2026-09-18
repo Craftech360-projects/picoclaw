@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,16 +138,74 @@ func (rs *RoomSession) persistChildFacts(ctx context.Context, bridge *AgentBridg
 	logger.InfoCF("livekit", "Child facts persisted", map[string]any{"room": rs.roomName(), "facts": len(facts)})
 }
 
+func childFactsURL(baseURL, deviceMac, suffix string) string {
+	return strings.TrimRight(baseURL, "/") + "/agent/device/" + url.PathEscape(deviceMac) + suffix
+}
+
 func (rs *RoomSession) childFactsURL(suffix string) string {
-	return strings.TrimRight(rs.managerAPIURL, "/") + "/agent/device/" + url.PathEscape(rs.deviceMAC) + suffix
+	return childFactsURL(rs.managerAPIURL, rs.deviceMAC, suffix)
 }
 
 func (rs *RoomSession) fetchChildFacts(ctx context.Context) ([]childFact, bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rs.childFactsURL("/facts"), nil)
+	return fetchChildFacts(ctx, rs.managerAPIURL, rs.managerAPISecret, rs.deviceMAC, 0)
+}
+
+// ChildFactsStateFile is where the facts land for the prompt. It is written
+// fresh every session from the database and never uploaded (see the workspace
+// sync excludes), so the database stays the only stored copy.
+const ChildFactsStateFile = "child_facts.md"
+
+// childFactsPromptLimit keeps the prompt block to roughly 150-300 tokens.
+const childFactsPromptLimit = 20
+
+// RestoreChildFacts writes the child's newest facts to memory/state/child_facts.md,
+// where the memory context picks them up with the other state files. Anything
+// short of "a child with facts" removes the file, so a toy that changed hands
+// or lost its pairing never speaks from someone else's facts. Exported for
+// cmd/picoclaw-livekit; failures are logged, never fatal.
+func RestoreChildFacts(ctx context.Context, baseURL, serviceKey, deviceMac, workspace string) {
+	deviceMac = strings.TrimSpace(deviceMac)
+	if deviceMac == "" || strings.TrimSpace(baseURL) == "" || strings.TrimSpace(workspace) == "" {
+		return
+	}
+	path := filepath.Join(stateDir(workspace), ChildFactsStateFile)
+
+	facts, hasChild, err := fetchChildFacts(ctx, baseURL, serviceKey, deviceMac, childFactsPromptLimit)
+	if err != nil {
+		logger.DebugCF("livekit", "Child facts restore failed", map[string]any{"error": err.Error()})
+	}
+	if err != nil || !hasChild || len(facts) == 0 {
+		_ = os.Remove(path)
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("What you know about this child (from earlier sessions, newest first). Use it naturally; never recite it as a list.\n")
+	for _, f := range facts {
+		sb.WriteString("- ")
+		sb.WriteString(strings.TrimSpace(f.Fact))
+		sb.WriteString("\n")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o600); err != nil {
+		logger.WarnCF("livekit", "Child facts write failed", map[string]any{"error": err.Error()})
+	}
+}
+
+// fetchChildFacts reads the device's child facts; limit 0 takes the API default.
+// hasChild is false for an unpaired device.
+func fetchChildFacts(ctx context.Context, baseURL, serviceKey, deviceMac string, limit int) ([]childFact, bool, error) {
+	endpoint := childFactsURL(baseURL, deviceMac, "/facts")
+	if limit > 0 {
+		endpoint += "?limit=" + strconv.Itoa(limit)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	for k, v := range managerAPIServiceHeaders(rs.managerAPISecret) {
+	for k, v := range managerAPIServiceHeaders(serviceKey) {
 		req.Header.Set(k, v)
 	}
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)

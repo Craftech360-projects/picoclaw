@@ -176,7 +176,9 @@ func workspaceExcludePatternMatches(rel, pattern string) bool {
 }
 
 func workspaceSyncExcludePatterns(cfg *config.LiveKitServiceManagerAPIConfig) []string {
-	defaults := []string{"trace/**", "logs/**", "*.log", ".picoclaw/sync-outbox/**", "skills/**"}
+	// memory/state/child_facts.md is re-read from the database every session;
+	// uploading it would put a second copy of the child's facts on the server.
+	defaults := []string{"trace/**", "logs/**", "*.log", ".picoclaw/sync-outbox/**", "skills/**", "memory/state/child_facts.md"}
 	if cfg == nil || len(cfg.WorkspaceSync.ExcludePatterns) == 0 {
 		return defaults
 	}

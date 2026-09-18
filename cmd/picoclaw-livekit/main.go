@@ -937,6 +937,11 @@ func main() {
 			restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			livekit.RestoreCharacterState(restoreCtx, lkCfg.ManagerAPI, managerAPIServiceKey(), deviceMAC, workspace)
 			restoreCancel()
+			// The child's lasting facts, fetched once per session (never per turn),
+			// land in memory/state/ beside the character state.
+			factsCtx, factsCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			livekit.RestoreChildFacts(factsCtx, managerAPIBaseURL(lkCfg.ManagerAPI), managerAPIServiceKey(), deviceMAC, workspace)
+			factsCancel()
 		}
 		// The Manager's stored USER.md wins over the metadata seed on every session
 		// after the first, so a portal profile edit only lands if we merge it back
